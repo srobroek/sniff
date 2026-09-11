@@ -287,8 +287,9 @@ async function inspectTool(
 	}
 	const attempts: ProbeAttempt[] = [];
 	const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
+	const probeTimeoutMs = rec.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
 	for (const args of probeArgs) {
-    const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, PROBE_TIMEOUT_MS, signal);
+		const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, probeTimeoutMs, signal);
 		attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
 		if (result.exitCode === 0 && !result.timedOut && !result.error) {
 			return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };

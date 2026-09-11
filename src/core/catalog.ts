@@ -35,6 +35,8 @@ export type ToolRec = {
 	readonly pkg?: string;
 	readonly miseSpec?: string;
 	readonly probeArgs?: readonly (readonly string[])[];
+	/** Optional per-tool probe ceiling; defaults to the global 1.5 second ceiling. */
+	readonly probeTimeoutMs?: number;
 	readonly runPrefix?: readonly string[];
 	readonly hostPackages?: readonly string[];
 	readonly hostPackageConfigNames?: Readonly<Record<string, readonly string[]>>;
@@ -102,6 +104,7 @@ export const TOOLS = {
 			bin: "semgrep",
 			key: "pipx",
 			hint: "pipx install semgrep (or: brew install semgrep)",
+			probeTimeoutMs: 5_000,
 		},
 		{ name: "lizard", bin: "lizard", key: "pipx", hint: "pipx install lizard" },
 		{

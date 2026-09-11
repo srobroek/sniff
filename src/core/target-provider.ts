@@ -353,7 +353,7 @@ export async function resolveProviderTarget(request: TargetRequest, runner: Argv
 }
 
 export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv): Promise<ResolvedTarget> {
-  return request.kind === "working-tree" || request.kind === "files" || request.kind === "directory" || request.kind === "module" || request.kind === "commit" || request.kind === "range" || request.kind === "branch" || request.kind === "ref"
+  return request.kind === "whole-repo" || request.kind === "working-tree" || request.kind === "files" || request.kind === "directory" || request.kind === "module" || request.kind === "commit" || request.kind === "range" || request.kind === "branch" || request.kind === "ref"
     ? resolveLocalTarget(request, runner)
     : resolveProviderTarget(request, runner);
 }

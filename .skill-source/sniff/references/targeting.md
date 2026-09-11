@@ -5,17 +5,16 @@
 - Before analysis, resolve scope.
 - List every file in the resolved target.
 - Do not change commit IDs after resolution.
-- Use in-place work for files and working-tree targets.
-- Hold each immutable commit target in a host-owned lease.
-- Release the lease exactly once after terminal report success or failure.
+- Use in-place work only for files and working-tree targets.
+- A whole-repo target means the committed `HEAD` snapshot, not current uncommitted changes: resolve its full SHA, enumerate `git ls-tree -r --name-only <sha>`, and materialize a temporary checkout.
+- Hold each immutable commit, whole-repo, and remote target in a host-owned lease.
 - Use `sniff_cancel` for abandoned runs.
 - Let lease expiry remove the checkout and isolated analyzer home without another caller action.
 
 ## Target kinds
 
 | Kind | Resolution | Materialization |
-| --- | --- | --- |
-| Whole repo | repo root and `.gitignore` | in place |
+| Whole repo | committed `HEAD` tree (full SHA and every committed file) | temporary checkout |
 | Language or area | matching extensions or area globs | in place or layered |
 | Module or directory | subtree glob | in place |
 | Files | explicit paths | in place |
@@ -28,6 +27,8 @@
 | PR or MR | provider changed paths and base/head SHAs | temporary checkout |
 | Release or tag | snapshot and optional previous-tag delta | temporary checkout |
 | History | commit window and changed paths | temporary checkout |
+
+The core request kind is exact and closed: `whole-repo`, `working-tree`, `files`, `directory`, `module`, `commit`, `range`, `branch`, `ref`, `repository`, `pr`, `mr`, `release`, or `history`. “Whole repo” means the committed snapshot; use `working-tree` only when the user asks for uncommitted changes.
 
 ## Git commands
 

@@ -223,28 +223,66 @@ const errorSchema = {
   additionalProperties: true,
 } as const;
 
+const historyWindowSchema = {
+  type: "object",
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "base", "head"],
+      properties: { kind: { const: "refs" }, base: stringSchema, head: stringSchema },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "date"],
+      properties: { kind: { const: "since-date" }, date: stringSchema, head: stringSchema },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "count"],
+      properties: { kind: { const: "last-commits" }, count: { type: "integer", minimum: 1 }, head: stringSchema },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind", "release"],
+      properties: { kind: { const: "since-release" }, release: stringSchema, head: stringSchema },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind"],
+      properties: { kind: { const: "previous-release" }, release: stringSchema, head: stringSchema },
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["kind"],
+      properties: { kind: { const: "context-aware-default" }, head: stringSchema },
+    },
+  ],
+} as const;
+
 const targetSchema = {
   type: "object",
-  additionalProperties: true,
-  required: ["kind"],
-  properties: {
-    kind: stringSchema,
-    root: stringSchema,
-    path: stringSchema,
-    paths: { type: "array", items: stringSchema, maxItems: MAX_INPUT_ARRAY_LENGTH },
-    commit: stringSchema,
-    base: stringSchema,
-    head: stringSchema,
-    branch: stringSchema,
-    ref: stringSchema,
-    repository: stringSchema,
-    tag: stringSchema,
-    previousTag: stringSchema,
-    iid: { oneOf: [stringSchema, { type: "integer" }] },
-    number: { oneOf: [stringSchema, { type: "integer" }] },
-    rootOrRepository: stringSchema,
-    window: { type: "object" },
-  },
+  oneOf: [
+    { type: "object", additionalProperties: false, required: ["kind", "root"], properties: { kind: { const: "whole-repo" }, root: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root"], properties: { kind: { const: "working-tree" }, root: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "paths"], properties: { kind: { const: "files" }, root: stringSchema, paths: { type: "array", items: stringSchema, maxItems: MAX_INPUT_ARRAY_LENGTH } } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "path"], properties: { kind: { const: "directory" }, root: stringSchema, path: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "path"], properties: { kind: { const: "module" }, root: stringSchema, path: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "commit"], properties: { kind: { const: "commit" }, root: stringSchema, commit: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "base", "head"], properties: { kind: { const: "range" }, root: stringSchema, base: stringSchema, head: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "branch"], properties: { kind: { const: "branch" }, root: stringSchema, branch: stringSchema, base: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "root", "ref"], properties: { kind: { const: "ref" }, root: stringSchema, ref: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "repository"], properties: { kind: { const: "repository" }, repository: stringSchema, ref: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "repository", "tag"], properties: { kind: { const: "release" }, repository: stringSchema, tag: stringSchema, previousTag: stringSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "rootOrRepository", "window"], properties: { kind: { const: "history" }, rootOrRepository: stringSchema, window: historyWindowSchema } },
+    { type: "object", additionalProperties: false, required: ["kind", "repository", "number"], properties: { kind: { const: "pr" }, repository: stringSchema, number: { oneOf: [stringSchema, { type: "integer" }] } } },
+    { type: "object", additionalProperties: false, required: ["kind", "repository", "iid"], properties: { kind: { const: "mr" }, repository: stringSchema, iid: { oneOf: [stringSchema, { type: "integer" }] } } },
+  ],
 } as const;
 
 const intakeInputSchema = {
@@ -597,20 +635,43 @@ async function elicitDigest(request: DigestRequest, signal: AbortSignal, label: 
   };
 }
 
+function isElicitationFailure(error: unknown): boolean {
+  const candidate = error as { readonly code?: unknown; readonly name?: unknown; readonly message?: unknown };
+  const code = String(candidate?.code ?? "").toLowerCase();
+  const name = String(candidate?.name ?? "").toLowerCase();
+  const message = String(candidate?.message ?? error ?? "").toLowerCase();
+  return code === "-32601" || code.includes("method_not_found") || code.includes("timeout") || code.includes("elicitation") || name.includes("timeout") || /elicitation|confirmation|method\s*not\s*found|timed?\s*out|timeout/i.test(message);
+}
+
+function confirmationRequiredError(): SniffMcpError {
+  return new SniffMcpError("confirmation_required", "MCP form elicitation did not produce trusted confirmation; retry with an interactive MCP client.");
+}
+
 async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const input = intakeInput(args.input);
   if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
   const frontier = decisionFrontier(input);
   if (!frontier.plan) return toolSuccess({ ok: true, interview: frontier }, JSON.stringify(frontier));
-  if (!supportsFormElicitation()) {
+  const noninteractive = input.interactive === false;
+  if (!noninteractive && !supportsFormElicitation()) {
     return toolSuccess(
       { ok: false, interview: frontier, confirmationRequired: true, error: { code: "confirmation_required", message: "MCP form elicitation is required before issuing a lease" } },
       "Sniff intake requires MCP form elicitation; no lease was issued.",
     );
   }
   const resultPromise = runSniffIntakeTool(
-    { input: { ...input, interactive: true } },
-    { confirmInteractive: (request) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request."), },
+    { input: noninteractive ? input : { ...input, interactive: true } },
+    noninteractive
+      ? {
+          authority: {
+            authorize: async (request) => ({
+              acceptedDigest: request.digest,
+              actor: "mcp-headless-read-authority",
+              reason: "Explicit interactive:false requests a server-owned noninteractive read authorization for this exact intake digest.",
+            }),
+          },
+        }
+      : { confirmInteractive: (request) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request.") },
   );
   const result = await raceWithAbort(resultPromise, signal).catch((error) => {
     void resultPromise.then(
@@ -626,6 +687,7 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
         // The core rejection was observed; never leave a late promise unhandled.
       },
     );
+    if (!noninteractive && isElicitationFailure(error)) throw confirmationRequiredError();
     throw error;
   });
   if (signal.aborted) {

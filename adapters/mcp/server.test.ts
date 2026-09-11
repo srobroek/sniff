@@ -266,6 +266,55 @@ describe("MCP Sniff server", () => {
     }
   });
 
+  test("issues a lifecycle lease for explicit noninteractive intake without elicitation", async () => {
+    const root = repository();
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "headless-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false } } })).result);
+      const structured = object(intake.structuredContent);
+      expect(structured.ok).toBe(true);
+      expect(client.elicitationParams).toHaveLength(0);
+      const manifest = object(structured.manifest);
+      expect(manifest.authorization).toMatchObject({ required: true, actor: "mcp-headless-read-authority", reason: expect.stringContaining("server-owned") });
+      expect(manifest).not.toHaveProperty("sandboxGrant");
+      const lease = object(structured.lease);
+      expect(typeof lease.capability).toBe("string");
+      expect(typeof lease.manifestId).toBe("string");
+      const cancelled = object((await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } })).result);
+      expect(object(cancelled.structuredContent).released).toBe(true);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("advertises exact discriminated intake target variants", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "schema-test", version: "1" } });
+      const tools = object((await client.request("tools/list")).result).tools as Message[];
+      const intakeTool = tools.find((tool) => tool.name === "sniff_intake");
+      if (!intakeTool) throw new Error("Missing sniff_intake tool");
+      const inputSchema = object(intakeTool.inputSchema);
+      const inputProperties = object(inputSchema.properties);
+      const intakeInput = object(inputProperties.input);
+      const targetSchema = object(object(intakeInput.properties).target);
+      const variants = targetSchema.oneOf as Message[];
+      expect(variants).toHaveLength(14);
+      const wholeRepo = variants.find((variant) => object(object(variant).properties).kind && object(object(object(variant).properties).kind).const === "whole-repo");
+      expect(wholeRepo).toBeDefined();
+      const validate = new Ajv2020({ strict: false }).compile(targetSchema as Record<string, unknown>);
+      expect(validate({ kind: "whole-repo", root: "/tmp/repo" })).toBe(true);
+      expect(validate({ kind: "working-tree", root: "/tmp/repo", path: "src" })).toBe(false);
+      expect(validate({ kind: "whole-repo", root: "/tmp/repo", extra: true })).toBe(false);
+      expect(validate({ kind: "unknown", root: "/tmp/repo" })).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
   test("uses elicitation for confirmation and preserves cancel/replay lifecycle", async () => {
     const root = repository();
     const client = startClient();

@@ -35,7 +35,7 @@ function repository(): { root: string; git: (...args: string[]) => string } {
 }
 
 const REPORT_KIND_BY_TARGET = {
-  "working-tree": "uncommitted", files: "files", directory: "directory", module: "area", commit: "commit", range: "range",
+  "whole-repo": "whole-repo", "working-tree": "uncommitted", files: "files", directory: "directory", module: "area", commit: "commit", range: "range",
   branch: "branch", ref: "ref", repository: "repository", pr: "pr", mr: "mr", release: "release", history: "history",
 } as const satisfies Record<TargetKind, ReportTarget["kind"]>;
 

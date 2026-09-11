@@ -43,6 +43,7 @@ export interface SniffReportToolResult {
 }
 
 const REPORT_KIND_BY_TARGET: Record<RunManifest["resolvedTarget"]["kind"], ReportTarget["kind"]> = {
+	"whole-repo": "whole-repo",
 	"working-tree": "uncommitted",
 	files: "files",
 	directory: "directory",

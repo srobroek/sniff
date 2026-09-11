@@ -13,6 +13,7 @@ export type ArgvResult = {
 export type ArgvRunner = (argv: readonly string[], options?: { readonly cwd?: string }) => ArgvResult | Promise<ArgvResult>;
 
 export type TargetKind =
+  | "whole-repo"
   | "working-tree"
   | "files"
   | "directory"
@@ -36,6 +37,7 @@ export type HistoryWindow =
   | { readonly kind: "context-aware-default"; readonly head?: string };
 
 export type TargetRequest =
+  | { readonly kind: "whole-repo"; readonly root: string }
   | { readonly kind: "working-tree"; readonly root: string }
   | { readonly kind: "files"; readonly root: string; readonly paths: readonly string[] }
   | { readonly kind: "directory" | "module"; readonly root: string; readonly path: string }
@@ -48,6 +50,7 @@ export type TargetRequest =
   | { readonly kind: "history"; readonly rootOrRepository: string; readonly window: HistoryWindow }
   | { readonly kind: "pr"; readonly repository: string; readonly number: string | number }
   | { readonly kind: "mr"; readonly repository: string; readonly iid: string | number };
+
 
 export type TargetChange = {
   readonly path: string;
@@ -309,6 +312,11 @@ async function resolveWorkingTree(root: string, runner: ArgvRunner): Promise<Res
 
 export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver): Promise<ResolvedTarget> {
   switch (request.kind) {
+    case "whole-repo": {
+      const root = ensureRoot(request.root);
+      const head = await immutableRef(runner, root, "HEAD");
+      return { kind: "whole-repo", label: "whole repository", root, files: await snapshotFiles(runner, root, head), headRef: head, immutableRef: head, materialization: "temporary-checkout" };
+    }
     case "working-tree":
       return resolveWorkingTree(request.root, runner);
     case "files": {

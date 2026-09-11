@@ -106,6 +106,41 @@ describe("sniff tool catalog", () => {
 	});
 });
 
+describe("probe timeouts", () => {
+	test("uses Semgrep's extended bounded timeout without changing ordinary tools", async () => {
+		const calls: Array<{ bin: string; timeoutMs: number }> = [];
+		const result = await runSniffInstall({
+			mode: "diagnose",
+			bundles: ["core"],
+			runtime: fakeRuntime({
+				run: async (argv, _cwd, _env, timeoutMs) => {
+					calls.push({ bin: (argv.at(0) ?? "").split("/").pop() ?? "", timeoutMs });
+					return commandResult(argv, timeoutMs);
+				},
+			}),
+		});
+		expect(result.ok).toBe(true);
+		expect(calls.find(({ bin }) => bin === "semgrep")?.timeoutMs).toBe(5_000);
+		expect(calls.filter(({ bin }) => bin !== "semgrep").every(({ timeoutMs }) => timeoutMs === 1_500)).toBe(true);
+	});
+
+	test("does not oscillate status at the old timeout boundary", async () => {
+		const statuses: string[] = [];
+		const runtime = fakeRuntime({
+			run: async (argv, _cwd, _env, timeoutMs) =>
+				commandResult(argv, timeoutMs, {
+					exitCode: 1,
+					stderr: timeoutMs === 1_500 ? "boundary crossed" : "",
+				}),
+		});
+		for (const _ of [0, 1]) {
+			const result = await runSniffInstall({ mode: "diagnose", bundles: ["core"], runtime });
+			statuses.push(result.tools.find((tool) => tool.tool === "semgrep")?.status ?? "");
+		}
+		expect(statuses).toEqual(["unrunnable", "unrunnable"]);
+	});
+});
+
 describe("runSniffInstall", () => {
 	test("list mode preserves bundle inventory", async () => {
 		const result = await runSniffInstall({ mode: "list" });
