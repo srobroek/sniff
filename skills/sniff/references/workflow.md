@@ -302,9 +302,11 @@ this step only in **quick** mode.
 
 ## Step 7 -- Report and (optional) apply
 
-1. Build one canonical JSON report conforming to `references/report.schema.json`.
+1. Build one report input conforming to `references/report-input.schema.json`.
    Include every challenged finding, its evidence tier, impact, value, cost,
    compatibility, adversarial verdict, coverage result, suppression count, and systemic pattern.
+   Set `stableKey` to the analyzer and rule identity. Set `location.anchor` to a symbol or stable
+   structural fingerprint. Never derive either field from presentation text or evidence wording.
    Evidence tier measures confidence; impact measures consequence. Never derive one from the other.
 2. Call `sniff_report` in `render` mode. Present its deterministic Markdown and validation receipt.
    Render mode is ephemeral and writes nothing.

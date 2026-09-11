@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,7 +23,8 @@ afterEach(() => {
 function finding(overrides: Partial<FindingInput> = {}): FindingInput {
   return {
     title: "Parser mixes transport and validation",
-    location: { path: "src/parser.ts", line: 42 },
+    stableKey: "bloodhound:long-method",
+    location: { path: "src/parser.ts", line: 42, anchor: "parseRequest" },
     evidence: { tier: "observed", source: "bloodhound", detail: "The function has 87 lines and three responsibilities." },
     impact: "medium",
     value: "high",
@@ -74,21 +75,28 @@ function reportInput(findings: FindingInput[] = [finding()]): ReportInput {
 }
 
 describe("structured Sniff reports", () => {
-  test("assigns stable structural finding and report IDs", () => {
+  test("keeps finding IDs stable across presentation and evidence changes", () => {
     const input = finding();
     const first = buildSniffReport(reportInput([input]));
-    const second = buildSniffReport({ ...reportInput([{ ...input }]), generatedAt: "2027-01-01T00:00:00.000Z" });
+    const revised = finding({
+      title: "Parser combines validation with transport",
+      location: { ...input.location, line: 57 },
+      evidence: { tier: "reproduced", source: "integration-test", detail: "A fixture now reproduces both branches." },
+    });
+    const second = buildSniffReport(reportInput([revised]));
+    const later = buildSniffReport({ ...reportInput([input]), generatedAt: "2027-01-01T00:00:00.000Z" });
 
     expect(first.findings[0]?.id).toBe(deterministicFindingId(input));
     expect(first.findings[0]?.id).toBe(second.findings[0]?.id);
-    expect(first.reportId).toBe(second.reportId);
+    expect(first.reportId).not.toBe(second.reportId);
+    expect(first.reportId).toBe(later.reportId);
   });
 
   test("keeps evidence confidence independent from impact", () => {
     const report = buildSniffReport(
       reportInput([
         finding({ title: "Proven typo", evidence: { tier: "reproduced", source: "test", detail: "Fixture reproduces it." }, impact: "low" }),
-        finding({ title: "Unverified data loss", location: { path: "src/store.ts", line: 9 }, evidence: { tier: "hypothesis", source: "review", detail: "Reachable path needs reproduction." }, impact: "critical" }),
+        finding({ stableKey: "review:data-loss", title: "Unverified data loss", location: { path: "src/store.ts", line: 9, anchor: "Store.write" }, evidence: { tier: "hypothesis", source: "review", detail: "Reachable path needs reproduction." }, impact: "critical" }),
       ]),
     );
 
@@ -101,7 +109,8 @@ describe("structured Sniff reports", () => {
   test("retains dropped findings while census excludes them from impact totals", () => {
     const dropped = finding({
       title: "Suggested wrapper adds no policy",
-      location: { path: "src/value.ts", line: 7 },
+      stableKey: "review:weightless-wrapper",
+      location: { path: "src/value.ts", line: 7, anchor: "normalizeValue" },
       adversarial: { verdict: "drop", reason: "The wrapper would only rename one expression." },
       impact: "high",
     });
@@ -133,7 +142,7 @@ describe("structured Sniff reports", () => {
 
   test("requires a surface for breaking compatibility", () => {
     expect(() => buildSniffReport(reportInput([finding({ compatibility: { kind: "breaking" } })]))).toThrow(
-      "compatibility.surface is required",
+      "required property 'surface'",
     );
   });
 
@@ -148,17 +157,65 @@ describe("structured Sniff reports", () => {
     expect(first.receipt.reportSha256).toHaveLength(64);
   });
 
-  test("persists only through the explicit save operation and refuses overwrite", () => {
-    const directory = mkdtempSync(join(tmpdir(), "sniff-report-"));
-    temporaryDirectories.push(directory);
-    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
-    const expectedJson = join(directory, `${artifacts.report.reportId}.json`);
+  test("validates the complete input and output schemas", () => {
+    const extraField = { ...reportInput(), unexpected: true };
+    expect(() => buildSniffReport(extraField)).toThrow("additional properties");
+    const duplicateLanguages = reportInput();
+    duplicateLanguages.target.languages = ["TypeScript", "TypeScript"];
+    expect(() => buildSniffReport(duplicateLanguages)).toThrow("duplicate items");
+    expect(() => buildSniffReport(reportInput([finding({ value: "urgent" as never })]))).toThrow("allowed values");
+    expect(() => buildSniffReport(reportInput([finding({ smell: { name: "Long Method", url: "javascript:alert(1)" } })]))).toThrow(
+      "pattern",
+    );
+  });
 
-    expect(existsSync(expectedJson)).toBe(false);
-    const paths = saveReportArtifacts(artifacts, directory);
-    expect(paths).toHaveLength(3);
-    expect(readFileSync(expectedJson, "utf8")).toBe(artifacts.json);
-    expect(() => saveReportArtifacts(artifacts, directory)).toThrow();
+  test("canonicalizes equivalent object and collection order", () => {
+    const firstInput = reportInput([finding(), finding({ stableKey: "review:second", location: { path: "src/second.ts", line: 3, anchor: "second" } })]);
+    firstInput.extensions = { zeta: { second: 2, first: 1 }, alpha: true };
+    firstInput.target.languages = ["TypeScript", "JavaScript"];
+    const secondInput = reportInput([...firstInput.findings].reverse());
+    secondInput.extensions = { alpha: true, zeta: { first: 1, second: 2 } };
+    secondInput.target.languages = ["JavaScript", "TypeScript"];
+
+    const first = createReportArtifacts(buildSniffReport(firstInput));
+    const second = createReportArtifacts(buildSniffReport(secondInput));
+    expect(first.report.reportId).toBe(second.report.reportId);
+    expect(first.json).toBe(second.json);
+    expect(first.receipt).toEqual(second.receipt);
+  });
+
+  test("sorts retained findings by value per cost and discloses downgrades", () => {
+    const report = buildSniffReport(
+      reportInput([
+        finding({ stableKey: "review:large", title: "Large low value", location: { path: "src/large.ts", line: 1, anchor: "large" }, value: "low", cost: "L" }),
+        finding({ stableKey: "review:small", title: "Small high value", location: { path: "src/small.ts", line: 1, anchor: "small" }, value: "high", cost: "S", adversarial: { verdict: "downgrade", reason: "Impact lowered after call-site census." } }),
+      ]),
+    );
+    const markdown = renderSniffMarkdown(report);
+    expect(markdown.indexOf("Small high value")).toBeLessThan(markdown.indexOf("Large low value"));
+    expect(markdown).toContain("| DOWNGRADE | Impact lowered after call-site census. |");
+  });
+
+  test("escapes analyzer-controlled Markdown contexts", () => {
+    const input = reportInput([finding({ title: "# Inject <script> | value" })]);
+    input.target.label = "# target <unsafe>";
+    const markdown = renderSniffMarkdown(buildSniffReport(input));
+    expect(markdown).toContain("\\# target \\<unsafe\\>");
+    expect(markdown).toContain("\\# Inject \\<script\\> \\| value");
+  });
+
+  test("preflights every artifact collision without partial writes", () => {
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    for (const suffix of [".json", ".md", ".receipt.json"]) {
+      const directory = mkdtempSync(join(tmpdir(), "sniff-report-collision-"));
+      temporaryDirectories.push(directory);
+      const collision = join(directory, `${artifacts.report.reportId}${suffix}`);
+      writeFileSync(collision, "existing", "utf8");
+
+      expect(() => saveReportArtifacts(artifacts, directory)).toThrow("already exists");
+      expect(readdirSync(directory)).toEqual([`${artifacts.report.reportId}${suffix}`]);
+      expect(readFileSync(collision, "utf8")).toBe("existing");
+    }
   });
 
   test("tool rendering remains ephemeral unless save is explicit", () => {

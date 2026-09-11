@@ -1,9 +1,10 @@
 # Report Template
 
-The Markdown rendering produced by `sniff_report`. Build and validate the canonical JSON object
-against `report.schema.json`; never compose this document independently because that can drift
-from machine-readable findings. Every challenged finding remains in JSON. This rendering places
-KEEP and DOWNGRADE findings in the plan and DROP findings in the transparency section.
+The Markdown rendering produced by `sniff_report`. The tool validates agent input against
+`report-input.schema.json` and canonical output against `report.schema.json`; never compose this
+document independently because that can drift from machine-readable findings. Every challenged
+finding remains in JSON. The plan contains KEEP and DOWNGRADE findings; the transparency section
+contains DROP findings.
 
 Every retained finding includes impact, evidence tier, value, cost, and backwards compatibility.
 Order the plan by value-per-cost, highest first. Every finding cites `file:line` and its

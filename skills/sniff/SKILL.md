@@ -42,7 +42,7 @@ LOAD `skill://sniff/references/workflow.md` before starting. Run in order:
 6. **Adversarial pass.** Stress-test with `refactor-challenger`. Build its Brief from
    `skill://sniff/references/adversarial-brief.md`. Drop or downgrade findings it refutes.
 7. **Report & (optional) apply.** Build canonical post-challenge JSON against
-   `skill://sniff/references/report.schema.json`, then call `sniff_report` in `render` mode.
+   `skill://sniff/references/report-input.schema.json`, then call `sniff_report` in `render` mode.
    Present its Markdown and validation receipt. Save only when the user explicitly requests it,
    using `sniff_report` in `save` mode with the approved directory. Apply only explicitly approved
    low-risk/mechanical refactors, then re-run step 3 checks.
@@ -78,7 +78,7 @@ Modes: **quick** skips the full sweep/challenge; **full** runs all steps;
 | `references/refactoring-catalog.md` | Mapping |
 | `references/adversarial-brief.md` | Challenge |
 | `references/report-template.md` | Report |
-| `references/report.schema.json` | Canonical report input and output contract |
+| `references/report-input.schema.json`, `references/report.schema.json` | Strict input and output contracts |
 
 ## Agents
 

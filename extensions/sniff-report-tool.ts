@@ -50,7 +50,7 @@ export default function sniffReportTool(pi: ExtensionAPI): void {
       "Build a validated canonical Sniff JSON report and deterministic Markdown. Default render mode is ephemeral. Save mode requires an explicit output path and writes JSON, Markdown, and a validation receipt.",
     parameters: z.object({
       mode: z.enum(["render", "save"]).optional().describe("render (default) or explicit save"),
-      report: z.unknown().describe("Report input conforming to skills/sniff/references/report.schema.json, without generated ids or census"),
+      report: z.unknown().describe("Report input conforming to skills/sniff/references/report-input.schema.json"),
       path: z.string().optional().describe("Output directory required only for save mode"),
     }) as unknown as TSchema,
     execute: async (_id, params: SniffReportToolOptions) => {

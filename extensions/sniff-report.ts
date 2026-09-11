@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { assertReportInput, assertSniffReportSchema } from "./sniff-report-schema.ts";
 
 export const SNIFF_REPORT_SCHEMA_VERSION = "1.0.0" as const;
 
@@ -31,8 +32,9 @@ export interface ToolCoverage {
 
 export interface SniffFinding {
   id: string;
+  stableKey: string;
   title: string;
-  location: { path: string; line: number; column?: number };
+  location: { path: string; line: number; column?: number; anchor: string };
   evidence: { tier: EvidenceTier; source: string; detail: string };
   impact: Impact;
   value: Value;
@@ -64,9 +66,7 @@ export interface SniffReport {
   };
 }
 
-export interface FindingInput extends Omit<SniffFinding, "id"> {
-  id?: string;
-}
+export type FindingInput = Omit<SniffFinding, "id">;
 
 export interface ReportInput extends Omit<SniffReport, "schemaVersion" | "reportId" | "findings" | "census"> {
   findings: FindingInput[];
@@ -86,21 +86,29 @@ export interface ReportArtifacts {
   markdown: string;
   receipt: ValidationReceipt;
 }
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
-const IMPACTS: readonly Impact[] = ["critical", "high", "medium", "low"];
-const EVIDENCE_TIERS: readonly EvidenceTier[] = ["observed", "reproduced", "corroborated", "hypothesis"];
-const VERDICTS: readonly AdversarialVerdict[] = ["keep", "downgrade", "drop"];
-const COVERAGE_STATUSES: readonly CoverageStatus[] = ["ran", "skipped", "gap", "not-applicable"];
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => compareText(left, right))
+        .map(([key, entry]) => [key, canonicalValue(entry)]),
+    );
+  }
+  return value;
+}
 
 function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value !== null && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, entry]) => entry !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
+  return JSON.stringify(canonicalValue(value));
+}
+
+function canonicalJson(value: unknown): string {
+  return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
 }
 
 function sha256(value: string): string {
@@ -111,18 +119,15 @@ function requireCondition(condition: boolean, message: string): asserts conditio
   if (!condition) throw new Error(`Invalid Sniff report: ${message}`);
 }
 
-function requireNonEmpty(value: string, path: string): void {
-  requireCondition(typeof value === "string" && value.trim().length > 0, `${path} must be a non-empty string`);
+function normalizePath(path: string): string {
+  return path.replaceAll("\\", "/").replace(/^\.\//, "");
 }
 
 function findingIdentity(finding: FindingInput): string {
   return stableJson({
-    path: finding.location.path,
-    line: finding.location.line,
-    column: finding.location.column,
-    source: finding.evidence.source,
-    title: finding.title,
-    smell: finding.smell?.name,
+    stableKey: finding.stableKey,
+    path: normalizePath(finding.location.path),
+    anchor: finding.location.anchor,
   });
 }
 
@@ -159,17 +164,24 @@ function reportIdentity(report: Omit<SniffReport, "reportId">): string {
   });
 }
 
-export function buildSniffReport(input: ReportInput): SniffReport {
-  const findings = input.findings.map((finding) => ({ ...finding, id: finding.id ?? deterministicFindingId(finding) }));
+export function buildSniffReport(value: unknown): SniffReport {
+  assertReportInput(value);
+  const input = value;
+  const findings = input.findings
+    .map((finding) => ({ ...finding, location: { ...finding.location, path: normalizePath(finding.location.path) }, id: deterministicFindingId(finding) }))
+    .sort((left, right) => compareText(left.id, right.id));
+  const coverage = [...input.coverage].sort((left, right) =>
+    compareText(`${left.dimension}\0${left.tool}\0${left.analysisClass}`, `${right.dimension}\0${right.tool}\0${right.analysisClass}`),
+  );
   const withoutId: Omit<SniffReport, "reportId"> = {
     schemaVersion: SNIFF_REPORT_SCHEMA_VERSION,
     generatedAt: input.generatedAt,
-    target: input.target,
+    target: { ...input.target, languages: [...input.target.languages].sort(compareText) },
     headline: input.headline,
     findings,
-    coverage: input.coverage,
+    coverage,
     suppressionCount: input.suppressionCount,
-    systemicPatterns: input.systemicPatterns,
+    systemicPatterns: [...input.systemicPatterns].sort(compareText),
     extensions: input.extensions,
     census: calculateCensus(findings),
   };
@@ -178,83 +190,70 @@ export function buildSniffReport(input: ReportInput): SniffReport {
   return report;
 }
 
-export function validateSniffReport(report: SniffReport): void {
-  requireCondition(report.schemaVersion === SNIFF_REPORT_SCHEMA_VERSION, `schemaVersion must be ${SNIFF_REPORT_SCHEMA_VERSION}`);
-  requireCondition(/^report-[0-9a-f]{16}$/.test(report.reportId), "reportId must be a deterministic report id");
-  requireCondition(!Number.isNaN(Date.parse(report.generatedAt)), "generatedAt must be an ISO date-time");
-  requireNonEmpty(report.target.label, "target.label");
-  requireCondition(Number.isInteger(report.target.filesAnalyzed) && report.target.filesAnalyzed >= 0, "target.filesAnalyzed must be a non-negative integer");
-  requireNonEmpty(report.headline, "headline");
-  requireCondition(Number.isInteger(report.suppressionCount) && report.suppressionCount >= 0, "suppressionCount must be a non-negative integer");
-
+export function validateSniffReport(value: unknown): asserts value is SniffReport {
+  assertSniffReportSchema(value);
+  const report = value;
+  requireCondition(!Number.isNaN(Date.parse(report.generatedAt)), "generatedAt must be a real date-time");
   const ids = new Set<string>();
   for (const [index, finding] of report.findings.entries()) {
     requireCondition(finding.id === deterministicFindingId(finding), `findings[${index}].id does not match its structural identity`);
     requireCondition(!ids.has(finding.id), `findings[${index}].id duplicates ${finding.id}`);
     ids.add(finding.id);
-    requireNonEmpty(finding.title, `findings[${index}].title`);
-    requireNonEmpty(finding.location.path, `findings[${index}].location.path`);
-    requireCondition(Number.isInteger(finding.location.line) && finding.location.line > 0, `findings[${index}].location.line must be positive`);
-    requireCondition(EVIDENCE_TIERS.includes(finding.evidence.tier), `findings[${index}].evidence.tier is unknown`);
-    requireCondition(IMPACTS.includes(finding.impact), `findings[${index}].impact is unknown`);
-    requireCondition(VERDICTS.includes(finding.adversarial.verdict), `findings[${index}].adversarial.verdict is unknown`);
-    requireNonEmpty(finding.evidence.source, `findings[${index}].evidence.source`);
-    requireNonEmpty(finding.evidence.detail, `findings[${index}].evidence.detail`);
-    requireNonEmpty(finding.adversarial.reason, `findings[${index}].adversarial.reason`);
-    requireCondition(finding.compatibility.kind === "safe" || Boolean(finding.compatibility.surface?.trim()), `findings[${index}].compatibility.surface is required for breaking changes`);
-    requireCondition(Boolean(finding.smell) === Boolean(finding.refactoring), `findings[${index}] must provide both smell and refactoring mappings or neither`);
   }
-
-  for (const [index, coverage] of report.coverage.entries()) {
-    requireNonEmpty(coverage.dimension, `coverage[${index}].dimension`);
-    requireNonEmpty(coverage.tool, `coverage[${index}].tool`);
-    requireCondition(COVERAGE_STATUSES.includes(coverage.status), `coverage[${index}].status is unknown`);
-    requireNonEmpty(coverage.notes, `coverage[${index}].notes`);
-  }
-
   const expectedCensus = calculateCensus(report.findings);
   requireCondition(stableJson(report.census) === stableJson(expectedCensus), "census does not match findings");
   const expectedReportId = `report-${sha256(reportIdentity(report)).slice(0, 16)}`;
   requireCondition(report.reportId === expectedReportId, "reportId does not match report contents");
 }
 
-function escapeCell(value: string): string {
-  return value.replaceAll("|", "\\|").replaceAll("\n", " ");
+const VALUE_RANK: Record<Value, number> = { high: 3, medium: 2, low: 1 };
+const COST_WEIGHT: Record<Cost, number> = { S: 1, M: 2, L: 3 };
+
+function escapeMarkdown(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\n", " ")
+    .replace(/[<>`*_[\]#]/g, "\\$&")
+    .replaceAll("|", "\\|");
 }
 
-function impactLabel(impact: Impact): string {
-  return impact === "critical" ? "critical" : impact;
+function comparePriority(left: SniffFinding, right: SniffFinding): number {
+  const leftRatio = VALUE_RANK[left.value] * COST_WEIGHT[right.cost];
+  const rightRatio = VALUE_RANK[right.value] * COST_WEIGHT[left.cost];
+  return leftRatio === rightRatio ? compareText(left.id, right.id) : rightRatio - leftRatio;
 }
 
 export function renderSniffMarkdown(report: SniffReport): string {
   validateSniffReport(report);
-  const retained = report.findings.filter((finding) => finding.adversarial.verdict !== "drop");
-  const dropped = report.findings.filter((finding) => finding.adversarial.verdict === "drop");
+  const retained = report.findings
+    .filter((finding) => finding.adversarial.verdict !== "drop")
+    .sort(comparePriority);
+  const challenged = report.findings.filter((finding) => finding.adversarial.verdict !== "keep");
   const coverageRows = report.coverage.map(
-    (entry) => `| ${escapeCell(entry.dimension)} | ${escapeCell(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeCell(entry.notes)} |`,
+    (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(entry.notes)} |`,
   );
   const findingRows = retained.map((finding, index) => {
     const mapping = finding.smell && finding.refactoring
-      ? `[${escapeCell(finding.smell.name)}](${finding.smell.url}) → [${escapeCell(finding.refactoring.name)}](${finding.refactoring.url})`
+      ? `[${escapeMarkdown(finding.smell.name)}](${finding.smell.url}) → [${escapeMarkdown(finding.refactoring.name)}](${finding.refactoring.url})`
       : "—";
-    const compatibility = finding.compatibility.kind === "safe" ? "safe" : `breaking: ${escapeCell(finding.compatibility.surface ?? "")}`;
-    return `| ${index + 1} | ${escapeCell(finding.title)} (${escapeCell(finding.location.path)}:${finding.location.line}) | ${mapping} | ${impactLabel(finding.impact)} | ${finding.evidence.tier} | ${finding.value} | ${finding.cost} | ${compatibility} | ${finding.applyTier} |`;
+    const compatibility = finding.compatibility.kind === "safe" ? "safe" : `breaking: ${escapeMarkdown(finding.compatibility.surface ?? "")}`;
+    return `| ${index + 1} | ${escapeMarkdown(finding.title)} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${mapping} | ${finding.impact} | ${finding.evidence.tier} | ${finding.value} | ${finding.cost} | ${compatibility} | ${finding.applyTier} |`;
   });
-  const droppedRows = dropped.map(
-    (finding) => `| ${escapeCell(finding.title)} (${escapeCell(finding.location.path)}:${finding.location.line}) | DROP | ${escapeCell(finding.adversarial.reason)} |`,
+  const challengedRows = challenged.map(
+    (finding) => `| ${escapeMarkdown(finding.title)} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${finding.adversarial.verdict.toUpperCase()} | ${escapeMarkdown(finding.adversarial.reason)} |`,
   );
   const lines = [
-    `# Sniff Refactoring Plan — ${report.target.label}`,
+    `# Sniff Refactoring Plan — ${escapeMarkdown(report.target.label)}`,
     "",
-    `**Report:** \`${report.reportId}\`  ·  **Target:** ${report.target.kind}  ·  **Scope mode:** ${report.target.scopeMode}  ·  **Base ref:** ${report.target.baseRef ? `\`${report.target.baseRef}\`` : "none"}`,
-    `**Languages:** ${report.target.languages.join(", ") || "none"}  ·  **Date:** ${report.generatedAt.slice(0, 10)}`,
+    `**Report:** \`${report.reportId}\`  ·  **Target:** ${report.target.kind}  ·  **Scope mode:** ${report.target.scopeMode}  ·  **Base ref:** ${report.target.baseRef ? escapeMarkdown(report.target.baseRef) : "none"}`,
+    `**Languages:** ${report.target.languages.map(escapeMarkdown).join(", ") || "none"}  ·  **Date:** ${report.generatedAt.slice(0, 10)}`,
     "",
     "## Summary",
     "",
-    `- Findings retained: ${report.census.retained} of ${report.census.considered} (${report.census.dropped} dropped, ${report.census.downgraded} downgraded)` ,
+    `- Findings retained: ${report.census.retained} of ${report.census.considered} (${report.census.dropped} dropped, ${report.census.downgraded} downgraded)`,
     `- By impact: critical ${report.census.byImpact.critical} · high ${report.census.byImpact.high} · medium ${report.census.byImpact.medium} · low ${report.census.byImpact.low}`,
     `- Suppressions observed: ${report.suppressionCount}`,
-    `- Headline: ${report.headline}`,
+    `- Headline: ${escapeMarkdown(report.headline)}`,
     "",
     "## Tool coverage",
     "",
@@ -269,7 +268,7 @@ export function renderSniffMarkdown(report: SniffReport): string {
     ...(findingRows.length > 0 ? findingRows : ["| — | No findings survived adversarial review. | — | — | — | — | — | — | — |"]),
   ];
   if (report.systemicPatterns.length > 0) {
-    lines.push("", "## Systemic patterns", "", ...report.systemicPatterns.map((pattern) => `- ${pattern}`));
+    lines.push("", "## Systemic patterns", "", ...report.systemicPatterns.map((pattern) => `- ${escapeMarkdown(pattern)}`));
   }
   lines.push(
     "",
@@ -277,7 +276,7 @@ export function renderSniffMarkdown(report: SniffReport): string {
     "",
     "| Finding | Verdict | Reason |",
     "|---|---|---|",
-    ...(droppedRows.length > 0 ? droppedRows : ["| — | — | No findings were dropped. |"]),
+    ...(challengedRows.length > 0 ? challengedRows : ["| — | — | No findings were dropped or downgraded. |"]),
     "",
   );
   return lines.join("\n");
@@ -285,7 +284,7 @@ export function renderSniffMarkdown(report: SniffReport): string {
 
 export function createReportArtifacts(report: SniffReport): ReportArtifacts {
   validateSniffReport(report);
-  const json = `${JSON.stringify(report, null, 2)}\n`;
+  const json = canonicalJson(report);
   const markdown = renderSniffMarkdown(report);
   return {
     report,
@@ -303,13 +302,27 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
 
 export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
   validateSniffReport(artifacts.report);
+  requireCondition(sha256(artifacts.json) === artifacts.receipt.reportSha256, "receipt does not match JSON artifact");
+  requireCondition(sha256(artifacts.markdown) === artifacts.receipt.markdownSha256, "receipt does not match Markdown artifact");
   mkdirSync(directory, { recursive: true });
   const base = artifacts.report.reportId;
   const files = [
     [join(directory, `${base}.json`), artifacts.json],
     [join(directory, `${base}.md`), artifacts.markdown],
-    [join(directory, `${base}.receipt.json`), `${JSON.stringify(artifacts.receipt, null, 2)}\n`],
+    [join(directory, `${base}.receipt.json`), canonicalJson(artifacts.receipt)],
   ] as const;
-  for (const [path, content] of files) writeFileSync(path, content, { encoding: "utf8", flag: "wx" });
-  return files.map(([path]) => path);
+  const collision = files.find(([path]) => existsSync(path));
+  if (collision) throw new Error(`Sniff report artifact already exists: ${collision[0]}`);
+
+  const written: string[] = [];
+  try {
+    for (const [path, content] of files) {
+      writeFileSync(path, content, { encoding: "utf8", flag: "wx" });
+      written.push(path);
+    }
+    return written;
+  } catch (error) {
+    for (const path of written) rmSync(path, { force: true });
+    throw error;
+  }
 }

@@ -1,13 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/srobroek/sniff/blob/main/skills/sniff/references/report.schema.json",
-  "title": "Sniff report",
+  "$id": "https://github.com/srobroek/sniff/blob/main/skills/sniff/references/report-input.schema.json",
+  "title": "Sniff report input",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schemaVersion", "reportId", "generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns", "extensions", "census"],
+  "required": ["generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns", "extensions"],
   "properties": {
-    "schemaVersion": { "const": "1.0.0" },
-    "reportId": { "type": "string", "pattern": "^report-[0-9a-f]{16}$" },
     "generatedAt": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$" },
     "target": {
       "type": "object",
@@ -23,33 +21,11 @@
       }
     },
     "headline": { "type": "string", "minLength": 1 },
-    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/findingInput" } },
     "coverage": { "type": "array", "items": { "$ref": "#/$defs/coverage" } },
     "suppressionCount": { "type": "integer", "minimum": 0 },
     "systemicPatterns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-    "extensions": { "type": "object", "additionalProperties": true },
-    "census": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["considered", "retained", "dropped", "downgraded", "byImpact"],
-      "properties": {
-        "considered": { "type": "integer", "minimum": 0 },
-        "retained": { "type": "integer", "minimum": 0 },
-        "dropped": { "type": "integer", "minimum": 0 },
-        "downgraded": { "type": "integer", "minimum": 0 },
-        "byImpact": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["critical", "high", "medium", "low"],
-          "properties": {
-            "critical": { "type": "integer", "minimum": 0 },
-            "high": { "type": "integer", "minimum": 0 },
-            "medium": { "type": "integer", "minimum": 0 },
-            "low": { "type": "integer", "minimum": 0 }
-          }
-        }
-      }
-    }
+    "extensions": { "type": "object", "additionalProperties": true }
   },
   "$defs": {
     "coverage": {
@@ -65,12 +41,11 @@
         "config": { "type": "string", "minLength": 1 }
       }
     },
-    "finding": {
+    "findingInput": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "stableKey", "title", "location", "evidence", "impact", "value", "cost", "compatibility", "applyTier", "adversarial"],
+      "required": ["stableKey", "title", "location", "evidence", "impact", "value", "cost", "compatibility", "applyTier", "adversarial"],
       "properties": {
-        "id": { "type": "string", "pattern": "^sniff-[0-9a-f]{16}$" },
         "stableKey": { "type": "string", "minLength": 1 },
         "title": { "type": "string", "minLength": 1 },
         "location": {
