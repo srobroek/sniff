@@ -15,9 +15,7 @@
   },
   "omp": {
     "extensions": [
-      "./dist/omp/sniff-install-tool.js",
-      "./dist/omp/sniff-intake-tool.js",
-      "./dist/omp/sniff-report-tool.js"
+      "./dist/omp/sniff-plugin.js"
     ]
   },
   "devDependencies": {

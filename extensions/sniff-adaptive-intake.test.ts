@@ -398,7 +398,7 @@ describe("history semantics", () => {
 describe("extension reachability", () => {
   test("registers sniff_intake in the package and extension API", () => {
     const packageJson = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"));
-    expect(packageJson.omp.extensions).toContain("./dist/omp/sniff-intake-tool.js");
+    expect(packageJson.omp.extensions).toContain("./dist/omp/sniff-plugin.js");
     let definition: { name?: string } | undefined;
     const schema = { describe() { return this; } };
     const api = {

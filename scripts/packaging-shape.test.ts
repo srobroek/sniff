@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 type JsonObject = Record<string, unknown>;
@@ -198,11 +198,7 @@ function copyCodexPackage(destination: string): void {
 		cpSync(join(codexRoot, file), join(destination, file));
 	}
 }
-const OMP_EXTENSIONS = [
-	"sniff-install-tool.js",
-	"sniff-intake-tool.js",
-	"sniff-report-tool.js",
-] as const;
+const OMP_EXTENSION = "sniff-plugin.js" as const;
 
 type RegisteredTool = {
 	readonly name: string;
@@ -243,15 +239,21 @@ function stringValue(value: unknown, description: string): string {
 	return value;
 }
 
-test("Copied OMP package imports every bundled extension without source or dependencies", async () => {
+test("Copied OMP package imports one bundled extension and completes a leased lifecycle", async () => {
 	const cache = mkdtempSync(join(tmpdir(), "sniff-omp-cache-"));
 	const targetRoot = mkdtempSync(join(tmpdir(), "sniff-omp-target-"));
+	const analyzerBin = mkdtempSync(join(tmpdir(), "sniff-omp-analyzer-"));
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${analyzerBin}${delimiter}${originalPath ?? ""}`;
 	try {
+		writeFileSync(join(analyzerBin, "lizard"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		writeFileSync(join(targetRoot, "source.ts"), "export const source = true;\n");
+
 		const rootOmp = object(packageJson.omp, "package omp metadata");
 		const rootExtensions = rootOmp.extensions;
 		if (!Array.isArray(rootExtensions)) throw new Error("package omp extensions must be an array");
 		const declaredExtensions = rootExtensions.map((entry) => stringValue(entry, "package omp extension"));
-		expect(declaredExtensions).toEqual(OMP_EXTENSIONS.map((file) => `./dist/omp/${file}`));
+		expect(declaredExtensions).toEqual([`./dist/omp/${OMP_EXTENSION}`]);
 		const pluginRoot = join(cache, "sniff");
 		mkdirSync(join(pluginRoot, ".omp-plugin"), { recursive: true });
 		mkdirSync(join(pluginRoot, "dist", "omp"), { recursive: true });
@@ -264,33 +266,25 @@ test("Copied OMP package imports every bundled extension without source or depen
 				omp: { extensions: declaredExtensions },
 			}),
 		);
-		cpSync(
-			join(repoRoot, ".omp-plugin", "plugin.json"),
-			join(pluginRoot, ".omp-plugin", "plugin.json"),
-		);
-		cpSync(join(repoRoot, "dist", "omp"), join(pluginRoot, "dist", "omp"), {
-			recursive: true,
-		});
-		writeFileSync(join(targetRoot, "source.ts"), "export const source = true;\n");
+		cpSync(join(repoRoot, ".omp-plugin", "plugin.json"), join(pluginRoot, ".omp-plugin", "plugin.json"));
+		cpSync(join(repoRoot, "dist", "omp"), join(pluginRoot, "dist", "omp"), { recursive: true });
 
 		expect(readdirSync(pluginRoot).sort()).toEqual([".omp-plugin", "dist", "package.json"]);
 		expect(readdirSync(join(pluginRoot, ".omp-plugin")).sort()).toEqual(["plugin.json"]);
 		expect(readdirSync(join(pluginRoot, "dist")).sort()).toEqual(["omp"]);
-		expect(readdirSync(join(pluginRoot, "dist", "omp")).sort()).toEqual([...OMP_EXTENSIONS].sort());
+		expect(readdirSync(join(pluginRoot, "dist", "omp")).sort()).toEqual([OMP_EXTENSION]);
 		expect(existsSync(join(pluginRoot, "node_modules"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "src"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "extensions"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "adapters"))).toBe(false);
 
 		const tools = new Map<string, RegisteredTool>();
-		for (const file of OMP_EXTENSIONS) {
-			const bundlePath = join(pluginRoot, "dist", "omp", file);
-			assertContained(cache, bundlePath);
-			assertPortableExtensionImports(bundlePath);
-			const extension = await import(pathToFileURL(bundlePath).href);
-			expect(typeof extension.default).toBe("function");
-			extension.default(fakeOmpApi(tools));
-		}
+		const bundlePath = join(pluginRoot, "dist", "omp", OMP_EXTENSION);
+		assertContained(cache, bundlePath);
+		assertPortableExtensionImports(bundlePath);
+		const extension = await import(pathToFileURL(bundlePath).href);
+		expect(typeof extension.default).toBe("function");
+		extension.default(fakeOmpApi(tools));
 		expect([...tools.keys()].sort()).toEqual([...EXPECTED_TOOLS].sort());
 
 		const context = { cwd: targetRoot, hasUI: false, mode: "rpc" };
@@ -307,8 +301,8 @@ test("Copied OMP package imports every bundled extension without source or depen
 			{
 				input: {
 					target: { kind: "files", root: targetRoot, paths: ["source.ts"] },
-					intent: "plan-only",
-					scopeMode: "plan-only",
+					intent: "audit",
+					scopeMode: "quick",
 					interactive: false,
 				},
 			},
@@ -331,19 +325,63 @@ test("Copied OMP package imports every bundled extension without source or depen
 		const lease = object(intakeResult.lease, "sniff_intake lease");
 		const capability = stringValue(lease.capability, "lease capability");
 		const manifestId = stringValue(lease.manifestId, "lease manifest ID");
+		const analyzer = tools.get("sniff_run_analyzer");
+		if (!analyzer) throw new Error("sniff_run_analyzer was not registered");
+		const analyzerOutput = await analyzer.execute(
+			"analyzer",
+			{ capability, manifestId, analyzer: "lizard:complexity" },
+			undefined,
+			undefined,
+			context,
+		);
+		const analyzerDetails = object(analyzerOutput.details, "sniff_run_analyzer details");
+		expect(analyzerDetails.ok).toBe(true);
+		expect(analyzerDetails.outcome).toBe("completed");
+
+		const reportTool = tools.get("sniff_report");
+		if (!reportTool) throw new Error("sniff_report was not registered");
+		const reportOutput = await reportTool.execute(
+			"report",
+			{
+				capability,
+				manifestId,
+				mode: "render",
+				report: {
+					generatedAt: "2026-09-11T00:00:00.000Z",
+					target: {
+						kind: "files",
+						label: stringValue(resolvedTarget.label, "resolved target label"),
+						scopeMode: "quick",
+						languages: ["TypeScript"],
+						filesAnalyzed: files.length,
+					},
+					headline: "Deterministic lifecycle fixture completed.",
+					findings: [],
+					coverage: [{ dimension: "complexity", tool: "lizard", analysisClass: "local", status: "ran", notes: "The fixed fixture analyzer completed." }],
+					suppressionCount: 0,
+					systemicPatterns: [],
+					extensions: { "sniff.intake": manifest },
+				},
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const reportDetails = object(reportOutput.details, "sniff_report details");
+		expect(reportDetails.ok).toBe(true);
+
 		const cancel = tools.get("sniff_cancel");
 		if (!cancel) throw new Error("sniff_cancel was not registered");
-		const cancelled = await cancel.execute("cancel", { capability, manifestId }, undefined, undefined, context);
-		const cancelledDetails = object(cancelled.details, "sniff_cancel details");
-		expect(cancelledDetails.ok).toBe(true);
 		const replay = await cancel.execute("replay", { capability, manifestId }, undefined, undefined, context);
 		const replayDetails = object(replay.details, "sniff_cancel replay details");
 		expect(replayDetails.ok).toBe(false);
 		expect(replay.isError).toBe(true);
-		expect(stringValue(replayDetails.error, "sniff_cancel replay error")).toContain("already cancelled");
+		expect(stringValue(replayDetails.error, "sniff_cancel replay error")).toContain("already released");
 	} finally {
+		process.env.PATH = originalPath;
 		rmSync(cache, { recursive: true, force: true });
 		rmSync(targetRoot, { recursive: true, force: true });
+		rmSync(analyzerBin, { recursive: true, force: true });
 	}
 });
 

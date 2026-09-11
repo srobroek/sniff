@@ -11,20 +11,10 @@ const MCP_OUTPUTS = [
 	join("dist", "claude", "server.js"),
 	join("dist", "codex", "server.js"),
 ] as const;
-const OMP_BUNDLES = [
-	{
-		entrypoint: join("extensions", "sniff-install-tool.ts"),
-		output: join("dist", "omp", "sniff-install-tool.js"),
-	},
-	{
-		entrypoint: join("extensions", "sniff-intake-tool.ts"),
-		output: join("dist", "omp", "sniff-intake-tool.js"),
-	},
-	{
-		entrypoint: join("extensions", "sniff-report-tool.ts"),
-		output: join("dist", "omp", "sniff-report-tool.js"),
-	},
-] as const;
+const OMP_BUNDLE = {
+	entrypoint: join("extensions", "sniff-plugin.ts"),
+	output: join("dist", "omp", "sniff-plugin.js"),
+} as const;
 
 const BUILTIN_MODULES: Record<string, true> = {
 	assert: true,
@@ -155,16 +145,10 @@ export async function buildHarnessBundles(
 ): Promise<BuildResult> {
 	const repoRoot = resolve(options.repoRoot ?? join(import.meta.dir, ".."));
 	const mcpBundle = await buildBundle(repoRoot, MCP_ENTRYPOINT);
-	const ompBundles: BundleOutput[] = [];
-	for (const target of OMP_BUNDLES) {
-		ompBundles.push({
-			bundle: await buildBundle(repoRoot, target.entrypoint),
-			paths: [join(repoRoot, target.output)],
-		});
-	}
+	const ompBundle = await buildBundle(repoRoot, OMP_BUNDLE.entrypoint);
 	const bundles: BundleOutput[] = [
 		{ bundle: mcpBundle, paths: MCP_OUTPUTS.map((path) => join(repoRoot, path)) },
-		...ompBundles,
+		{ bundle: ompBundle, paths: [join(repoRoot, OMP_BUNDLE.output)] },
 	];
 	const current = bundles.every(({ bundle, paths }) =>
 		paths.every(
