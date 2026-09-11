@@ -13,7 +13,11 @@ import {
   TargetResolutionError,
   validateGitOperand,
   validateRepository,
-} from "./sniff-target.ts";
+  resolveTarget as resolveLocalTarget,
+  resolveTargetLease as resolveLocalTargetLease,
+  withResolvedTarget as withLocalResolvedTarget,
+  runArgv,
+} from "./target.ts";
 
 export type ProviderName = "github" | "gitlab" | "generic-git";
 
@@ -346,6 +350,20 @@ export async function resolveProviderTarget(request: TargetRequest, runner: Argv
     };
   }
   throw new TargetResolutionError("invalid-target", `Unsupported provider target ${request.kind}`);
+}
+
+export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv): Promise<ResolvedTarget> {
+  return request.kind === "working-tree" || request.kind === "files" || request.kind === "directory" || request.kind === "module" || request.kind === "commit" || request.kind === "range" || request.kind === "branch" || request.kind === "ref"
+    ? resolveLocalTarget(request, runner)
+    : resolveProviderTarget(request, runner);
+}
+
+export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv) {
+  return resolveLocalTargetLease(request, runner, resolveProviderTarget, materializeProviderTarget);
+}
+
+export async function withResolvedTarget<T>(request: TargetRequest, callback: (target: ResolvedTarget) => T | Promise<T>, runner: ArgvRunner = runArgv): Promise<T> {
+  return withLocalResolvedTarget(request, callback, runner, resolveProviderTarget, materializeProviderTarget);
 }
 
 async function runGit(runner: ArgvRunner, root: string, args: readonly string[], failure: string): Promise<ArgvResult> {

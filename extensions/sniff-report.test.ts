@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createRunManifest } from "./sniff-intake.ts";
+import { createRunManifest } from "../src/core/intake.ts";
 import {
   buildSniffReport,
   createReportArtifacts,
@@ -12,10 +12,10 @@ import {
   renderSniffMarkdown,
   saveReportArtifacts,
   validateSniffReport,
-} from "./sniff-report.ts";
-import { runSniffReportTool } from "./sniff-report-tool.ts";
-import { issueRunLease } from "./sniff-run-registry.ts";
-import { validateResolvedTarget } from "./sniff-target.ts";
+} from "../src/core/report.ts";
+import { runSniffReportTool } from "../src/core/report-use-case.ts";
+import { issueRunLease } from "../src/core/run-registry.ts";
+import { validateResolvedTarget } from "../src/core/target.ts";
 
 const temporaryDirectories: string[] = [];
 

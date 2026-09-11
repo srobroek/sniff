@@ -3,14 +3,15 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { runSniffAnalyzer, type SniffInstallRuntime } from "./sniff-install-tool.ts";
-import { createRunManifest, type RunManifest } from "./sniff-intake.ts";
-import sniffIntakeExtension, { runSniffIntakeTool, type SniffIntakeToolResult } from "./sniff-intake-tool.ts";
-import type { ReportInput, ReportTarget } from "./sniff-report.ts";
-import { runSniffReportTool } from "./sniff-report-tool.ts";
-import { cancelRunLease, issueRunLease } from "./sniff-run-registry.ts";
-import { type ArgvResult, type ArgvRunner, type TargetKind, validateResolvedTarget, withResolvedTarget } from "./sniff-target.ts";
-import { detectProvider } from "./sniff-target-provider.ts";
+import { runSniffAnalyzer, type SniffInstallRuntime } from "../src/core/install.ts";
+import { createRunManifest, type RunManifest } from "../src/core/intake.ts";
+import { runSniffIntakeTool, type SniffIntakeToolResult } from "../src/core/intake-use-case.ts";
+import type { ReportInput, ReportTarget } from "../src/core/report.ts";
+import { runSniffReportTool } from "../src/core/report-use-case.ts";
+import { cancelRunLease, issueRunLease } from "../src/core/run-registry.ts";
+import { type ArgvResult, type ArgvRunner, type TargetKind, validateResolvedTarget } from "../src/core/target.ts";
+import { detectProvider, withResolvedTarget } from "../src/core/target-provider.ts";
+import sniffIntakeExtension from "./sniff-intake-tool.ts";
 
 const temporary: string[] = [];
 const sha = (value: string) => value.repeat(40);

@@ -15,6 +15,6 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["extensions/**/*.ts"],
+  "include": ["src/core/**/*.ts", "extensions/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

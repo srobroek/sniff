@@ -1,6 +1,6 @@
 import { extname } from "node:path";
-import type { ResolvedTarget } from "./sniff-target.ts";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId } from "./sniff-tool-catalog.ts";
+import type { ResolvedTarget } from "./target.ts";
+import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId } from "./catalog.ts";
 
 export type SecurityAnalyzerTier = "project-native" | "lightweight-static" | "deep-static";
 export type TargetTrust = "trusted-local" | "untrusted-remote";

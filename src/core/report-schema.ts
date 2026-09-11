@@ -1,7 +1,7 @@
 import Ajv2020, { type ErrorObject } from "ajv/dist/2020.js";
-import reportSchema from "../skills/sniff/references/report.schema.json" with { type: "json" };
-import reportInputSchema from "../skills/sniff/references/report-input.schema.json" with { type: "json" };
-import type { ReportInput, SniffReport } from "./sniff-report.ts";
+import reportSchema from "../../skills/sniff/references/report.schema.json" with { type: "json" };
+import reportInputSchema from "../../skills/sniff/references/report-input.schema.json" with { type: "json" };
+import type { ReportInput, SniffReport } from "./report.ts";
 
 const RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
 

@@ -9,12 +9,10 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import sniffInstallTool, {
-	type CommandResult,
-	runSniffInstall,
-	type SniffInstallRuntime,
-} from "./sniff-install-tool.ts";
-import { TOOLS } from "./sniff-tool-catalog.ts";
+import { TOOLS } from "../src/core/catalog.ts";
+import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
+import { runSniffInstall } from "../src/core/install.ts";
+import sniffInstallTool from "./sniff-install-tool.ts";
 
 const temps: string[] = [];
 afterAll(() => {

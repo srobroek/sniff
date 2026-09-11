@@ -7,20 +7,19 @@ import {
   buildNoninteractiveManifest,
   createRunManifest,
   decisionFrontier,
-} from "./sniff-intake.ts";
-import { SecurityScopeError, selectSecurityAnalyzers } from "./sniff-intake-security.ts";
-import sniffIntakeExtension, { runSniffIntakeTool } from "./sniff-intake-tool.ts";
+} from "../src/core/intake.ts";
+import { runSniffIntakeTool } from "../src/core/intake-use-case.ts";
+import { SecurityScopeError, selectSecurityAnalyzers } from "../src/core/security.ts";
 import {
   type ArgvResult,
   type ArgvRunner,
   redactTransportValues,
-  resolveTarget,
   runArgv,
   TargetResolutionError,
-  withResolvedTarget,
   withTemporaryCheckout,
-} from "./sniff-target.ts";
-import { resolveGitHubRelease, resolveGitLabRelease } from "./sniff-target-provider.ts";
+} from "../src/core/target.ts";
+import { resolveGitHubRelease, resolveGitLabRelease, resolveTarget, withResolvedTarget } from "../src/core/target-provider.ts";
+import sniffIntakeExtension from "./sniff-intake-tool.ts";
 
 const temporary: string[] = [];
 const sha = (character: string) => character.repeat(40);

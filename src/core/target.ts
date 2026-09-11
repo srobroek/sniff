@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { materializeProviderTarget, resolveProviderTarget } from "./sniff-target-provider.ts";
+
 
 export type ArgvResult = {
   readonly code: number;
@@ -70,6 +70,9 @@ export type ResolvedTarget = {
   readonly history?: { readonly window: HistoryWindow; readonly capturedWindow?: HistoryWindow; readonly commits: readonly string[] };
   readonly materialization: "in-place" | "temporary-checkout";
 };
+
+export type ProviderTargetResolver = (request: TargetRequest, runner: ArgvRunner) => Promise<ResolvedTarget>;
+export type ProviderTargetMaterializer = (target: ResolvedTarget, runner: ArgvRunner) => Promise<ResolvedTarget>;
 
 export type TargetFailureCode =
   | "invalid-target"
@@ -304,7 +307,7 @@ async function resolveWorkingTree(root: string, runner: ArgvRunner): Promise<Res
   return { kind: "working-tree", label: "uncommitted changes", root: resolvedRoot, files, baseRef: head, immutableRef: head, materialization: "in-place" };
 }
 
-export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv): Promise<ResolvedTarget> {
+export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver): Promise<ResolvedTarget> {
   switch (request.kind) {
     case "working-tree":
       return resolveWorkingTree(request.root, runner);
@@ -346,7 +349,8 @@ export async function resolveTarget(request: TargetRequest, runner: ArgvRunner =
       return { kind: "ref", label: request.ref, root, files: await snapshotFiles(runner, root, head), headRef: head, immutableRef: head, materialization: "temporary-checkout" };
     }
     default:
-      return resolveProviderTarget(request, runner);
+      if (!providerResolver) throw new TargetResolutionError("invalid-target", "Provider target resolution is unavailable in this host");
+      return providerResolver(request, runner);
   }
 }
 
@@ -439,14 +443,15 @@ export type ResolvedTargetLease = {
   release(): void;
 };
 
-export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv): Promise<ResolvedTargetLease> {
-  const resolved = await resolveTarget(request, runner);
+export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver, materializer?: ProviderTargetMaterializer): Promise<ResolvedTargetLease> {
+  const resolved = await resolveTarget(request, runner, providerResolver);
   if (resolved.materialization === "in-place") return { target: validateResolvedTarget(resolved), release: () => undefined };
   const immutable = resolved.immutableRef ?? resolved.headRef;
   if (!immutable || !isImmutableRef(immutable)) throw new TargetResolutionError("invalid-ref", "Resolved target lacks a full commit SHA");
   const checkout = await createTemporaryCheckout(resolved.repository ?? resolved.root, immutable, runner, resolved.kind === "history" || resolved.kind === "release");
   try {
-    const materialized = await materializeProviderTarget({ ...resolved, root: checkout.directory, immutableRef: checkout.immutableRef, headRef: checkout.immutableRef }, runner);
+    if (!materializer) throw new TargetResolutionError("invalid-target", "Provider target materialization is unavailable in this host");
+    const materialized = await materializer({ ...resolved, root: checkout.directory, immutableRef: checkout.immutableRef, headRef: checkout.immutableRef }, runner);
     return { target: validateResolvedTarget(materialized), release: checkout.release };
   } catch (error) {
     checkout.release();
@@ -458,8 +463,10 @@ export async function withResolvedTarget<T>(
   request: TargetRequest,
   callback: (target: ResolvedTarget) => T | Promise<T>,
   runner: ArgvRunner = runArgv,
+  providerResolver?: ProviderTargetResolver,
+  materializer?: ProviderTargetMaterializer,
 ): Promise<T> {
-  const lease = await resolveTargetLease(request, runner);
+  const lease = await resolveTargetLease(request, runner, providerResolver, materializer);
   try {
     return await callback(lease.target);
   } finally {

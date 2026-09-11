@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { TOOLS, type ToolRec } from "./sniff-tool-catalog";
+import { TOOLS, type ToolRec } from "../src/core/catalog.ts";
 
 const RULE_PATH = new URL(
 	"../rules/quality-sniff-analyzer-redirect.md",

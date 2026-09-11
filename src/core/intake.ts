@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./sniff-intake-objectives.ts";
+import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./objectives.ts";
 import {
   type SecurityAnalyzerDisposition,
   type SecurityRequest,
@@ -7,8 +7,8 @@ import {
   selectSecurityAnalyzers,
   type TargetTrust,
   validateAnalyzerDispositions,
-} from "./sniff-intake-security.ts";
-import { type ResolvedTarget, type TargetRequest, validateRepository } from "./sniff-target.ts";
+} from "./security.ts";
+import { type ResolvedTarget, type TargetRequest, validateRepository } from "./target.ts";
 
 export type IntakeIntent = "audit" | "review-change" | "release-risk" | "history" | "plan-only";
 

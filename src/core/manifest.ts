@@ -11,4 +11,4 @@ export {
   type ManifestInput,
   type RunManifest,
   validateRunManifest,
-} from "../src/core/manifest.ts";
+} from "./intake.ts";
