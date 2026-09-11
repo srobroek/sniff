@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "sniff": {
+      "command": "bun",
+      "args": ["run", "${CLAUDE_PLUGIN_ROOT}/adapters/mcp/server.ts"]
+    }
+  }
+}

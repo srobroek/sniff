@@ -15,6 +15,6 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["src/core/**/*.ts", "extensions/**/*.ts"],
+  "include": ["src/core/**/*.ts", "extensions/**/*.ts", "adapters/mcp/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }
