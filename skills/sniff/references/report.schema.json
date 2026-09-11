@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/srobroek/sniff/blob/main/skills/sniff/references/report.schema.json",
+  "title": "Sniff report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "reportId", "generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns", "extensions", "census"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "reportId": { "type": "string", "pattern": "^report-[0-9a-f]{16}$" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label", "scopeMode", "languages", "filesAnalyzed"],
+      "properties": {
+        "kind": { "enum": ["whole-repo", "area", "directory", "files", "uncommitted", "commit", "range", "pr"] },
+        "label": { "type": "string", "minLength": 1 },
+        "scopeMode": { "enum": ["quick", "full", "plan-only"] },
+        "baseRef": { "type": "string", "minLength": 1 },
+        "languages": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "filesAnalyzed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "headline": { "type": "string", "minLength": 1 },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "coverage": { "type": "array", "items": { "$ref": "#/$defs/coverage" } },
+    "suppressionCount": { "type": "integer", "minimum": 0 },
+    "systemicPatterns": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "extensions": { "type": "object", "additionalProperties": true },
+    "census": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["considered", "retained", "dropped", "downgraded", "byImpact"],
+      "properties": {
+        "considered": { "type": "integer", "minimum": 0 },
+        "retained": { "type": "integer", "minimum": 0 },
+        "dropped": { "type": "integer", "minimum": 0 },
+        "downgraded": { "type": "integer", "minimum": 0 },
+        "byImpact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["critical", "high", "medium", "low"],
+          "properties": {
+            "critical": { "type": "integer", "minimum": 0 },
+            "high": { "type": "integer", "minimum": 0 },
+            "medium": { "type": "integer", "minimum": 0 },
+            "low": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dimension", "tool", "analysisClass", "status", "notes"],
+      "properties": {
+        "dimension": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "analysisClass": { "enum": ["local", "relational", "global", "baseline"] },
+        "status": { "enum": ["ran", "skipped", "gap", "not-applicable"] },
+        "notes": { "type": "string", "minLength": 1 },
+        "config": { "type": "string", "minLength": 1 }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "location", "evidence", "impact", "value", "cost", "compatibility", "applyTier", "adversarial"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^sniff-[0-9a-f]{16}$" },
+        "title": { "type": "string", "minLength": 1 },
+        "location": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "line"],
+          "properties": {
+            "path": { "type": "string", "minLength": 1 },
+            "line": { "type": "integer", "minimum": 1 },
+            "column": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tier", "source", "detail"],
+          "properties": {
+            "tier": { "enum": ["observed", "reproduced", "corroborated", "hypothesis"] },
+            "source": { "type": "string", "minLength": 1 },
+            "detail": { "type": "string", "minLength": 1 }
+          }
+        },
+        "impact": { "enum": ["critical", "high", "medium", "low"] },
+        "value": { "enum": ["high", "medium", "low"] },
+        "cost": { "enum": ["S", "M", "L"] },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["safe", "breaking"] },
+            "surface": { "type": "string", "minLength": 1 }
+          },
+          "if": { "properties": { "kind": { "const": "breaking" } } },
+          "then": { "required": ["surface"] }
+        },
+        "applyTier": { "enum": ["mechanical", "assisted", "manual"] },
+        "smell": { "$ref": "#/$defs/link" },
+        "refactoring": { "$ref": "#/$defs/link" },
+        "adversarial": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["verdict", "reason"],
+          "properties": {
+            "verdict": { "enum": ["keep", "downgrade", "drop"] },
+            "reason": { "type": "string", "minLength": 1 }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["smell"] },
+          "then": { "required": ["refactoring"] }
+        },
+        {
+          "if": { "required": ["refactoring"] },
+          "then": { "required": ["smell"] }
+        }
+      ]
+    },
+    "link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "url"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri" }
+      }
+    }
+  }
+}

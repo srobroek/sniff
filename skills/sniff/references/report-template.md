@@ -1,11 +1,13 @@
 # Report Template
 
-The step-7 output. Fill this in. Every surviving finding (post-adversarial) gets
-a row in the plan with **impact, value, cost, severity, and
-backwards-compatibility**. Order the plan by value-per-cost, highest first.
+The Markdown rendering produced by `sniff_report`. Build and validate the canonical JSON object
+against `report.schema.json`; never compose this document independently because that can drift
+from machine-readable findings. Every challenged finding remains in JSON. This rendering places
+KEEP and DOWNGRADE findings in the plan and DROP findings in the transparency section.
 
-Keep it concrete: every finding cites `file:line` and a refactoring.guru mapping.
-Drop sections that do not apply rather than padding them.
+Every retained finding includes impact, evidence tier, value, cost, and backwards compatibility.
+Order the plan by value-per-cost, highest first. Every finding cites `file:line` and its
+refactoring.guru mapping when one exists. Drop optional sections that do not apply.
 
 ---
 

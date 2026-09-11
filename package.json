@@ -11,7 +11,8 @@
   },
   "omp": {
     "extensions": [
-      "./extensions/sniff-install-tool.ts"
+      "./extensions/sniff-install-tool.ts",
+      "./extensions/sniff-report-tool.ts"
     ]
   },
   "devDependencies": {

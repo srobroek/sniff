@@ -302,18 +302,23 @@ this step only in **quick** mode.
 
 ## Step 7 -- Report and (optional) apply
 
-1. Emit the prioritized plan using `references/report-template.md`: every
-   surviving finding with **impact, value, cost, severity, and
-   backwards-compatibility**, ordered so the highest value-per-cost is first.
-2. **Apply is opt-in and explicit.** Do nothing to the code unless the user
-   names what to apply. When they do, and the mode is not plan-only:
-   - apply **only low-risk/mechanical** refactors (rename, extract function,
-     inline variable, guard clause, dead-code removal) -- never behavior-changing
-     or public-surface changes without a separate explicit go-ahead,
+1. Build one canonical JSON report conforming to `references/report.schema.json`.
+   Include every challenged finding, its evidence tier, impact, value, cost,
+   compatibility, adversarial verdict, coverage result, suppression count, and systemic pattern.
+   Evidence tier measures confidence; impact measures consequence. Never derive one from the other.
+2. Call `sniff_report` in `render` mode. Present its deterministic Markdown and validation receipt.
+   Render mode is ephemeral and writes nothing.
+3. Persist JSON, Markdown, and the receipt only when the user explicitly requests saved artifacts.
+   Call `sniff_report` in `save` mode with the approved output directory. Never substitute an
+   implicit default directory or overwrite an existing report.
+4. **Apply is opt-in and explicit.** Do nothing to the code unless the user names what to apply.
+   When they do, and the mode is not plan-only:
+   - apply **only low-risk/mechanical** refactors (rename, extract function, inline variable,
+     guard clause, dead-code removal); public-surface and behavior changes need separate approval,
    - re-run the relevant step-3 checks to verify nothing regressed,
    - report what changed and the verification result.
-3. Anything risky stays advisory in the plan.
+5. Anything risky stays advisory in the plan.
 
-**Final output contract:** summary counts, the prioritized plan table, the
-coverage/gaps note (which tools ran, which were skipped and why), and -- if
-anything was applied -- the diff summary plus verification result.
+**Final output contract:** validated canonical JSON, deterministic Markdown, validation receipt,
+summary census, prioritized plan, coverage and gaps, dropped/downgraded findings, and any applied
+changes with their verification result.
