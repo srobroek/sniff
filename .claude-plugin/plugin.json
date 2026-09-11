@@ -1,0 +1,7 @@
+{
+  "name": "sniff",
+  "version": "0.1.0",
+  "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
+  "skills": "./.claude/skills/",
+  "mcpServers": "./.mcp.json"
+}
