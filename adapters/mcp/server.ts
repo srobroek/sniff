@@ -7,11 +7,11 @@ import {
   CallToolRequestSchema,
   type CallToolResult,
   type ElicitRequestFormParams,
+  ElicitResultSchema,
   ErrorCode,
   InitializeRequestSchema,
   type JSONRPCMessage, ListToolsRequestSchema,
   McpError,
-  SUPPORTED_PROTOCOL_VERSIONS
 } from "@modelcontextprotocol/sdk/types";
 import reportInputSchema from "../../skills/sniff/references/report-input.schema.json" with { type: "json" };
 import {
@@ -38,12 +38,59 @@ const MAX_INPUT_OBJECT_KEYS = 2_000;
 const MAX_OUTPUT_TEXT_BYTES = 65_536;
 const MAX_OUTPUT_STRUCTURED_BYTES = 524_288;
 const MAX_CONCURRENT_REQUESTS = 8;
+const MAX_QUEUED_REQUESTS = 32;
 const ELICITATION_TIMEOUT_MS = 120_000;
 
 // MCP stdio is newline-delimited JSON. The SDK's transport already provides
-// ordered, backpressured writes; this small transport adds an input frame cap
-// and emits protocol errors for malformed/oversized frames.
-class BoundedStdioTransport implements Transport {
+// ordered, backpressured writes; this small transport adds an input frame cap,
+// JSON-RPC envelope validation, and protocol errors for malformed frames.
+type RpcId = string | number;
+type RpcRecord = Record<string, unknown>;
+
+function rpcRecord(value: unknown): value is RpcRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function validRequestId(value: unknown): value is RpcId {
+  return typeof value === "string" || (typeof value === "number" && Number.isFinite(value));
+}
+
+function recoverableId(value: RpcRecord): RpcId | null {
+  return validRequestId(value.id) ? value.id : null;
+}
+
+function validParams(method: string, params: unknown): boolean {
+  if (params === undefined) return method !== "initialize" && method !== "tools/call";
+  if (!rpcRecord(params)) return false;
+  if (method === "initialize") {
+    return typeof params.protocolVersion === "string" && (params.capabilities === undefined || rpcRecord(params.capabilities)) && (params.clientInfo === undefined || rpcRecord(params.clientInfo));
+  }
+  if (method === "tools/call") {
+    return typeof params.name === "string" && params.name.length > 0 && (params.arguments === undefined || rpcRecord(params.arguments));
+  }
+  return true;
+}
+
+function validateRpcMessage(value: unknown): { readonly message?: JSONRPCMessage; readonly code?: ErrorCode; readonly id: RpcId | null } {
+  if (!rpcRecord(value) || value.jsonrpc !== "2.0") return { code: ErrorCode.InvalidRequest, id: rpcRecord(value) ? recoverableId(value) : null };
+  const hasMethod = Object.hasOwn(value, "method");
+  const hasResult = Object.hasOwn(value, "result");
+  const hasError = Object.hasOwn(value, "error");
+  if (hasMethod) {
+    if (typeof value.method !== "string" || value.method.length === 0 || (Object.hasOwn(value, "id") && !validRequestId(value.id))) {
+      return { code: ErrorCode.InvalidRequest, id: recoverableId(value) };
+    }
+    if (!validParams(value.method, value.params)) return { code: ErrorCode.InvalidParams, id: recoverableId(value) };
+    return { message: value as unknown as JSONRPCMessage, id: recoverableId(value) };
+  }
+  if (hasResult || hasError) {
+    if (!Object.hasOwn(value, "id") || (value.id !== null && !validRequestId(value.id))) return { code: ErrorCode.InvalidRequest, id: recoverableId(value) };
+    return { message: value as unknown as JSONRPCMessage, id: recoverableId(value) };
+  }
+  return { code: ErrorCode.InvalidRequest, id: recoverableId(value) };
+}
+
+export class BoundedStdioTransport implements Transport {
   private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
   private started = false;
   private closed = false;
@@ -90,23 +137,36 @@ class BoundedStdioTransport implements Transport {
         continue;
       }
       if (text.length === 0) continue;
+      let parsed: unknown;
       try {
-        const message = JSON.parse(text) as JSONRPCMessage;
-        this.onmessage?.(message);
+        parsed = JSON.parse(text);
       } catch {
         void this.sendProtocolError("Parse error", ErrorCode.ParseError);
+        continue;
+      }
+      const validation = validateRpcMessage(parsed);
+      if (!validation.message) {
+        // Notifications have no response by definition; malformed ones are
+        // ignored after validation so they cannot terminate the server.
+        if (rpcRecord(parsed) && Object.hasOwn(parsed, "id")) void this.sendProtocolError(validation.code === ErrorCode.InvalidParams ? "Invalid request parameters" : "Invalid Request", validation.code, validation.id);
+        continue;
+      }
+      try {
+        this.onmessage?.(validation.message);
+      } catch {
+        if (validation.id !== null) void this.sendProtocolError("Invalid Request", ErrorCode.InvalidRequest, validation.id);
       }
     }
   }
 
-  private sendProtocolError(message: string, code = ErrorCode.InvalidRequest): Promise<void> {
-    return this.send({ jsonrpc: "2.0", id: null, error: { code, message } } as unknown as JSONRPCMessage);
+  private sendProtocolError(message: string, code = ErrorCode.InvalidRequest, id: RpcId | null = null): Promise<void> {
+    return this.send({ jsonrpc: "2.0", id, error: { code, message } } as unknown as JSONRPCMessage);
   }
 
   send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
     if (this.closed) return Promise.resolve();
     const encoded = `${JSON.stringify(message)}\n`;
-    this.writeQueue = this.writeQueue.then(
+    this.writeQueue = this.writeQueue.catch(() => undefined).then(
       () =>
         new Promise<void>((resolve, reject) => {
           const done = (error?: Error | null) => (error ? reject(error) : resolve());
@@ -395,9 +455,17 @@ async function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Pro
   }
 }
 
-class Semaphore {
+export class Semaphore {
   private permits = MAX_CONCURRENT_REQUESTS;
   private readonly waiters: Array<{ readonly signal: AbortSignal; readonly resolve: (release: () => void) => void; readonly reject: (error: Error) => void; readonly onAbort: () => void }> = [];
+
+  get activeCount(): number {
+    return MAX_CONCURRENT_REQUESTS - this.permits;
+  }
+
+  get queuedCount(): number {
+    return this.waiters.length;
+  }
 
   async acquire(signal: AbortSignal): Promise<() => void> {
     assertNotAborted(signal);
@@ -405,11 +473,42 @@ class Semaphore {
       this.permits -= 1;
       return this.release;
     }
+    if (this.waiters.length >= MAX_QUEUED_REQUESTS) throw new SniffMcpError("server_busy", "MCP server concurrency queue is full");
     return new Promise((resolve, reject) => {
-      const waiter = { signal, resolve, reject, onAbort: () => reject(abortError()) };
-      signal.addEventListener("abort", waiter.onAbort, { once: true });
+      let settled = false;
+      const waiter = {
+        signal,
+        resolve: (release: () => void) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          resolve(release);
+        },
+        reject: (error: Error) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+        onAbort: () => {
+          const index = this.waiters.indexOf(waiter);
+          if (index >= 0) this.waiters.splice(index, 1);
+          waiter.reject(abortError());
+        },
+      };
+      const onAbort = waiter.onAbort;
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) {
+        waiter.onAbort();
+        return;
+      }
       this.waiters.push(waiter);
     });
+  }
+
+  close(reason = "MCP server is shutting down"): void {
+    const error = new SniffMcpError("server_closed", reason);
+    for (const waiter of this.waiters.splice(0)) waiter.reject(error);
   }
 
   private readonly release = (): void => {
@@ -430,14 +529,17 @@ class Semaphore {
 
 const semaphore = new Semaphore();
 const server = new Server({ name: "sniff", version: SERVER_VERSION }, { capabilities: { tools: { listChanged: false } }, enforceStrictCapabilities: true });
+const SUPPORTED_SERVER_PROTOCOL_VERSIONS = ["2025-06-18", "2025-11-25"] as const;
 let negotiatedVersion: string | undefined;
 let shuttingDown = false;
 const activeLeases = new Set<string>();
 
 function supportsFormElicitation(): boolean {
-  if (!negotiatedVersion || negotiatedVersion < "2025-06-18") return false;
+  if (!negotiatedVersion) return false;
   const capabilities = server.getClientCapabilities();
-  return isObject(capabilities?.elicitation) && isObject(capabilities.elicitation.form);
+  if (!isObject(capabilities?.elicitation)) return false;
+  if (negotiatedVersion === "2025-06-18") return true;
+  return isObject(capabilities.elicitation.form);
 }
 
 function leaseKey(capability: string, manifestId: string): string {
@@ -453,7 +555,7 @@ function setClientHandshake(request: { params: { protocolVersion: string; capabi
 
 server.setRequestHandler(InitializeRequestSchema, (request) => {
   const requested = request.params.protocolVersion;
-  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) throw new McpError(ErrorCode.InvalidRequest, "Unsupported MCP protocol version");
+  if (!SUPPORTED_SERVER_PROTOCOL_VERSIONS.includes(requested as (typeof SUPPORTED_SERVER_PROTOCOL_VERSIONS)[number])) throw new McpError(ErrorCode.InvalidRequest, "Unsupported MCP protocol version");
   negotiatedVersion = requested;
   setClientHandshake(request, requested);
   return {
@@ -480,10 +582,12 @@ async function elicitDigest(request: DigestRequest, signal: AbortSignal, label: 
     required: ["acceptedDigest"],
     additionalProperties: false,
   } as ElicitRequestFormParams["requestedSchema"];
-  const response = await server.elicitInput(
-    { mode: "form", message: `${label}\n${boundedString(JSON.stringify(request), MAX_OUTPUT_TEXT_BYTES)}`, requestedSchema },
-    { signal, timeout: ELICITATION_TIMEOUT_MS, maxTotalTimeout: ELICITATION_TIMEOUT_MS },
-  );
+  const message = `${label}\n${boundedString(JSON.stringify(request), MAX_OUTPUT_TEXT_BYTES)}`;
+  const elicitationParams = negotiatedVersion === "2025-06-18" ? { message, requestedSchema } : { mode: "form" as const, message, requestedSchema };
+  const requestOptions = { signal, timeout: ELICITATION_TIMEOUT_MS, maxTotalTimeout: ELICITATION_TIMEOUT_MS };
+  const response = negotiatedVersion === "2025-06-18"
+    ? await (server as unknown as { request: (request: unknown, schema: unknown, options: unknown) => Promise<{ readonly action: string; readonly content?: unknown }> }).request({ method: "elicitation/create", params: elicitationParams }, ElicitResultSchema, requestOptions)
+    : await server.elicitInput(elicitationParams, requestOptions);
   assertNotAborted(signal);
   if (response.action !== "accept" || !isObject(response.content) || response.content.acceptedDigest !== request.digest) return false;
   return {
@@ -509,18 +613,31 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     { confirmInteractive: (request) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request."), },
   );
   const result = await raceWithAbort(resultPromise, signal).catch((error) => {
-    void resultPromise.then((late) => {
-      if (late.lease) {
+    void resultPromise.then(
+      (late) => {
+        if (!late.lease) return;
         try {
           cancelRunLease(late.lease.capability, late.lease.manifestId);
         } catch {
           // The request was already cancelled or expired.
         }
-      }
-    });
+      },
+      () => {
+        // The core rejection was observed; never leave a late promise unhandled.
+      },
+    );
     throw error;
   });
-  assertNotAborted(signal);
+  if (signal.aborted) {
+    if (result.lease) {
+      try {
+        cancelRunLease(result.lease.capability, result.lease.manifestId);
+      } catch {
+        // The lease was already finalized or expired.
+      }
+    }
+    throw abortError();
+  }
   if (result.lease) activeLeases.add(leaseKey(result.lease.capability, result.lease.manifestId));
   return toolSuccess({ ok: true, ...result }, JSON.stringify(result));
 }
@@ -560,10 +677,12 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
     if (!accepted) throw new SniffMcpError("confirmation_required", "Sniff installation authorization was denied");
     assertNotAborted(signal);
     const installed = await runSniffInstall({ ...options, mode: "install", signal });
-    return toolSuccess({ ok: installed.ok, report: installed.report, tools: installed.tools }, installed.report);
+    const error = installed.ok ? undefined : { code: "install_failed", message: boundedString(installed.report, 1_024) };
+    return toolSuccess({ ok: installed.ok, report: installed.report, tools: installed.tools, ...(error ? { error } : {}) }, installed.report);
   }
   const result = await runSniffInstall(options);
-  return toolSuccess({ ok: result.ok, report: result.report, tools: result.tools }, result.report);
+  const error = result.ok ? undefined : { code: "install_failed", message: boundedString(result.report, 1_024) };
+  return toolSuccess({ ok: result.ok, report: result.report, tools: result.tools, ...(error ? { error } : {}) }, result.report);
 }
 
 async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
@@ -572,7 +691,8 @@ async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResp
   const analyzerName = requiredString(args.analyzer, "analyzer");
   const result = await runSniffAnalyzer({ capability, manifestId, analyzer: analyzerName, signal });
   const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}` : result.report;
-  return toolSuccess({ ok: result.ok, report: result.report, preflight: result.preflight, ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}), outcome: result.outcome, ...(result.execution ? { execution: result.execution } : {}) }, text);
+  const error = result.ok ? undefined : { code: "analyzer_failed", message: boundedString(result.report, 1_024) };
+  return toolSuccess({ ok: result.ok, report: result.report, preflight: result.preflight, ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}), outcome: result.outcome, ...(result.execution ? { execution: result.execution } : {}), ...(error ? { error } : {}) }, text);
 }
 
 async function report(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
@@ -620,31 +740,29 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
     default: throw new SniffMcpError("unknown_tool", "Unknown Sniff tool");
   }
 }
-
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-  const release = await semaphore.acquire(extra.signal);
+  let release: (() => void) | undefined;
   try {
+    release = await semaphore.acquire(extra.signal);
     const args = isObject(request.params.arguments) ? request.params.arguments : {};
-    try {
-      return await callTool(request.params.name, args, extra.signal);
-    } catch (error) {
-      return toolError(request.params.name, error);
-    }
+    return await callTool(request.params.name, args, extra.signal);
+  } catch (error) {
+    return toolError(request.params.name, error);
   } finally {
-    release();
+    release?.();
   }
 });
 
 function cleanup(reason: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  semaphore.close(reason);
   try {
     releaseAllRunLeases(reason);
   } finally {
     activeLeases.clear();
   }
 }
-
 export async function serve(): Promise<void> {
   const transport = new BoundedStdioTransport();
   let closedResolve: (() => void) | undefined;
