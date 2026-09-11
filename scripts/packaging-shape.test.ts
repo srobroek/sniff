@@ -4,11 +4,16 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
+import { builtinModules } from "node:module";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 type JsonObject = Record<string, unknown>;
 
@@ -193,6 +198,154 @@ function copyCodexPackage(destination: string): void {
 		cpSync(join(codexRoot, file), join(destination, file));
 	}
 }
+const OMP_EXTENSIONS = [
+	"sniff-install-tool.js",
+	"sniff-intake-tool.js",
+	"sniff-report-tool.js",
+] as const;
+
+type RegisteredTool = {
+	readonly name: string;
+	readonly execute: (
+		id: string,
+		params: JsonObject,
+		signal: unknown,
+		onUpdate: unknown,
+		context: JsonObject,
+	) => Promise<JsonObject>;
+};
+
+function fakeOmpApi(tools: Map<string, RegisteredTool>): JsonObject {
+	const schema: Record<string, unknown> = {};
+	const chain = () => schema;
+	for (const method of ["array", "boolean", "describe", "number", "object", "optional", "string", "unknown"]) {
+		schema[method] = chain;
+	}
+	schema.enum = chain;
+	return {
+		zod: schema,
+		registerTool: (tool: RegisteredTool) => tools.set(tool.name, tool),
+	};
+}
+
+function assertPortableExtensionImports(path: string): void {
+	const source = readFileSync(path, "utf8");
+	for (const match of source.matchAll(/\bfrom\s*["']([^"']+)["']/g)) {
+		const specifier = match[1];
+		if (!specifier) continue;
+		const builtin = specifier.startsWith("node:") ? specifier.slice(5) : specifier;
+		expect(builtinModules).toContain(builtin);
+	}
+}
+
+function stringValue(value: unknown, description: string): string {
+	if (typeof value !== "string") throw new Error(`${description} must be a string`);
+	return value;
+}
+
+test("Copied OMP package imports every bundled extension without source or dependencies", async () => {
+	const cache = mkdtempSync(join(tmpdir(), "sniff-omp-cache-"));
+	const targetRoot = mkdtempSync(join(tmpdir(), "sniff-omp-target-"));
+	try {
+		const rootOmp = object(packageJson.omp, "package omp metadata");
+		const rootExtensions = rootOmp.extensions;
+		if (!Array.isArray(rootExtensions)) throw new Error("package omp extensions must be an array");
+		const declaredExtensions = rootExtensions.map((entry) => stringValue(entry, "package omp extension"));
+		expect(declaredExtensions).toEqual(OMP_EXTENSIONS.map((file) => `./dist/omp/${file}`));
+		const pluginRoot = join(cache, "sniff");
+		mkdirSync(join(pluginRoot, ".omp-plugin"), { recursive: true });
+		mkdirSync(join(pluginRoot, "dist", "omp"), { recursive: true });
+		writeFileSync(
+			join(pluginRoot, "package.json"),
+			JSON.stringify({
+				name: packageJson.name,
+				version: packageJson.version,
+				private: true,
+				omp: { extensions: declaredExtensions },
+			}),
+		);
+		cpSync(
+			join(repoRoot, ".omp-plugin", "plugin.json"),
+			join(pluginRoot, ".omp-plugin", "plugin.json"),
+		);
+		cpSync(join(repoRoot, "dist", "omp"), join(pluginRoot, "dist", "omp"), {
+			recursive: true,
+		});
+		writeFileSync(join(targetRoot, "source.ts"), "export const source = true;\n");
+
+		expect(readdirSync(pluginRoot).sort()).toEqual([".omp-plugin", "dist", "package.json"]);
+		expect(readdirSync(join(pluginRoot, ".omp-plugin")).sort()).toEqual(["plugin.json"]);
+		expect(readdirSync(join(pluginRoot, "dist")).sort()).toEqual(["omp"]);
+		expect(readdirSync(join(pluginRoot, "dist", "omp")).sort()).toEqual([...OMP_EXTENSIONS].sort());
+		expect(existsSync(join(pluginRoot, "node_modules"))).toBe(false);
+		expect(existsSync(join(pluginRoot, "src"))).toBe(false);
+		expect(existsSync(join(pluginRoot, "extensions"))).toBe(false);
+		expect(existsSync(join(pluginRoot, "adapters"))).toBe(false);
+
+		const tools = new Map<string, RegisteredTool>();
+		for (const file of OMP_EXTENSIONS) {
+			const bundlePath = join(pluginRoot, "dist", "omp", file);
+			assertContained(cache, bundlePath);
+			assertPortableExtensionImports(bundlePath);
+			const extension = await import(pathToFileURL(bundlePath).href);
+			expect(typeof extension.default).toBe("function");
+			extension.default(fakeOmpApi(tools));
+		}
+		expect([...tools.keys()].sort()).toEqual([...EXPECTED_TOOLS].sort());
+
+		const context = { cwd: targetRoot, hasUI: false, mode: "rpc" };
+		const install = tools.get("sniff_install_tools");
+		if (!install) throw new Error("sniff_install_tools was not registered");
+		const listed = await install.execute("list", { mode: "list" }, undefined, undefined, context);
+		const listedDetails = object(listed.details, "sniff_install_tools details");
+		expect(listedDetails.ok).toBe(true);
+
+		const intake = tools.get("sniff_intake");
+		if (!intake) throw new Error("sniff_intake was not registered");
+		const intakeOutput = await intake.execute(
+			"intake",
+			{
+				input: {
+					target: { kind: "files", root: targetRoot, paths: ["source.ts"] },
+					intent: "plan-only",
+					scopeMode: "plan-only",
+					interactive: false,
+				},
+			},
+			undefined,
+			undefined,
+			context,
+		);
+		const intakeDetails = object(intakeOutput.details, "sniff_intake details");
+		expect(intakeDetails.ok).toBe(true);
+		const intakeResult = object(intakeDetails.result, "sniff_intake result");
+		const manifest = object(intakeResult.manifest, "sniff_intake manifest");
+		const resolvedTarget = object(manifest.resolvedTarget, "resolved target");
+		const resolvedRoot = stringValue(resolvedTarget.root, "resolved target root");
+		const canonicalTargetRoot = realpathSync(targetRoot);
+		assertContained(canonicalTargetRoot, resolvedRoot);
+		const files = resolvedTarget.files;
+		if (!Array.isArray(files)) throw new Error("Resolved target files must be an array");
+		for (const file of files) assertContained(canonicalTargetRoot, join(resolvedRoot, stringValue(file, "resolved target file")));
+
+		const lease = object(intakeResult.lease, "sniff_intake lease");
+		const capability = stringValue(lease.capability, "lease capability");
+		const manifestId = stringValue(lease.manifestId, "lease manifest ID");
+		const cancel = tools.get("sniff_cancel");
+		if (!cancel) throw new Error("sniff_cancel was not registered");
+		const cancelled = await cancel.execute("cancel", { capability, manifestId }, undefined, undefined, context);
+		const cancelledDetails = object(cancelled.details, "sniff_cancel details");
+		expect(cancelledDetails.ok).toBe(true);
+		const replay = await cancel.execute("replay", { capability, manifestId }, undefined, undefined, context);
+		const replayDetails = object(replay.details, "sniff_cancel replay details");
+		expect(replayDetails.ok).toBe(false);
+		expect(replay.isError).toBe(true);
+		expect(stringValue(replayDetails.error, "sniff_cancel replay error")).toContain("already cancelled");
+	} finally {
+		rmSync(cache, { recursive: true, force: true });
+		rmSync(targetRoot, { recursive: true, force: true });
+	}
+});
 
 test("Claude metadata discovers its generated skill and shared MCP config", () => {
 	expect(claudeManifest.name).toBe("sniff");
