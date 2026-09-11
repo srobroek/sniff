@@ -298,6 +298,31 @@ describe("runSniffInstall", () => {
 		});
 	});
 
+	test("already-aborted install cancels before spawning a manager", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		let spawnCount = 0;
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),
+			run: async (argv, _cwd, _env, timeoutMs) => {
+				spawnCount += 1;
+				return commandResult(argv, timeoutMs, {
+					exitCode: null,
+					error: "operation aborted",
+				});
+			},
+		});
+		const result = await runSniffInstall({
+			mode: "install",
+			bundles: ["dup"],
+			noMise: true,
+			runtime,
+			signal: controller.signal,
+		});
+		expect(result.ok).toBe(false);
+		expect(result.report).toContain("operation aborted");
+		expect(spawnCount).toBe(0);
+	});
 	test("installation timeout is structured as timed-out", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),

@@ -621,6 +621,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	};
 }
 export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffInstallResult> {
+	if (opts.signal?.aborted) return { ok: false, report: "operation aborted", tools: [] };
 	const mode: SniffInstallMode = opts.mode ?? "probe";
 	const probeCwd = opts.cwd ?? process.cwd();
 	const env = { ...process.env, ...opts.env };
