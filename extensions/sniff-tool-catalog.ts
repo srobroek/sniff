@@ -40,7 +40,60 @@ export type ToolRec = {
 	readonly hostPackageConfigNames?: Readonly<Record<string, readonly string[]>>;
 	readonly configFiles?: readonly string[];
 	readonly packageConfigKeys?: readonly string[];
+	readonly securityTier?: "project-native" | "lightweight-static" | "deep-static";
 };
+
+export type SniffAnalyzerRecipe = {
+	readonly id: string;
+	readonly tool: string;
+	readonly tier: "project-native" | "lightweight-static" | "deep-static";
+	readonly args: readonly string[];
+	readonly scope: "scoped-files" | "bounded-history" | "repository-wide";
+	readonly fileExtensions?: readonly string[];
+	readonly acceptedExitCodes: readonly number[];
+	readonly remoteSafe: boolean;
+	readonly configFree: boolean;
+	readonly projectControlled: boolean;
+};
+
+export const SNIFF_ANALYZER_RECIPES = {
+	"lizard:complexity": {
+		id: "lizard:complexity",
+		tool: "lizard",
+		tier: "lightweight-static",
+		args: ["--csv"],
+		scope: "scoped-files",
+		fileExtensions: [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".java", ".js", ".jsx", ".m", ".mm", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx"],
+		acceptedExitCodes: [0],
+		remoteSafe: true,
+		configFree: true,
+		projectControlled: false,
+	},
+	"semgrep:hardcoded-values": {
+		id: "semgrep:hardcoded-values",
+		tool: "semgrep",
+		tier: "lightweight-static",
+		args: ["--config", `${import.meta.dir}/sniff-semgrep-hardcoded-values.yml`, "--json", "--disable-version-check", "--metrics=off"],
+		scope: "scoped-files",
+		acceptedExitCodes: [0],
+		remoteSafe: true,
+		configFree: true,
+		projectControlled: false,
+	},
+	"gitleaks:tracked-history": {
+		id: "gitleaks:tracked-history",
+		tool: "gitleaks",
+		tier: "lightweight-static",
+		args: ["git", "--redact", "--report-format", "json", "--no-banner", "."],
+		scope: "repository-wide",
+		acceptedExitCodes: [0, 1],
+		remoteSafe: true,
+		configFree: true,
+		projectControlled: false,
+	},
+} as const satisfies Record<string, SniffAnalyzerRecipe>;
+
+export type SniffAnalyzerRecipeId = keyof typeof SNIFF_ANALYZER_RECIPES;
 
 export const TOOLS = {
 	core: [
@@ -68,22 +121,24 @@ export const TOOLS = {
 		{ name: "tokei", bin: "tokei", key: "cargo", hint: "cargo install tokei" },
 	],
 	dup: [{ name: "jscpd", bin: "jscpd", key: "npm", hint: "npm i -g jscpd" }],
-	security: [
-		{ name: "trivy", bin: "trivy", key: "brew", hint: "brew install trivy" },
-		{
-			name: "checkov",
-			bin: "checkov",
-			key: "pipx",
-			hint: "pipx install checkov",
-		},
-		{
-			name: "gitleaks",
-			bin: "gitleaks",
-			key: "brew",
-			hint: "brew install gitleaks",
-		},
-	],
-	rust: [
+  security: [
+    { name: "trivy", bin: "trivy", key: "brew", hint: "brew install trivy", securityTier: "lightweight-static" },
+    {
+      name: "checkov",
+      bin: "checkov",
+      key: "pipx",
+      hint: "pipx install checkov",
+      securityTier: "lightweight-static",
+    },
+    {
+      name: "gitleaks",
+      bin: "gitleaks",
+      key: "brew",
+      hint: "brew install gitleaks",
+      securityTier: "lightweight-static",
+    },
+  ],
+  rust: [
 		{
 			name: "cargo-clippy",
 			bin: "cargo",

@@ -14,7 +14,7 @@
       "additionalProperties": false,
       "required": ["kind", "label", "scopeMode", "languages", "filesAnalyzed"],
       "properties": {
-        "kind": { "enum": ["whole-repo", "area", "directory", "files", "uncommitted", "commit", "range", "pr"] },
+        "kind": { "enum": ["whole-repo", "area", "directory", "files", "uncommitted", "commit", "range", "branch", "ref", "repository", "pr", "mr", "release", "history"] },
         "label": { "type": "string", "minLength": 1 },
         "scopeMode": { "enum": ["quick", "full", "plan-only"] },
         "baseRef": { "type": "string", "minLength": 1 },

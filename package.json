@@ -12,6 +12,7 @@
   "omp": {
     "extensions": [
       "./extensions/sniff-install-tool.ts",
+      "./extensions/sniff-intake-tool.ts",
       "./extensions/sniff-report-tool.ts"
     ]
   },

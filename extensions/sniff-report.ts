@@ -13,7 +13,7 @@ export type AdversarialVerdict = "keep" | "downgrade" | "drop";
 export type CoverageStatus = "ran" | "skipped" | "gap" | "not-applicable";
 
 export interface ReportTarget {
-  kind: "whole-repo" | "area" | "directory" | "files" | "uncommitted" | "commit" | "range" | "pr";
+  kind: "whole-repo" | "area" | "directory" | "files" | "uncommitted" | "commit" | "range" | "branch" | "ref" | "repository" | "pr" | "mr" | "release" | "history";
   label: string;
   scopeMode: "quick" | "full" | "plan-only";
   baseRef?: string;
