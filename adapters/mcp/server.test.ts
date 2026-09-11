@@ -229,7 +229,7 @@ describe("MCP Sniff server", () => {
     const claude = object(JSON.parse(readFileSync(new URL("../../.mcp.json", import.meta.url), "utf8")));
     const claudeServer = object(object(claude.mcpServers).sniff);
     expect(claudeServer.command).toBe("bun");
-    expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/adapters/mcp/server.ts`]);
+    expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/dist/claude/server.js`]);
   });
   test("initializes, lists exactly five tools, and asks one frontier question", async () => {
     const client = startClient();

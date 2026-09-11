@@ -1,4 +1,10 @@
 node_modules/
-dist/
+dist/*
+!dist/claude/
+dist/claude/*
+!dist/claude/server.js
+!dist/codex/
+dist/codex/*
+!dist/codex/server.js
 *.log
 .DS_Store
