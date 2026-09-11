@@ -165,10 +165,11 @@
 - Include authorization.
 - Include confirmation.
 - Include the route.
-- Include the exact issued run manifest under the `sniff.intake` report extension.
-- Pass its capability and manifest ID to `sniff_report`.
-- Match the report kind and label to the authenticated manifest.
-- Match the report base ref and file count to the authenticated manifest.
+- Include the exact issued run manifest under `extensions["sniff.intake"]` only when convenient; `sniff_report` authenticates the capability and manifest ID, injects the host-stored manifest when omitted, and rejects any supplied mismatch.
+- Pass the capability and manifest ID to `sniff_report`.
+- Use the returned opaque read capability, report ID, and descriptor `relativePath` with `sniff_read_report_artifact` to retrieve complete artifacts. Pass `nextOffset` for subsequent UTF-8-safe pages, each at most 64 KiB, until `eof`.
+- Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
+- Do not add root, paths, materialization, immutable ref, or head ref fields.
 - Let the tool validate the manifest and release the lease.
 - Keep other report extensions unchanged.
 - Save only after explicit confirmation.

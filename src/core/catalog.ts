@@ -52,11 +52,54 @@ export type SniffAnalyzerRecipe = {
 	readonly args: readonly string[];
 	readonly scope: "scoped-files" | "bounded-history" | "repository-wide";
 	readonly fileExtensions?: readonly string[];
+	readonly targetSeparator?: readonly string[];
 	readonly acceptedExitCodes: readonly number[];
 	readonly remoteSafe: boolean;
 	readonly configFree: boolean;
 	readonly projectControlled: boolean;
 };
+
+
+export const OPENGREP_FILE_EXTENSIONS = [
+	".bash",
+	".c",
+	".cc",
+	".cfg",
+	".conf",
+	".cpp",
+	".cxx",
+	".fish",
+	".go",
+	".h",
+	".hpp",
+	".ini",
+	".java",
+	".js",
+	".json",
+	".json5",
+	".jsonc",
+	".jsx",
+	".ksh",
+	".m",
+	".mm",
+	".php",
+	".proto",
+	".ps1",
+	".py",
+	".rb",
+	".rs",
+	".sh",
+	".sql",
+	".swift",
+	".tf",
+	".toml",
+	".ts",
+	".tsx",
+	".xml",
+	".yaml",
+	".yml",
+	".zsh",
+] as const;
 
 export const SNIFF_ANALYZER_RECIPES = {
 	"lizard:complexity": {
@@ -71,12 +114,14 @@ export const SNIFF_ANALYZER_RECIPES = {
 		configFree: true,
 		projectControlled: false,
 	},
-	"semgrep:hardcoded-values": {
-		id: "semgrep:hardcoded-values",
-		tool: "semgrep",
+	"opengrep:hardcoded-values": {
+		id: "opengrep:hardcoded-values",
+		tool: "opengrep",
 		tier: "lightweight-static",
-	args: ["--config", `${import.meta.dir}/sniff-semgrep-hardcoded-values.yml`, "--json", "--disable-version-check", "--metrics=off"],
+		args: ["scan", "-f", `${import.meta.dir}/sniff-opengrep-hardcoded-values.yml`, "--json", "--no-rewrite-rule-ids", "--disable-version-check"],
 		scope: "scoped-files",
+		fileExtensions: OPENGREP_FILE_EXTENSIONS,
+		targetSeparator: ["--"],
 		acceptedExitCodes: [0],
 		remoteSafe: true,
 		configFree: true,
@@ -86,11 +131,11 @@ export const SNIFF_ANALYZER_RECIPES = {
 		id: "gitleaks:tracked-history",
 		tool: "gitleaks",
 		tier: "lightweight-static",
-		args: ["git", "--redact", "--report-format", "json", "--no-banner", "."],
+		args: ["git", "--redact", "--report-format", "json", "--report-path", "-", "--no-banner", "."],
 		scope: "repository-wide",
 		acceptedExitCodes: [0, 1],
-		remoteSafe: true,
-		configFree: true,
+		remoteSafe: false,
+		configFree: false,
 		projectControlled: false,
 	},
 } as const satisfies Record<string, SniffAnalyzerRecipe>;
@@ -100,11 +145,12 @@ export type SniffAnalyzerRecipeId = keyof typeof SNIFF_ANALYZER_RECIPES;
 export const TOOLS = {
 	core: [
 		{
-			name: "semgrep",
-			bin: "semgrep",
-			key: "pipx",
-			hint: "pipx install semgrep (or: brew install semgrep)",
-			probeTimeoutMs: 5_000,
+			name: "opengrep",
+			bin: "opengrep",
+			key: "manual",
+			hint: "sniff_install_tools mode=install bundles=[core]",
+			probeArgs: [["--version"]],
+			probeTimeoutMs: 30_000,
 		},
 		{ name: "lizard", bin: "lizard", key: "pipx", hint: "pipx install lizard" },
 		{

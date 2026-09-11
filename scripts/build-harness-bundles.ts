@@ -15,8 +15,22 @@ const OMP_BUNDLE = {
 	entrypoint: join("extensions", "sniff-plugin.ts"),
 	output: join("dist", "omp", "sniff-plugin.js"),
 } as const;
+const OPENGREP_RULE_NAME = "sniff-opengrep-hardcoded-values.yml";
+const OPENGREP_RULE_SOURCE = join(
+	".skill-source",
+	"sniff",
+	"references",
+	"opengrep-rules",
+	"hardcoded-values.yml",
+);
+const OPENGREP_RULE_OUTPUTS = [
+	join("dist", "omp", OPENGREP_RULE_NAME),
+	join("dist", "claude", OPENGREP_RULE_NAME),
+	join("dist", "codex", OPENGREP_RULE_NAME),
+] as const;
 
 const BUILTIN_MODULES: Record<string, true> = {
+	"bun:ffi": true,
 	assert: true,
 	"assert/strict": true,
 	async_hooks: true,
@@ -149,6 +163,10 @@ export async function buildHarnessBundles(
 	const bundles: BundleOutput[] = [
 		{ bundle: mcpBundle, paths: MCP_OUTPUTS.map((path) => join(repoRoot, path)) },
 		{ bundle: ompBundle, paths: [join(repoRoot, OMP_BUNDLE.output)] },
+		{
+			bundle: new Uint8Array(readFileSync(join(repoRoot, OPENGREP_RULE_SOURCE))),
+			paths: OPENGREP_RULE_OUTPUTS.map((path) => join(repoRoot, path)),
+		},
 	];
 	const current = bundles.every(({ bundle, paths }) =>
 		paths.every(

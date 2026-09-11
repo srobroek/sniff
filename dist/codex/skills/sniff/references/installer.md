@@ -20,7 +20,7 @@ agent's playbook for using it.
    ```
    Detected stack: Go, TypeScript, Dockerfile, GitHub Actions
    Installed:        golangci-lint ✓  eslint ✓
-   Missing (default-on): semgrep ✗  hadolint ✗  actionlint ✗
+   Missing (default-on): opengrep ✗  hadolint ✗  actionlint ✗
    Opt-in (off unless requested): jscpd ✗ — redundant with golangci-lint's dupl
      for Go; only adds value for TS, where eslint+sonarjs already cover
      duplication

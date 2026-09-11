@@ -5,14 +5,16 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import {
   buildNoninteractiveManifest,
+  canonicalConfirmationRequest,
   createRunManifest,
   decisionFrontier,
 } from "../src/core/intake.ts";
-import { runSniffIntakeTool } from "../src/core/intake-use-case.ts";
+import { canonicalReportTargetIdentity, publicConfirmationSummary, publicSniffIntakeResult, runSniffIntakeTool } from "../src/core/intake-use-case.ts";
 import { SecurityScopeError, selectSecurityAnalyzers } from "../src/core/security.ts";
 import {
   type ArgvResult,
   type ArgvRunner,
+  type ResolvedTarget,
   redactTransportValues,
   runArgv,
   TargetResolutionError,
@@ -108,12 +110,64 @@ describe("adaptive intake", () => {
     expect(resolved.gaps.map(({ field }) => field)).toEqual(["budget"]);
     await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", scopeMode: "full", authorization: { acceptedDigest: "forged", actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
   });
+  test("returns a minimized canonical confirmation target", () => {
+    const manifest = createRunManifest({
+      target: { ...target("/private/host/repository"), label: "src/a.ts, ".repeat(30_000) },
+      intent: "audit",
+      scopeMode: "full",
+      objectives: ["structure-and-maintainability"],
+      budget: { maxMinutes: 1 },
+    });
+    const summary = publicConfirmationSummary(canonicalConfirmationRequest(manifest));
+    expect(summary.target).toEqual({ kind: "files", label: "selected files", scopeMode: "full", filesAnalyzed: 1 });
+    expect(summary.target).not.toHaveProperty("root");
+    expect(summary.target).not.toHaveProperty("repository");
+    expect(summary.target).not.toHaveProperty("immutableRef");
+    expect(summary.target).not.toHaveProperty("headRef");
+    expect(summary.selectedAnalyzers.every(({ name, tool, recipe, disposition }) => name && tool && recipe && disposition === "selected")).toBe(true);
+    expect(canonicalReportTargetIdentity({ ...target("/tmp"), kind: "working-tree" }, "full")).toMatchObject({ kind: "uncommitted", label: "uncommitted changes" });
+    expect(canonicalReportTargetIdentity({ ...target("/tmp"), kind: "module" }, "full")).toMatchObject({ kind: "area", label: "selected area" });
+  });
+  test("omits analyzer count until actual analyzers are selected", () => {
+    const result = publicSniffIntakeResult({
+      interview: {
+        questions: [],
+        confirmationRequired: true,
+        plan: {
+          target: { kind: "files", root: "/private/secret/repository", paths: ["src/a.ts"] },
+          intent: "audit",
+          scopeMode: "full",
+          objectives: ["structure-and-maintainability"],
+          exclusions: [],
+          budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10 },
+          security: {},
+        },
+      },
+    });
+    expect(result.interview.planSummary).toEqual({
+      target: { kind: "files", rootBasename: "repository" },
+      intent: "audit",
+      scopeMode: "full",
+      objectiveCount: 1,
+      exclusionCount: 0,
+      budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10 },
+    });
+    expect(result.interview.planSummary).not.toHaveProperty("analyzerCount");
+  });
 
   test("remote defaults use only runnable config-free recipes", () => {
     const remote = selectSecurityAnalyzers({ deepStatic: true }, { trust: "untrusted-remote", scopeMode: "full" });
-    expect(remote.filter(({ disposition }) => disposition === "selected").map(({ name }) => name)).toEqual(["gitleaks:tracked-history", "lizard:complexity", "semgrep:hardcoded-values"]);
+    expect(remote.filter(({ disposition }) => disposition === "selected").map(({ name }) => name)).toEqual(["lizard:complexity", "opengrep:hardcoded-values"]);
     expect(remote.every(({ name, recipe }) => name === recipe)).toBe(true);
     expect(remote.every(({ tier }) => tier === "lightweight-static")).toBe(true);
+  });
+  test("allows repository-wide analyzers only for repository and whole-repo targets", () => {
+    const wholeRepo = { ...target("/tmp"), kind: "whole-repo" as const, materialization: "temporary-checkout" as const };
+    const directory = { ...target("/tmp"), kind: "directory" as const };
+    const selected = (resolvedTarget: ResolvedTarget) => selectSecurityAnalyzers({}, { target: resolvedTarget, scopeMode: "full" }).find(({ name }) => name === "gitleaks:tracked-history");
+    expect(selected(wholeRepo)?.disposition).toBe("selected");
+    expect(selected(directory)?.disposition).toBe("skipped");
+    expect(selected({ ...wholeRepo, kind: "repository" })).toMatchObject({ disposition: "selected" });
   });
 
   test("rejects malicious analyzer overrides and aliases", () => {

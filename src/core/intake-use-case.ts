@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import {
 	buildNoninteractiveManifest,
 	canonicalConfirmationRequest,
@@ -15,12 +16,103 @@ import { resolveTargetLease } from "./target-provider.ts";
 import { type ArgvRunner, runArgv } from "./target.ts";
 
 export type SniffIntakeToolOptions = { readonly input: IntakeInput };
+const REPORT_KIND_BY_TARGET = {
+	"whole-repo": "whole-repo", "working-tree": "uncommitted", files: "files", directory: "directory", module: "area", commit: "commit", range: "range", branch: "branch", ref: "ref", repository: "repository", release: "release", history: "history", pr: "pr", mr: "mr",
+} as const satisfies Record<RunManifest["resolvedTarget"]["kind"], string>;
+
+const REPORT_LABEL_BY_TARGET: Record<RunManifest["resolvedTarget"]["kind"], string> = {
+	"whole-repo": "whole repository", "working-tree": "uncommitted changes", files: "selected files", directory: "selected directory", module: "selected area", commit: "selected commit", range: "selected range", branch: "selected branch", ref: "selected ref", repository: "selected repository", release: "selected release", history: "repository history", pr: "selected pull request", mr: "selected merge request",
+};
+
+export type SniffReportTargetIdentity = {
+	readonly kind: (typeof REPORT_KIND_BY_TARGET)[RunManifest["resolvedTarget"]["kind"]];
+	readonly label: string;
+	readonly scopeMode: ScopeMode;
+	readonly baseRef?: string;
+	readonly filesAnalyzed: number;
+};
+
+export function canonicalReportTargetIdentity(target: RunManifest["resolvedTarget"], scopeMode: ScopeMode): SniffReportTargetIdentity {
+	return {
+		kind: REPORT_KIND_BY_TARGET[target.kind],
+		label: REPORT_LABEL_BY_TARGET[target.kind],
+		scopeMode,
+		...(target.baseRef ? { baseRef: target.baseRef } : {}),
+		filesAnalyzed: target.files.length,
+	};
+}
+
+export type SniffIntakeConfirmationSummary = {
+	readonly digest: string;
+	readonly target: SniffReportTargetIdentity;
+	readonly intent: CanonicalConfirmationRequest["intent"];
+	readonly scopeMode: CanonicalConfirmationRequest["scopeMode"];
+	readonly trust: CanonicalConfirmationRequest["trust"];
+	readonly materialization: CanonicalConfirmationRequest["materialization"];
+	readonly objectiveCount: number;
+	readonly exclusionCount: number;
+	readonly analyzerCount: number;
+	readonly selectedAnalyzers: readonly {
+		readonly name: string;
+		readonly tool: string;
+		readonly recipe: string;
+		readonly disposition: "selected";
+	}[];
+};
 export type SniffIntakeToolResult = {
 	readonly interview: IntakeInterview;
-	readonly confirmation?: CanonicalConfirmationRequest;
+	readonly confirmation?: SniffIntakeConfirmationSummary;
 	readonly manifest?: RunManifest;
 	readonly lease?: RunLeaseReceipt;
 };
+export type SniffIntakePlanSummary = {
+	readonly target: { readonly kind: string; readonly rootBasename?: string };
+	readonly intent: NonNullable<IntakeInterview["plan"]>["intent"];
+	readonly scopeMode: ScopeMode;
+	readonly objectiveCount: number;
+	readonly exclusionCount: number;
+	readonly budget: { readonly maxMinutes?: number; readonly maxAnalyzers?: number; readonly maxFiles?: number };
+};
+export type SniffIntakePublicInterview = Omit<IntakeInterview, "plan"> & { readonly planSummary?: SniffIntakePlanSummary };
+export type SniffIntakePublicResult = Omit<SniffIntakeToolResult, "manifest" | "interview"> & { readonly interview: SniffIntakePublicInterview; readonly reportTarget?: SniffReportTargetIdentity };
+
+function publicPlanSummary(plan: NonNullable<IntakeInterview["plan"]>): SniffIntakePlanSummary {
+	const target = plan.target;
+	const root = "root" in target ? target.root : "rootOrRepository" in target ? target.rootOrRepository : undefined;
+	return {
+		target: { kind: target.kind, ...(root ? { rootBasename: basename(root).slice(0, 256) } : {}) },
+		intent: plan.intent,
+		scopeMode: plan.scopeMode,
+		objectiveCount: plan.objectives.length,
+		exclusionCount: plan.exclusions.length,
+		budget: { ...plan.budget },
+	};
+}
+
+export function publicSniffIntakeResult(result: SniffIntakeToolResult): SniffIntakePublicResult {
+	const { manifest, interview, ...publicResult } = result;
+	const { plan, ...boundedInterview } = interview;
+	const reportTarget = manifest ? canonicalReportTargetIdentity(manifest.resolvedTarget, manifest.scopeMode) : undefined;
+	return { ...publicResult, interview: { ...boundedInterview, ...(plan ? { planSummary: publicPlanSummary(plan) } : {}) }, ...(reportTarget ? { reportTarget } : {}) };
+}
+export function publicConfirmationSummary(request: CanonicalConfirmationRequest): SniffIntakeConfirmationSummary {
+	return {
+		digest: request.digest,
+		target: canonicalReportTargetIdentity(request.target, request.scopeMode),
+		intent: request.intent,
+		scopeMode: request.scopeMode,
+		trust: request.trust,
+		materialization: request.materialization,
+		objectiveCount: request.objectives.length,
+		exclusionCount: request.exclusions.length,
+		analyzerCount: request.analyzers.length,
+		selectedAnalyzers: request.analyzers.flatMap((analyzer) =>
+			analyzer.disposition === "selected"
+				? [{ name: analyzer.name, tool: analyzer.tool, recipe: analyzer.recipe, disposition: "selected" as const }]
+				: [],
+		),
+	};
+}
 export type ConfirmationResponse = false | {
 	readonly acceptedDigest: string;
 	readonly actor?: string;
@@ -130,7 +222,7 @@ export async function runSniffIntakeTool(
 				ttlMs: runtime.leaseTtlMs,
 				sandboxGrant: runtime.sandboxGrant,
 			});
-			return { interview, confirmation: canonicalConfirmationRequest(manifest), manifest, lease };
+			return { interview, confirmation: publicConfirmationSummary(canonicalConfirmationRequest(manifest)), manifest, lease };
 		}
 		if (!runtime.confirmInteractive) throw new Error("Interactive intake requires the trusted UI confirmation boundary");
 		const provisional = createRunManifest({ ...common, confirmation: undefined });
@@ -144,7 +236,7 @@ export async function runSniffIntakeTool(
 			ttlMs: runtime.leaseTtlMs,
 			sandboxGrant: runtime.sandboxGrant,
 		});
-		return { interview, confirmation: canonicalConfirmationRequest(manifest), manifest, lease };
+		return { interview, confirmation: publicConfirmationSummary(canonicalConfirmationRequest(manifest)), manifest, lease };
 	} catch (error) {
 		targetLease.release();
 		throw error;

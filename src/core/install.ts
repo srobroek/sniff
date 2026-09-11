@@ -22,6 +22,8 @@ import {
 	TOOLS,
 	type ToolRec,
 } from "./catalog.ts";
+import { parseAnalyzerOutput, type AnalyzerCapture, type AnalyzerObservation } from "./analyzer-output.ts";
+import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable, type OpenGrepProvisionResult } from "./opengrep.ts";
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
 const ENV_REFRESH_TIMEOUT_MS = 10_000;
@@ -73,8 +75,10 @@ type FreshEnvironment = { env: ProcessEnvironment; source: "process" | "mise"; e
 export type SniffInstallRuntime = {
 	resolveCommand(bin: string, cwd: string, env: ProcessEnvironment): string | null;
 	readLauncher(path: string): string;
-	run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult>;
+	run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes?: number): Promise<CommandResult>;
 	freshEnvironment(cwd: string, env: ProcessEnvironment, miseAware: boolean, signal?: AbortSignal): Promise<FreshEnvironment>;
+	resolveOpenGrep(cacheDir?: string): string | null;
+	provisionOpenGrep(options: { cacheDir?: string; signal?: AbortSignal }): Promise<OpenGrepProvisionResult>;
 	/** Host-owned neutral cwd used for mutating installs, never the probe target. */
 	readonly neutralCwd?: string;
 };
@@ -85,12 +89,7 @@ export type SniffInstallResult = {
 };
 
 
-function timeoutError(err: unknown): boolean {
-	const candidate = err as { code?: string; name?: string; message?: string };
-	return candidate?.code === "ETIMEDOUT" || candidate?.name === "TimeoutError" || /\b(?:timed?\s*out|timeout)\b/i.test(candidate?.message ?? "");
-}
-
-async function readBounded(stream: ReadableStream<Uint8Array> | null): Promise<{ text: string; truncated: boolean }> {
+async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<{ text: string; truncated: boolean }> {
 	if (!stream) return { text: "", truncated: false };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
@@ -101,12 +100,12 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null): Promise<{
 			const next = await reader.read();
 			if (next.done) break;
 			const chunk = next.value;
-			if (retained < COMMAND_OUTPUT_LIMIT_BYTES) {
-				const end = Math.min(chunk.byteLength, COMMAND_OUTPUT_LIMIT_BYTES - retained);
+			if (retained < outputLimitBytes) {
+				const end = Math.min(chunk.byteLength, outputLimitBytes - retained);
 				if (end > 0) chunks.push(chunk.slice(0, end));
 				retained += end;
 			}
-			if (retained >= COMMAND_OUTPUT_LIMIT_BYTES && chunk.byteLength > 0) truncated = true;
+			if (retained >= outputLimitBytes && chunk.byteLength > 0) truncated = true;
 		}
 	} finally {
 		reader.releaseLock();
@@ -132,9 +131,9 @@ function terminateProcess(proc: { pid: number; kill(signal?: "SIGTERM" | "SIGKIL
 	}
 }
 
-async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult> {
+async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<CommandResult> {
 	if (signal?.aborted) {
-		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES, timedOut: false, error: "operation aborted", timeoutMs };
+		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
 	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
 	let timedOut = false;
@@ -150,8 +149,8 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 	const onAbort = () => stop("abort");
 	signal?.addEventListener("abort", onAbort, { once: true });
 	const [stdout, stderr, exitCode] = await Promise.all([
-		readBounded(proc.stdout as ReadableStream<Uint8Array>),
-		readBounded(proc.stderr as ReadableStream<Uint8Array>),
+		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes),
+		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes),
 		proc.exited,
 	]);
 	clearTimeout(timeout);
@@ -164,7 +163,7 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 		stderr: stderr.text,
 		stdoutTruncated: stdout.truncated,
 		stderrTruncated: stderr.truncated,
-		outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES,
+		outputLimitBytes,
 		timedOut,
 		error: aborted ? "operation aborted" : undefined,
 		signalCode: proc.signalCode ?? undefined,
@@ -212,6 +211,8 @@ const DEFAULT_RUNTIME: SniffInstallRuntime = {
 	readLauncher,
 	run: runCommand,
 	neutralCwd: tmpdir(),
+	resolveOpenGrep: (cacheDir) => resolveOpenGrepExecutable({ cacheDir }),
+	provisionOpenGrep,
 	async freshEnvironment(cwd, env, miseAware, signal) {
 		if (!miseAware) return { env: { ...env }, source: "process" };
 		const result = await runCommand(["mise", "env", "--json"], cwd, env, ENV_REFRESH_TIMEOUT_MS, signal);
@@ -258,6 +259,8 @@ function isShimLauncher(path: string, launcher: string): boolean {
 	return /\bexec\s+(?:[^\s]+\/)?(?:mise|asdf|pyenv|rbenv)\b/i.test(launcher);
 }
 
+type InspectToolAuthorization = (path: string) => string;
+
 async function inspectTool(
 	bundle: BundleName,
 	rec: ToolRec,
@@ -265,38 +268,58 @@ async function inspectTool(
 	cwd: string,
 	env: ProcessEnvironment,
 	runtime: SniffInstallRuntime,
-  validateResolvedPath?: (path: string) => string,
-  signal?: AbortSignal,
+	validateResolvedPath?: InspectToolAuthorization,
+	signal?: AbortSignal,
+	allowAuthorizedProjectLocalProbe = false,
 ): Promise<SniffToolResult> {
 	const effectiveEnv = projectEnvironment(rec, cwd, env);
-	const foundPath = runtime.resolveCommand(rec.bin, cwd, resolutionEnvironment(rec, cwd, env));
+	let foundPath: string | null;
+	try {
+		foundPath = rec.name === "opengrep"
+			? runtime.resolveOpenGrep(env.SNIFF_OPENGREP_CACHE_DIR)
+			: runtime.resolveCommand(rec.bin, cwd, resolutionEnvironment(rec, cwd, env));
+	} catch (error) {
+		return { bundle, tool: rec.name, bin: rec.bin, required, status: "policy-blocked", resolvedPath: null, remediation: error instanceof Error ? error.message : String(error), attempts: [] };
+	}
 	let resolvedPath = foundPath;
 	if (!resolvedPath) {
 		return { bundle, tool: rec.name, bin: rec.bin, required, status: rec.key === "npm-local" ? "project-local-required" : "missing", resolvedPath: null, remediation: rec.hint, attempts: [] };
 	}
-	if (validateResolvedPath) {
-		try {
-			resolvedPath = validateResolvedPath(resolvedPath);
-		} catch (error) {
-			return { bundle, tool: rec.name, bin: rec.bin, required, status: "policy-blocked", resolvedPath: null, remediation: error instanceof Error ? error.message : String(error), attempts: [] };
-		}
-	}
-	const launcher = runtime.readLauncher(resolvedPath);
-	if (isShimLauncher(resolvedPath, launcher)) {
-		return { bundle, tool: rec.name, bin: rec.bin, required, status: "shimmed", resolvedPath, remediation: rec.hint, attempts: [] };
-	}
-	const attempts: ProbeAttempt[] = [];
-	const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
-	const probeTimeoutMs = rec.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
-	for (const args of probeArgs) {
-		const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, probeTimeoutMs, signal);
-		attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
-		if (result.exitCode === 0 && !result.timedOut && !result.error) {
-			return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };
-		}
-	}
-	const status: SniffToolStatus = attempts.some((attempt) => attempt.timedOut) ? "timed-out" : "unrunnable";
-	return { bundle, tool: rec.name, bin: rec.bin, required, status, resolvedPath, remediation: rec.hint, attempts };
+  if (validateResolvedPath) {
+    try {
+      resolvedPath = validateResolvedPath(resolvedPath);
+    } catch (error) {
+      return { bundle, tool: rec.name, bin: rec.bin, required, status: "policy-blocked", resolvedPath: null, remediation: error instanceof Error ? error.message : String(error), attempts: [] };
+    }
+  }
+  if (rec.key === "npm-local" && !allowAuthorizedProjectLocalProbe) {
+    return {
+      bundle,
+      tool: rec.name,
+      bin: rec.bin,
+      required,
+      status: "policy-blocked",
+      resolvedPath,
+      remediation: `project-local launcher found at ${resolvedPath}; inventory does not execute project code. Run sniff_run_analyzer after capability authorization, or ${rec.hint}`,
+      attempts: [],
+    };
+  }
+  const launcher = runtime.readLauncher(resolvedPath);
+  if (isShimLauncher(resolvedPath, launcher)) {
+    return { bundle, tool: rec.name, bin: rec.bin, required, status: "shimmed", resolvedPath, remediation: rec.hint, attempts: [] };
+  }
+  const attempts: ProbeAttempt[] = [];
+  const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
+  const probeTimeoutMs = rec.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  for (const args of probeArgs) {
+    const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, probeTimeoutMs, signal);
+    attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
+    if (result.exitCode === 0 && !result.timedOut && !result.error) {
+      return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };
+    }
+  }
+  const status: SniffToolStatus = attempts.some((attempt) => attempt.timedOut) ? "timed-out" : "unrunnable";
+  return { bundle, tool: rec.name, bin: rec.bin, required, status, resolvedPath, remediation: rec.hint, attempts };
 }
 
 function managerRoute(
@@ -420,6 +443,23 @@ async function installOne(
 		lines.push(`      ${rec.hint}`);
 		return initial;
 	}
+	if (rec.name === "opengrep") {
+		if (dryRun) {
+			lines.push("  + download official OpenGrep v1.30.0 asset (timeout 120000ms)");
+			return initial;
+		}
+		try {
+			const provisioned = await runtime.provisionOpenGrep({ cacheDir: env.SNIFF_OPENGREP_CACHE_DIR, signal });
+			lines.push(`  + OpenGrep ${provisioned.reused ? "reused verified cache" : "downloaded and cached"} (${provisioned.path})`);
+			const verifiedResult = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+			if (verifiedResult.status === "usable") return verifiedResult;
+			return failedInstallResult(verifiedResult, "installation-failed", undefined, verifiedResult.remediation || "OpenGrep cache verification failed");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			lines.push(`      (installation-failed — ${message})`);
+			return failedInstallResult(initial, "installation-failed", undefined, message);
+		}
+	}
 	const manager = managerRoute(rec, preferMise, installCwd, env, runtime);
 	const argv = installArgv(rec, manager);
 	if (!manager || !argv) {
@@ -449,6 +489,7 @@ async function installOne(
 	return verified;
 }
 
+
 function probeLabel(result: SniffToolResult): string {
 	switch (result.status) {
 		case "usable":
@@ -456,6 +497,8 @@ function probeLabel(result: SniffToolResult): string {
 		case "missing":
 		case "project-local-required":
 			return `  MISS ${result.tool}   — ${result.remediation}`;
+		case "policy-blocked":
+			return `  BLOCK ${result.tool}   — ${result.remediation}`;
 		default:
 			return `  SHIM ${result.tool}   — on PATH but not runnable; install to activate: ${result.remediation}`;
 	}
@@ -502,6 +545,7 @@ export type SniffAnalyzerOutcome =
 	| "completed"
 	| "completed-with-findings"
 	| "rejected-exit"
+	| "incomplete-output"
 	| "not-run";
 
 export type SniffAnalyzerRunResult = {
@@ -510,7 +554,8 @@ export type SniffAnalyzerRunResult = {
 	preflight: SniffToolResult | null;
 	acceptedExitCodes?: number[];
 	outcome: SniffAnalyzerOutcome;
-	execution?: CommandResult;
+	observations?: readonly AnalyzerObservation[];
+	capture?: AnalyzerCapture;
 };
 
 function findTool(tool: string): { bundle: BundleName; rec: ToolRec } | null {
@@ -528,7 +573,7 @@ function analyzerEnvironment(home: string): ProcessEnvironment {
 		TMPDIR: home,
 		NO_COLOR: "1",
 	};
-	for (const name of ["PATH", "LANG", "LC_ALL", "TZ"] as const) {
+	for (const name of ["PATH", "LANG", "LC_ALL", "TZ", "SNIFF_OPENGREP_CACHE_DIR"] as const) {
 		if (process.env[name] !== undefined) env[name] = process.env[name];
 	}
 	return env;
@@ -578,7 +623,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
   }
   const env = analyzerEnvironment(authorization.home);
-  const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal);
+  const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
@@ -593,32 +638,46 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	}
 	const argv = [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv];
 	const timeoutMs = Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs);
+	const openGrep = authorization.recipe.tool === "opengrep";
+	const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
 	let execution: CommandResult;
 	let completionError: string | undefined;
 	try {
-		execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal);
+		execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal, outputLimitBytes);
 	} catch (error) {
-		execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
+		execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
 	}
 	try {
 		completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
 	} catch (error) {
 		completionError = error instanceof Error ? error.message : String(error);
 	}
+	const parsed = openGrep
+		? parseOpenGrepOutput(execution.stdout, authorization.target.root, execution.stdoutTruncated)
+		: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, execution.stdout, authorization.target.root, execution.stdoutTruncated);
 	const completed = !completionError && !execution.timedOut && !execution.error && execution.exitCode !== null;
-	const accepted = completed && acceptedExitCodes.includes(execution.exitCode as number);
-	const outcome: SniffAnalyzerOutcome = accepted ? execution.exitCode === 0 ? "completed" : "completed-with-findings" : completed ? "rejected-exit" : "not-run";
+	const incomplete = parsed?.capture.incomplete ?? false;
+	const accepted = completed && !incomplete && acceptedExitCodes.includes(execution.exitCode as number);
+	const outcome: SniffAnalyzerOutcome = !completed
+		? "not-run"
+		: incomplete
+			? "incomplete-output"
+			: accepted
+				? execution.exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
+				: "rejected-exit";
 	return {
 		ok: accepted,
-		report: accepted
-			? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
-			: completed
-				? `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`
-				: `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`,
+		report: !completed
+			? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`
+			: incomplete
+				? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
+				: accepted
+					? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
+					: `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
 		preflight,
 		acceptedExitCodes,
 		outcome,
-		execution,
+...(parsed ? { observations: parsed.observations, capture: parsed.capture } : {}),
 	};
 }
 export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffInstallResult> {

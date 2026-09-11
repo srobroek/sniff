@@ -1,18 +1,23 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRunManifest } from "../src/core/intake.ts";
+import { canonicalReportTargetIdentity, publicSniffIntakeResult } from "../src/core/intake-use-case.ts";
 import {
   buildSniffReport,
   createReportArtifacts,
   deterministicFindingId,
   type FindingInput,
+  MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES,
+  projectReportArtifacts,
   type ReportInput,
   renderSniffMarkdown,
   saveReportArtifacts,
   validateSniffReport,
 } from "../src/core/report.ts";
+import { readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
 import { issueRunLease } from "../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../src/core/target.ts";
@@ -92,7 +97,7 @@ function authorizedReport(input: ReportInput = reportInput()): Parameters<typeof
   return {
     capability: lease.capability,
     manifestId: lease.manifestId,
-    report: { ...input, findings, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
+    report: { ...input, target: { ...canonicalReportTargetIdentity(manifest.resolvedTarget, manifest.scopeMode), languages: input.target.languages }, findings, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
   };
 }
 
@@ -238,18 +243,18 @@ describe("structured Sniff reports", () => {
     expect(markdown).toContain("\\# Inject \\<script\\> \\| value");
   });
 
-  test("preflights every artifact collision without partial writes", () => {
+  test("preflights report-directory collisions without partial writes", () => {
     const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
-    for (const suffix of [".json", ".md", ".receipt.json"]) {
-      const directory = mkdtempSync(join(tmpdir(), "sniff-report-collision-"));
-      temporaryDirectories.push(directory);
-      const collision = join(directory, `${artifacts.report.reportId}${suffix}`);
-      writeFileSync(collision, "existing", "utf8");
+    const directory = mkdtempSync(join(tmpdir(), "sniff-report-collision-"));
+    temporaryDirectories.push(directory);
+    const destination = join(directory, artifacts.report.reportId);
+    mkdirSync(destination);
+    const collision = join(destination, "index.json");
+    writeFileSync(collision, "existing", "utf8");
 
-      expect(() => saveReportArtifacts(artifacts, directory)).toThrow("already exists");
-      expect(readdirSync(directory)).toEqual([`${artifacts.report.reportId}${suffix}`]);
-      expect(readFileSync(collision, "utf8")).toBe("existing");
-    }
+    expect(() => saveReportArtifacts(artifacts, directory)).toThrow("already exists");
+    expect(readdirSync(directory)).toEqual([artifacts.report.reportId]);
+    expect(readFileSync(collision, "utf8")).toBe("existing");
   });
 
 
@@ -266,17 +271,33 @@ describe("structured Sniff reports", () => {
   test("tool rendering remains ephemeral unless save is explicit", async () => {
     const rendered = await runSniffReportTool(authorizedReport());
     expect(rendered.savedPaths).toEqual([]);
+    expect(rendered.publicArtifacts.descriptors.every((descriptor) => descriptor.savedPath === undefined)).toBe(true);
 
     const directory = mkdtempSync(join(import.meta.dir, ".sniff-report-tool-"));
     temporaryDirectories.push(directory);
     const saved = await runSniffReportTool({ ...authorizedReport(), mode: "save", path: directory, runtime: { authorizeSave: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority" }) } });
-    expect(saved.savedPaths).toHaveLength(3);
+    expect(saved.savedPaths).toHaveLength(6);
+    expect(saved.savedPaths.every((path) => path.startsWith(join(directory, saved.artifacts.report.reportId)))).toBe(true);
+    expect(saved.publicArtifacts.descriptors.some((descriptor) => descriptor.savedPath !== undefined)).toBe(true);
+
+    const nestedParentRoot = mkdtempSync(join(tmpdir(), "sniff-report-parent-"));
+    temporaryDirectories.push(nestedParentRoot);
+    const nestedParent = join(nestedParentRoot, "files", "output");
+    const nested = await runSniffReportTool({ ...authorizedReport(), mode: "save", path: nestedParent, runtime: { authorizeSave: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority" }) } });
+    expect(nested.publicArtifacts.descriptors.every((descriptor) => descriptor.savedPath !== undefined)).toBe(true);
+  });
+  test("keeps the run lease for a corrected retry after malformed report input", async () => {
+    const request = authorizedReport();
+    const { headline: _headline, ...withoutHeadline } = request.report;
+    const malformed = { ...request, report: { ...withoutHeadline, target: { ...request.report.target, unexpected: true } } } as never;
+    await expect(runSniffReportTool(malformed)).rejects.toThrow("required property 'headline'");
+    const corrected = await runSniffReportTool(request);
+    expect(corrected.artifacts.report.reportId).toMatch(/^report-/);
   });
 
   test("tool save mode rejects an absent output path", async () => {
     await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
   });
-
 	test("does not create a requested destination before save approval", async () => {
 		const parent = mkdtempSync(join(import.meta.dir, ".sniff-report-save-parent-"));
 		temporaryDirectories.push(parent);
@@ -290,7 +311,10 @@ describe("structured Sniff reports", () => {
 				runtime: {
 					authorizeSave: async (request) => {
 						requested = true;
-						expect(request.directory).toBe(resolve(directory));
+						expect(request.directory).toBe(join(resolve(directory), request.reportId));
+						expect(request.parentDirectory).toBe(resolve(directory));
+						expect(request.files).toContain("index.json");
+						expect(Object.keys(request.artifactDigests)).toEqual([...request.files]);
 						expect(existsSync(directory)).toBe(false);
 						return false;
 					},
@@ -315,4 +339,187 @@ describe("structured Sniff reports", () => {
 		).rejects.toThrow("denied or mismatched");
 		expect(existsSync(directory)).toBe(false);
 	});
+  test("tool save mode rejects an absent output path", async () => {
+    await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
+  });
+  test("groups findings into deterministic per-file artifacts and verifies index digests", () => {
+    const report = buildSniffReport(reportInput([
+      finding({ stableKey: "test:second", location: { path: "src/z.ts", line: 4, anchor: "z" } }),
+      finding({ stableKey: "test:first", location: { path: "src/a.ts", line: 2, anchor: "a" } }),
+      finding({ stableKey: "test:third", location: { path: "src/a.ts", line: 1, anchor: "a2" } }),
+    ]));
+    const artifacts = createReportArtifacts(report);
+    expect(artifacts.fileArtifacts.map((file) => file.sourcePath)).toEqual(["src/a.ts", "src/z.ts"]);
+    expect(artifacts.fileArtifacts.flatMap((file) => file.findings.map((item) => item.id)).sort()).toEqual(report.findings.map((item) => item.id).sort());
+
+    const directory = mkdtempSync(join(tmpdir(), "sniff-report-digest-"));
+    temporaryDirectories.push(directory);
+    saveReportArtifacts(artifacts, directory);
+    const destination = join(directory, report.reportId);
+    const index = JSON.parse(readFileSync(join(destination, "index.json"), "utf8")) as { files: Array<{ relativePath: string; sha256: string }> };
+    for (const file of index.files) {
+      const bytes = readFileSync(join(destination, file.relativePath));
+      expect(createHash("sha256").update(bytes).digest("hex")).toBe(file.sha256);
+    }
+  });
+
+  test("bounds large summaries and public descriptors without losing saved artifacts", () => {
+    const findings = Array.from({ length: 10_000 }, (_, index) => finding({
+      stableKey: `test:large-${index}`,
+      title: `Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const projection = projectReportArtifacts(artifacts);
+    expect(Buffer.byteLength(artifacts.markdown)).toBeLessThanOrEqual(60_000);
+    expect(Buffer.byteLength(JSON.stringify(projection.descriptors))).toBeLessThanOrEqual(MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES);
+    expect(projection.descriptors.every((descriptor) => !Object.hasOwn(descriptor, "sourcePath"))).toBe(true);
+    expect(projection.descriptors).toHaveLength(128);
+    expect(projection.descriptorCount).toBe(10_005);
+    expect(projection.descriptorsTruncated).toBe(true);
+    expect(artifacts.fileArtifacts).toHaveLength(10_000);
+    expect(artifacts.fileArtifacts.reduce((total, file) => total + file.findings.length, 0)).toBe(10_000);
+  });
+  test("truncates public Markdown without splitting UTF-8 code points", () => {
+    const findings = Array.from({ length: 64 }, (_, index) => finding({
+      stableKey: `test:utf8-${index}`,
+      title: `界${"界".repeat(2_000)}-${index}`,
+      location: { path: `src/utf8-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+    }));
+    const markdown = renderSniffMarkdown(buildSniffReport(reportInput(findings)));
+    expect(Buffer.byteLength(markdown)).toBeLessThanOrEqual(60_000);
+    expect(Buffer.from(markdown, "utf8").toString("utf8")).toBe(markdown);
+    expect(markdown).not.toContain("\uFFFD");
+  });
+
+  test("pages complete artifacts beyond bounded summaries and preserves UTF-8 boundaries", () => {
+    const findings = Array.from({ length: 10_000 }, (_, index) => finding({
+      stableKey: `test:paged-${index}`,
+      title: `Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const capability = registerReportArtifacts(artifacts);
+    const descriptor = artifacts.descriptors.slice(128).find((item) => item.kind === "file");
+    if (!descriptor) throw new Error("expected an artifact beyond the public descriptor bound");
+    let offset = 0;
+    let content = "";
+    let pages = 0;
+    for (;;) {
+      const page = readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: descriptor.relativePath, offset });
+      expect(page.offset).toBe(offset);
+      expect(page.bytes).toBeLessThanOrEqual(64 * 1024);
+      expect(Buffer.byteLength(page.content)).toBe(page.bytes);
+      expect(Buffer.from(page.content, "utf8").toString("utf8")).toBe(page.content);
+      content += page.content;
+      pages += 1;
+      if (page.eof) {
+        expect(page.nextOffset).toBe(descriptor.bytes);
+        break;
+      }
+      offset = page.nextOffset;
+    }
+    expect(pages).toBeGreaterThan(0);
+    expect(content).toContain('"findings"');
+    expect(createHash("sha256").update(content).digest("hex")).toBe(descriptor.sha256);
+  });
+
+  test("rejects a symlink ancestor before save authorization", async () => {
+    const target = mkdtempSync(join(tmpdir(), "sniff-report-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-symlink-parent-"));
+    temporaryDirectories.push(target, parent);
+    const link = join(parent, "linked");
+    symlinkSync(target, link);
+    let authorized = false;
+    await expect(runSniffReportTool({
+      ...authorizedReport(),
+      mode: "save",
+      path: join(link, "reports"),
+      runtime: { authorizeSave: async () => { authorized = true; return false; } },
+    })).rejects.toThrow("cannot traverse a symlink");
+    expect(authorized).toBe(false);
+  });
+
+  test("rejects a canonical destination replaced after approval without residue", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-replacement-parent-"));
+    const outside = mkdtempSync(join(tmpdir(), "sniff-report-replacement-outside-"));
+    temporaryDirectories.push(parent, outside);
+    const destination = join(parent, "reports");
+    await expect(runSniffReportTool({
+      ...authorizedReport(),
+      mode: "save",
+      path: destination,
+      runtime: {
+        authorizeSave: async (request) => {
+          symlinkSync(outside, destination);
+          return { acceptedDigest: request.digest, actor: "test-authority" };
+        },
+      },
+    })).rejects.toThrow("cannot traverse a symlink");
+    expect(existsSync(join(outside, "index.json"))).toBe(false);
+  });
+  test("pins the approved parent across rename and symlink replacement", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-pinned-parent-"));
+    const moved = `${parent}-moved`;
+    const outside = mkdtempSync(join(tmpdir(), "sniff-report-pinned-outside-"));
+    temporaryDirectories.push(parent, moved, outside);
+    const destination = join(parent, "reports");
+    const saved = await runSniffReportTool({
+      ...authorizedReport(),
+      mode: "save",
+      path: destination,
+      runtime: {
+        authorizeSave: async (request) => {
+          renameSync(parent, moved);
+          symlinkSync(outside, parent);
+          return { acceptedDigest: request.digest, actor: "test-authority" };
+        },
+      },
+    });
+    expect(existsSync(join(moved, "reports", saved.artifacts.report.reportId, "index.json"))).toBe(true);
+    expect(existsSync(join(outside, "index.json"))).toBe(false);
+    expect(existsSync(join(outside, "reports"))).toBe(false);
+  });
+
+  test("does not overwrite a destination created after approval", async () => {
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-destination-race-"));
+    temporaryDirectories.push(parent);
+    const destination = join(parent, "reports");
+    const sentinel = "created-after-approval";
+    let reportDirectory = "";
+    await expect(runSniffReportTool({
+      ...authorizedReport(),
+      mode: "save",
+      path: destination,
+      runtime: {
+        authorizeSave: async (request) => {
+          reportDirectory = join(destination, request.reportId);
+          mkdirSync(reportDirectory, { recursive: true });
+          writeFileSync(join(reportDirectory, "index.json"), sentinel, "utf8");
+          return { acceptedDigest: request.digest, actor: "test-authority" };
+        },
+      },
+    })).rejects.toThrow("already exists");
+    expect(readFileSync(join(reportDirectory, "index.json"), "utf8")).toBe(sentinel);
+  });
+  test("replaces complete intake plans with a bounded summary", () => {
+    const result = publicSniffIntakeResult({
+      interview: {
+        questions: [],
+        confirmationRequired: true,
+        plan: {
+          target: { kind: "files", root: "/private/secret/repository", paths: Array.from({ length: 10_000 }, (_, index) => `src/file-${index}.ts`) },
+          intent: "audit",
+          scopeMode: "full",
+          objectives: ["structure-and-maintainability"],
+          exclusions: [],
+          budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10_000 },
+          security: {},
+        },
+      },
+    });
+    expect(result.interview).not.toHaveProperty("plan");
+    expect(result.interview.planSummary).toEqual({ target: { kind: "files", rootBasename: "repository" }, intent: "audit", scopeMode: "full", objectiveCount: 1, exclusionCount: 0, budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10_000 } });
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(2_000);
+  });
 });

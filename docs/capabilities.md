@@ -6,12 +6,13 @@ Sniff ships one portable core with three adapters.
 - Claude Code loads the bundled MCP server from its plugin manifest.
 - Codex loads the bundled MCP server from its plugin manifest.
 
-Every adapter exposes exactly five tools:
+Every adapter exposes exactly six tools:
 
 - `sniff_intake`
 - `sniff_install_tools`
 - `sniff_run_analyzer`
 - `sniff_report`
+- `sniff_read_report_artifact`
 - `sniff_cancel`
 
 The authored skill in `.skill-source/sniff/` generates native skill trees for each adapter.
@@ -22,6 +23,7 @@ The authored skill in `.skill-source/sniff/` generates native skill trees for ea
 - `NATIVE` marks a fresh harness installation or copied-cache probe.
 - `FOCUSED` marks a focused protocol test without a clean-room exercise.
 - `ENVIRONMENT-BLOCKED` marks an external model or registry condition.
+- `NOT-RERUN` marks a capability whose prior clean-room evidence predates the current contract and has not been rerun.
 - `N/A` marks an adapter-specific mechanism outside the portable contract.
 
 The matrix columns are OMP, CC for Claude Code, and CX for Codex.
@@ -30,13 +32,14 @@ The matrix columns are OMP, CC for Claude Code, and CX for Codex.
 
 ```text
 Capability | OMP | CC | CX
-Core and five tools | VERIFIED | VERIFIED | VERIFIED
+Core and six tools | NOT-RERUN | NOT-RERUN | NOT-RERUN
 Skill discovery | NATIVE | NATIVE | NATIVE
 Generated skill | VERIFIED | VERIFIED | VERIFIED
 sniff_intake | NATIVE | NATIVE | NATIVE
 sniff_install_tools | NATIVE | NATIVE | NATIVE
 sniff_run_analyzer | FOCUSED | FOCUSED | FOCUSED
 sniff_report render and save | FOCUSED | FOCUSED | FOCUSED
+sniff_read_report_artifact | NOT-RERUN | NOT-RERUN | NOT-RERUN
 Approval and denial | NATIVE | NATIVE | NATIVE
 Cancellation and cleanup | NATIVE | FOCUSED | FOCUSED
 Expiry and replay rejection | FOCUSED | FOCUSED | FOCUSED
@@ -125,10 +128,8 @@ A local marketplace add passed.
 `omp plugin install sniff@sniff --scope=user` passed in an isolated profile.
 
 The installed cache directory matched the source package SHA-256 `e2a95981a2faf4931470dc2fc4f0d3c87a460b7a081ca5ca72af50654c100560`.
-
+Fresh Bun imports registered exactly five cached extension tools in the 2026-09-11 run. That run predates `sniff_read_report_artifact` and does not verify the six-tool contract.
 Source-path search found no source checkout.
-
-Fresh Bun imports of cached extension modules registered exactly five tools.
 
 Cached `sniff_install_tools` list returned `ok=true` without mutation.
 
@@ -171,10 +172,8 @@ Installed-cache validation passed.
 Cache-only startup loaded the inline plugin.
 
 Cache-only startup loaded two `.claude/skills` files.
-
+The tool listing passed with exactly five names in the 2026-09-11 run; that run predates `sniff_read_report_artifact` and does not verify the current six-tool contract.
 Direct cached Bun `1.4.2` stdio initialize passed.
-
-The tool listing passed with exactly five names.
 
 The cached bundle SHA-256 was `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
 
@@ -208,7 +207,7 @@ Skill discovery remains verified.
 
 MCP registration remains verified.
 
-Tool listing remains verified.
+The pre-reader tool listing remains verified for that clean-room run; the current six-tool listing is not rerun.
 
 ### Codex `0.154.0.446`
 
@@ -219,10 +218,8 @@ A local marketplace add passed in an isolated `CODEX_HOME`.
 Cache startup read the plugin `mcp.json`.
 
 Cache startup launched `bun run ${PLUGIN_ROOT}/server.js`.
-
+The tool listing passed with exactly five names in the 2026-09-11 run; that run predates `sniff_read_report_artifact` and does not verify the current six-tool contract.
 The server initialized as `sniff` version `0.1.0`.
-
-The tool listing passed with exactly five names.
 
 Cached skill discovery loaded `skills/sniff/SKILL.md`.
 
@@ -259,10 +256,9 @@ The focused suite covers those paths at the protocol boundary.
 The checklist columns are Check, Native, and Focused.
 
 ```text
-Check | Native | Focused
+Six tool registration | The current six-tool contract is not rerun in the clean-room evidence | Focused tests validate list and dispatch
 Fresh marketplace and cache startup | OMP, Claude Code, and Codex passed local copied-source startup on 2026-09-11 | Packaging tests validate manifests
 Generated skill discovery | Each adapter loaded its copied-cache skill path | Skill generator tests validate every output tree
-Five tool registration | Each adapter listed the exact five names | MCP tests validate list and dispatch
 Intake approval and denial | OMP denied no-UI interactive intake. Claude and Codex denied no-capability intake | Intake tests validate approval and lease invariants
 Read-only list and probe | OMP and Claude passed list and probe. Codex passed a model probe | Installer tests validate probe and authorization boundaries
 Analyzer installation and execution | The clean-room skipped this row | Focused tests validate fixed-recipe dispatch and cancellation

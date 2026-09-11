@@ -1,13 +1,16 @@
-node_modules/
+node_modules
 dist/*
 !dist/claude/
 dist/claude/*
 !dist/claude/server.js
+!dist/claude/sniff-opengrep-hardcoded-values.yml
 !dist/codex/
 dist/codex/*
 !dist/codex/server.js
+!dist/codex/sniff-opengrep-hardcoded-values.yml
 !dist/omp/
 dist/omp/*
 !dist/omp/sniff-plugin.js
+!dist/omp/sniff-opengrep-hardcoded-values.yml
 *.log
 .DS_Store

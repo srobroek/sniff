@@ -31,7 +31,6 @@ Read `./references/workflow.md` first. Follow these steps in order:
 4. Run detection.
    - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`.
    - Record unavailable analyzers as coverage gaps.
-   - Read small targets inline.
    - For large targets, propose an independent read-only scout plan by language and subtree.
    - Build each brief from `./references/scout-brief.md`.
    - Include the matching `./references/languages/<lang>.md` path.
@@ -42,8 +41,9 @@ Read `./references/workflow.md` first. Follow these steps in order:
    - Run an independent read-only challenge pass using `./references/adversarial-brief.md`.
    - Drop or downgrade refuted findings.
 7. Report or apply.
-   - Put the exact manifest under `sniff.intake`.
-   - Pass the capability and manifest ID to `sniff_report`.
+   - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
+   - Pass the capability and manifest ID to `sniff_report`; omit `extensions["sniff.intake"]` so the host injects the authenticated manifest.
+   - Use the returned read capability, report ID, and descriptor relative path with `sniff_read_report_artifact`; follow UTF-8-safe pages through `nextOffset` until `eof`.
    - Call `sniff_cancel` when a run stops before reporting.
    - Save or apply only with explicit approval.
 

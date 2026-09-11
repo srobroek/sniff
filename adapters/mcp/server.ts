@@ -18,8 +18,9 @@ import {
   cancelRunLease,
   decisionFrontier,
   finalizeRunLease,
+  type IntakeInput,
   intakeInput,
-  type ReportInput,
+  publicSniffIntakeResult,
   releaseAllRunLeases,
   runSniffAnalyzer,
   runSniffInstall,
@@ -27,8 +28,12 @@ import {
   runSniffReportTool,
   type SaveAuthorizationRequest,
   type SniffInstallMode,
+  type SniffIntakePublicResult,
   type SniffReportMode,
+  type SniffToolResult,
 } from "../../src/core/index.ts";
+import type { ReportInput } from "../../src/core/report.ts";
+import { readReportArtifact } from "../../src/core/report-artifact-registry.ts";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_FRAME_BYTES = 1_048_576;
@@ -193,6 +198,19 @@ export class BoundedStdioTransport implements Transport {
 
 type JsonObject = Record<string, unknown>;
 type ToolResponse = CallToolResult & { readonly structuredContent: JsonObject };
+const reportInputSchemaForTool = (() => {
+  const schema = structuredClone(reportInputSchema) as JsonObject;
+  delete schema.$schema;
+  delete schema.$id;
+  const definitions = schema.$defs !== null && typeof schema.$defs === "object" && !Array.isArray(schema.$defs) ? schema.$defs as JsonObject : {};
+  delete schema.$defs;
+  if (Array.isArray(schema.required)) schema.required = schema.required.filter((field) => field !== "extensions");
+  return {
+    report: { $ref: "#/$defs/reportInput" },
+    $defs: { ...definitions, reportInput: schema },
+  } as const;
+})();
+
 type DigestRequest = {
   readonly digest: string;
   readonly [key: string]: unknown;
@@ -314,19 +332,43 @@ const resultSchema = (successProperties: JsonObject) => ({
   ],
 });
 
+const analyzerObservationSchema = {
+  type: "array",
+  items: {
+    type: "object",
+    required: ["ruleId", "path", "start", "message", "severity"],
+    properties: {
+      ruleId: stringSchema,
+      path: stringSchema,
+      start: { type: "object", required: ["line", "column"], properties: { line: { type: "integer" }, column: { type: "integer" } }, additionalProperties: false },
+      message: stringSchema,
+      severity: stringSchema,
+    },
+    additionalProperties: false,
+  },
+} as const;
+
+const analyzerCaptureSchema = {
+  type: "object",
+  required: ["bytes", "truncated", "digest", "incomplete"],
+  properties: { bytes: { type: "number", minimum: 0 }, truncated: { type: "boolean" }, digest: stringSchema, incomplete: { type: "boolean" }, reason: stringSchema },
+  additionalProperties: false,
+} as const;
+
 const outputSchemas = {
-  intake: resultSchema({ interview: { type: "object" }, confirmation: { type: "object" }, confirmationRequired: { type: "boolean" }, manifest: { type: "object" }, lease: { type: "object" } }),
+  intake: resultSchema({ interview: { type: "object" }, confirmation: { type: "object" }, confirmationRequired: { type: "boolean" }, lease: { type: "object" }, reportTarget: { type: "object" } }),
   cancel: resultSchema({ capability: stringSchema, manifestId: stringSchema, released: { type: "boolean" } }),
   install: resultSchema({ report: stringSchema, tools: { type: "array", items: { type: "object" } } }),
-  analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, execution: { type: "object" }, acceptedExitCodes: { type: "array", items: { type: "integer" } } }),
-  report: resultSchema({ artifacts: { type: "object" }, savedPaths: { type: "array", items: stringSchema } }),
+  analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, acceptedExitCodes: { type: "array", items: { type: "integer" } }, observations: analyzerObservationSchema, capture: analyzerCaptureSchema }),
+  report: resultSchema({ reportId: stringSchema, readCapability: stringSchema, summary: stringSchema, artifacts: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer" }, descriptorsTruncated: { type: "boolean" }, receipt: { type: "object" }, savedPaths: { type: "array", items: stringSchema } }),
+  reportArtifact: resultSchema({ reportId: stringSchema, relativePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
 } as const;
 
 const tools = [
   {
     name: "sniff_intake",
     title: "Sniff adaptive intake",
-    description: "Resolve the Sniff intake plan and obtain a trusted MCP elicitation before issuing a run lease.",
+    description: "Resolve the Sniff intake plan, issue a run lease, and return reportTarget for the matching sniff_report payload.",
     inputSchema: { type: "object", properties: { input: intakeInputSchema }, required: ["input"], additionalProperties: false },
     outputSchema: outputSchemas.intake,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -369,14 +411,15 @@ const tools = [
   {
     name: "sniff_report",
     title: "Sniff structured report",
-    description: "Validate and render or explicitly authorize saving a Sniff report bound to the issued intake manifest.",
+    description: "Validate and render or save a report. Copy reportTarget from sniff_intake into report.target, then add languages.",
     inputSchema: {
       type: "object",
+      $defs: reportInputSchemaForTool.$defs,
       properties: {
         capability: stringSchema,
         manifestId: stringSchema,
         mode: { enum: ["render", "save"] },
-        report: reportInputSchema,
+        report: reportInputSchemaForTool.report,
         path: stringSchema,
       },
       required: ["capability", "manifestId", "report"],
@@ -384,6 +427,19 @@ const tools = [
     },
     outputSchema: outputSchemas.report,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
+    name: "sniff_read_report_artifact",
+    title: "Read Sniff report artifact",
+    description: "Read one bounded UTF-8 page from a complete in-process Sniff report artifact using its opaque read capability.",
+    inputSchema: {
+      type: "object",
+      properties: { capability: stringSchema, reportId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } },
+      required: ["capability", "reportId", "relativePath"],
+      additionalProperties: false,
+    },
+    outputSchema: outputSchemas.reportArtifact,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ] as const;
 
@@ -439,6 +495,14 @@ function boundedValue(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) return value.slice(0, MAX_INPUT_ARRAY_LENGTH).map((item) => boundedValue(item, depth + 1));
   if (isObject(value)) return Object.fromEntries(Object.entries(value).slice(0, MAX_INPUT_OBJECT_KEYS).map(([key, item]) => [key, boundedValue(item, depth + 1)]));
   return value;
+}
+
+function publicAnalyzerPreflight(value: SniffToolResult | null): SniffToolResult | null {
+  if (!value) return null;
+  return {
+    ...value,
+    attempts: value.attempts.map(({ argv, exitCode, timedOut, error, timeoutMs }) => ({ argv, exitCode, stderr: "", timedOut, ...(error ? { error } : {}), timeoutMs })),
+  };
 }
 
 function toolError(name: string, error: unknown): ToolResponse {
@@ -646,16 +710,27 @@ function isElicitationFailure(error: unknown): boolean {
 function confirmationRequiredError(): SniffMcpError {
   return new SniffMcpError("confirmation_required", "MCP form elicitation did not produce trusted confirmation; retry with an interactive MCP client.");
 }
+function publicIntakeInterview(input: IntakeInput): SniffIntakePublicResult["interview"] {
+  return publicSniffIntakeResult({ interview: decisionFrontier(input) }).interview;
+}
 
 async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const input = intakeInput(args.input);
   if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
-  const frontier = decisionFrontier(input);
-  if (!frontier.plan) return toolSuccess({ ok: true, interview: frontier }, JSON.stringify(frontier));
   const noninteractive = input.interactive === false;
+  if (noninteractive) {
+    if (!input.target || !input.intent) {
+      const interview = publicIntakeInterview(input);
+      return toolSuccess({ ok: true, interview }, JSON.stringify(interview));
+    }
+  } else {
+    const interview = publicIntakeInterview(input);
+    if (!interview.planSummary) return toolSuccess({ ok: true, interview }, JSON.stringify(interview));
+  }
   if (!noninteractive && !supportsFormElicitation()) {
+    const interview = publicIntakeInterview(input);
     return toolSuccess(
-      { ok: false, interview: frontier, confirmationRequired: true, error: { code: "confirmation_required", message: "MCP form elicitation is required before issuing a lease" } },
+      { ok: false, interview, confirmationRequired: true, error: { code: "confirmation_required", message: "MCP form elicitation is required before issuing a lease" } },
       "Sniff intake requires MCP form elicitation; no lease was issued.",
     );
   }
@@ -700,8 +775,9 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     }
     throw abortError();
   }
-  if (result.lease) activeLeases.add(leaseKey(result.lease.capability, result.lease.manifestId));
-  return toolSuccess({ ok: true, ...result }, JSON.stringify(result));
+  const publicResult = publicSniffIntakeResult(result);
+  if (publicResult.lease) activeLeases.add(leaseKey(publicResult.lease.capability, publicResult.lease.manifestId));
+  return toolSuccess({ ok: true, ...publicResult }, JSON.stringify(publicResult));
 }
 
 async function install(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
@@ -724,13 +800,6 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
   if (selectedMode === "install") {
     if (!supportsFormElicitation()) return toolError("sniff_install_tools", new SniffMcpError("confirmation_required", "MCP form elicitation is required before installation"));
     const plan = await runSniffInstall({ ...options, mode: "diagnose", signal });
-    assertNotAborted(signal);
-    if (plan.tools.length === 0) {
-      return toolSuccess(
-        { ok: false, report: plan.report, tools: plan.tools, error: { code: "invalid_input", message: "No tools matched the requested install bundles" } },
-        plan.report,
-      );
-    }
     const planTools = plan.tools.map((tool) => ({ bundle: tool.bundle, tool: tool.tool, bin: tool.bin, status: tool.status, resolvedPath: tool.resolvedPath, routes: tool.attempts.map((attempt) => ({ argv: attempt.argv, exitCode: attempt.exitCode, timeoutMs: attempt.timeoutMs })) }));
     const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
     const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, noMise: options.noMise ?? false, cwd: tmpdir(), tools: planTools };
@@ -752,11 +821,20 @@ async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResp
   const manifestId = requiredString(args.manifestId, "manifestId");
   const analyzerName = requiredString(args.analyzer, "analyzer");
   const result = await runSniffAnalyzer({ capability, manifestId, analyzer: analyzerName, signal });
-  const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}` : result.report;
+  const capture = result.capture ? { bytes: Number(result.capture.bytes), truncated: Boolean(result.capture.truncated), digest: String(result.capture.digest), incomplete: Boolean(result.capture.incomplete), ...(result.capture.reason ? { reason: String(result.capture.reason) } : {}) } : undefined;
   const error = result.ok ? undefined : { code: "analyzer_failed", message: boundedString(result.report, 1_024) };
-  return toolSuccess({ ok: result.ok, report: result.report, preflight: result.preflight, ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}), outcome: result.outcome, ...(result.execution ? { execution: result.execution } : {}), ...(error ? { error } : {}) }, text);
+  const value = {
+    ok: result.ok,
+    report: result.report,
+    preflight: publicAnalyzerPreflight(result.preflight),
+    ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}),
+    outcome: result.outcome,
+    ...(result.observations ? { observations: result.observations } : {}),
+    ...(capture ? { capture } : {}),
+    ...(error ? { error } : {}),
+  };
+  return toolSuccess(value, result.report);
 }
-
 async function report(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const capability = requiredString(args.capability, "capability");
   const manifestId = requiredString(args.manifestId, "manifestId");
@@ -770,7 +848,7 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     delegatedToCore = true;
     const result = await runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
     assertNotAborted(signal);
-    return toolSuccess({ ok: true, artifacts: result.artifacts, savedPaths: result.savedPaths }, result.artifacts.markdown);
+    return toolSuccess({ ok: true, reportId: result.publicArtifacts.reportId, readCapability: result.publicArtifacts.readCapability, summary: result.publicArtifacts.summary, artifacts: result.publicArtifacts.descriptors, descriptorCount: result.publicArtifacts.descriptorCount, descriptorsTruncated: result.publicArtifacts.descriptorsTruncated, receipt: result.publicArtifacts.receipt, savedPaths: result.publicArtifacts.descriptors.flatMap((descriptor) => descriptor.savedPath ? [descriptor.savedPath] : []) }, result.publicArtifacts.summary);
   } finally {
     // Core finalizes after every delegated report attempt. This fallback is
     // only for validation failures before entering the core use case.
@@ -784,6 +862,16 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     activeLeases.delete(leaseKey(capability, manifestId));
   }
 }
+function reportArtifact(args: JsonObject): ToolResponse {
+  const capability = requiredString(args.capability, "capability");
+  const reportId = requiredString(args.reportId, "reportId");
+  const relativePath = requiredString(args.relativePath, "relativePath");
+  const offset = args.offset;
+  if (offset !== undefined && (!Number.isSafeInteger(offset) || Number(offset) < 0)) throw new SniffMcpError("invalid_input", "Report artifact offset must be a non-negative integer");
+  const result = readReportArtifact({ capability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
+}
+
 
 async function callTool(name: string, args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   inspectInput(args);
@@ -799,6 +887,7 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
     case "sniff_install_tools": return install(args, signal);
     case "sniff_run_analyzer": return analyzer(args, signal);
     case "sniff_report": return report(args, signal);
+    case "sniff_read_report_artifact": return reportArtifact(args);
     default: throw new SniffMcpError("unknown_tool", "Unknown Sniff tool");
   }
 }
@@ -807,7 +896,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   try {
     release = await semaphore.acquire(extra.signal);
     const args = isObject(request.params.arguments) ? request.params.arguments : {};
-    return await callTool(request.params.name, args, extra.signal);
+    const response = await callTool(request.params.name, args, extra.signal);
+    return response;
   } catch (error) {
     return toolError(request.params.name, error);
   } finally {

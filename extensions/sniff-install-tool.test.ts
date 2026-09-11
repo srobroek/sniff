@@ -1,17 +1,20 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import {
-	chmodSync,
-	mkdirSync,
-	mkdtempSync,
-	realpathSync,
-	rmSync,
-	writeFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { TOOLS } from "../src/core/catalog.ts";
+import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } from "../src/core/analyzer-output.ts";
+import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
 import { runSniffInstall } from "../src/core/install.ts";
+import { OPENGREP_MAX_OBSERVATIONS, parseOpenGrepOutput } from "../src/core/opengrep.ts";
 import sniffInstallTool from "./sniff-install-tool.ts";
 
 const temps: string[] = [];
@@ -55,6 +58,8 @@ function fakeRuntime(overrides: Partial<SniffInstallRuntime> = {}): SniffInstall
 			env: { ...env, FRESH: "1" },
 			source: miseAware ? "mise" : "process",
 		}),
+		resolveOpenGrep: () => "/fake/bin/opengrep",
+		provisionOpenGrep: async () => { throw new Error("unexpected OpenGrep provisioning"); },
 		...overrides,
 	};
 }
@@ -106,8 +111,100 @@ describe("sniff tool catalog", () => {
 	});
 });
 
+describe("OpenGrep parser contract", () => {
+	test("uses OpenGrep's exact rule IDs, target-relative paths, and supported file extensions", () => {
+		const root = tempDir("sniff-opengrep-target-");
+		const parsed = parseOpenGrepOutput(JSON.stringify({ results: [
+			{ check_id: "hardcoded-http-url", path: `${root}/src/main.go`, start: { line: 3, col: 5 }, extra: { message: "url", severity: "INFO" } },
+			{ check_id: "outside", path: "../outside.ts", start: { line: 1, col: 1 }, extra: { message: "outside", severity: "INFO" } },
+		] }), root);
+		expect(parsed.observations).toEqual([
+			{ ruleId: "hardcoded-http-url", path: "src/main.go", start: { line: 3, column: 5 }, message: "url", severity: "INFO" },
+		]);
+		expect(parsed.capture.incomplete).toBe(true);
+		expect(parsed.capture.reason).toContain("escaped");
+		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].args).toEqual(expect.arrayContaining(["--no-rewrite-rule-ids", "--disable-version-check"]));
+		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].targetSeparator).toEqual(["--"]);
+		expect(OPENGREP_FILE_EXTENSIONS).toEqual(expect.arrayContaining([".go", ".sh", ".bash", ".yaml", ".yml", ".json", ".toml", ".conf"]));
+	});
+
+	test("bounds findings and explains the incomplete capture", () => {
+		const root = tempDir("sniff-opengrep-bound-");
+		const results = Array.from({ length: OPENGREP_MAX_OBSERVATIONS + 1 }, (_, index) => ({ check_id: "rule-id", path: `src/file-${index}.go`, start: { line: 1, col: 1 }, extra: { message: "finding", severity: "INFO" } }));
+		const parsed = parseOpenGrepOutput(JSON.stringify({ results }), root);
+		expect(parsed.observations).toHaveLength(OPENGREP_MAX_OBSERVATIONS);
+		expect(parsed.capture.incomplete).toBe(true);
+		expect(parsed.capture.reason).toContain("2,000");
+	});
+
+	test("fails closed on malformed OpenGrep result entries", () => {
+		const root = tempDir("sniff-opengrep-malformed-");
+		const parsed = parseOpenGrepOutput(JSON.stringify({ results: [null, { check_id: "rule", path: "src/main.ts", start: { line: 1.5, col: 0 }, extra: { message: "finding", severity: "INFO" } }] }), root);
+		expect(parsed.observations).toEqual([]);
+		expect(parsed.capture.incomplete).toBe(true);
+		expect(parsed.capture.reason).toContain("malformed");
+	});
+});
+describe("bounded analyzer output projections", () => {
+	test("normalizes Lizard CSV rows to target-relative complexity observations", () => {
+		const root = tempDir("sniff-lizard-target-");
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src", "main.ts"), "function main() {}\n");
+		const parsed = parseLizardOutput([
+			"NLOC,CCN,token,PARAM,length,location,file,function,long_name",
+			`14,12,50,2,20,4-23,${join(root, "src", "main.ts")},main,main`,
+			`8,2,20,1,10,24-33,${join(root, "src", "main.ts")},helper,helper`,
+		].join("\n"), root);
+		expect(parsed.observations).toEqual([{
+			ruleId: "lizard:complexity",
+			path: "src/main.ts",
+			start: { line: 4, column: 1 },
+			message: "main: cyclomatic complexity 12 (NLOC 14, 2 parameters, 20 lines)",
+			severity: "MEDIUM",
+		}]);
+		expect(parsed.capture.incomplete).toBe(false);
+		expect(parsed.capture.digest).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	test("projects Gitleaks JSON with exact rule IDs and rejects escaped paths", () => {
+		const root = tempDir("sniff-gitleaks-target-");
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src", "secret.ts"), "const secret = true;\n");
+		const parsed = parseGitleaksOutput(JSON.stringify([
+			{ RuleID: "aws-access-key-id", Description: "AWS access key", File: "src/secret.ts", StartLine: 3, StartColumn: 5, Severity: "HIGH" },
+			{ RuleID: "outside", Description: "must not escape", File: "../outside.ts", StartLine: 1, StartColumn: 1 },
+		]), root);
+		expect(parsed.observations).toEqual([{
+			ruleId: "aws-access-key-id",
+			path: "src/secret.ts",
+			start: { line: 3, column: 5 },
+			message: "AWS access key",
+			severity: "HIGH",
+		}]);
+		expect(parsed.capture.incomplete).toBe(true);
+		expect(parsed.capture.reason).toContain("escaped");
+	});
+
+	test("fails closed for malformed or truncated output and caps observations", () => {
+		const root = tempDir("sniff-analyzer-bounds-");
+		const malformed = parseGitleaksOutput("[{not-json", root);
+		expect(malformed.observations).toEqual([]);
+		expect(malformed.capture.incomplete).toBe(true);
+		const truncated = parseLizardOutput("NLOC,CCN,token,PARAM,length,location,file,function,long_name", root, true);
+		expect(truncated.observations).toEqual([]);
+		expect(truncated.capture.truncated).toBe(true);
+		expect(truncated.capture.incomplete).toBe(true);
+		const rows = Array.from({ length: ANALYZER_MAX_OBSERVATIONS + 1 }, (_, index) => `1,10,1,0,1,${index + 1}-${index + 1},src/file-${index}.ts,fn${index},fn${index}`);
+		const bounded = parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...rows].join("\n"), root);
+		expect(bounded.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
+		expect(bounded.capture.incomplete).toBe(true);
+		expect(bounded.capture.reason).toContain("2,000");
+	});
+});
+
+
 describe("probe timeouts", () => {
-	test("uses Semgrep's extended bounded timeout without changing ordinary tools", async () => {
+	test("uses OpenGrep's extended bounded timeout without changing ordinary tools", async () => {
 		const calls: Array<{ bin: string; timeoutMs: number }> = [];
 		const result = await runSniffInstall({
 			mode: "diagnose",
@@ -120,8 +217,8 @@ describe("probe timeouts", () => {
 			}),
 		});
 		expect(result.ok).toBe(true);
-		expect(calls.find(({ bin }) => bin === "semgrep")?.timeoutMs).toBe(5_000);
-		expect(calls.filter(({ bin }) => bin !== "semgrep").every(({ timeoutMs }) => timeoutMs === 1_500)).toBe(true);
+		expect(calls.find(({ bin }) => bin === "opengrep")?.timeoutMs).toBe(30_000);
+		expect(calls.filter(({ bin }) => bin !== "opengrep").every(({ timeoutMs }) => timeoutMs === 1_500)).toBe(true);
 	});
 
 	test("does not oscillate status at the old timeout boundary", async () => {
@@ -135,7 +232,7 @@ describe("probe timeouts", () => {
 		});
 		for (const _ of [0, 1]) {
 			const result = await runSniffInstall({ mode: "diagnose", bundles: ["core"], runtime });
-			statuses.push(result.tools.find((tool) => tool.tool === "semgrep")?.status ?? "");
+			statuses.push(result.tools.find((tool) => tool.tool === "opengrep")?.status ?? "");
 		}
 		expect(statuses).toEqual(["unrunnable", "unrunnable"]);
 	});
@@ -163,27 +260,27 @@ describe("runSniffInstall", () => {
 		]) {
 			expect(result.report).toContain(`[${bundle}]`);
 		}
-		expect(result.report).toContain("semgrep");
+		expect(result.report).toContain("opengrep");
 		expect(result.report).toContain("golangci-lint");
 	});
 
-	test("probe stays successful with missing and shimmed tools", async () => {
+	test("probe stays successful with missing tools and ignores unverified OpenGrep PATH shims", async () => {
 		const dir = tempDir("sniff-probe-");
 		const shimDir = join(dir, ".mise", "shims");
-		executable(join(shimDir, "semgrep"), 'exec mise x -- semgrep "$@"');
+		executable(join(shimDir, "opengrep"), 'exec mise x -- opengrep "$@"');
 		const result = await runSniffInstall({
 			mode: "probe",
 			cwd: dir,
-			env: { PATH: shimDir },
+			env: { PATH: shimDir, SNIFF_OPENGREP_CACHE_DIR: join(dir, "empty-opengrep-cache") },
 		});
 		expect(result.ok).toBe(true);
-		expect(result.tools.find((tool) => tool.tool === "semgrep")?.status).toBe(
-			"shimmed",
+		expect(result.tools.find((tool) => tool.tool === "opengrep")?.status).toBe(
+			"missing",
 		);
 		expect(result.tools.find((tool) => tool.tool === "scc")?.status).toBe(
 			"missing",
 		);
-		expect(result.report).toContain("SHIM semgrep");
+		expect(result.report).toContain("MISS opengrep");
 		expect(result.report).toContain("MISS scc");
 	});
 
@@ -211,7 +308,7 @@ describe("runSniffInstall", () => {
 		});
 		expect(result.ok).toBe(true);
 		expect(result.tools.map((tool) => tool.tool)).toEqual([
-			"semgrep",
+			"opengrep",
 			"lizard",
 			"scc",
 			"ast-grep",
@@ -224,7 +321,7 @@ describe("runSniffInstall", () => {
 
 	test("preflight fails for a missing required tool", async () => {
 		const runtime = fakeRuntime({
-			resolveCommand: (bin) => (bin === "semgrep" ? null : `/fake/bin/${bin}`),
+			resolveOpenGrep: () => null,
 		});
 		const result = await runSniffInstall({
 			mode: "diagnose",
@@ -232,9 +329,9 @@ describe("runSniffInstall", () => {
 			runtime,
 		});
 		expect(result.ok).toBe(false);
-		const missing = result.tools.find((tool) => tool.tool === "semgrep");
+		const missing = result.tools.find((tool) => tool.tool === "opengrep");
 		expect(missing).toMatchObject({ status: "missing", resolvedPath: null });
-		expect(missing?.remediation).toContain("pipx install semgrep");
+		expect(missing?.remediation).toContain("sniff_install_tools mode=install bundles=[core]");
 	});
 
 	test("PATH launcher shim is classified as shimmed", async () => {
@@ -331,6 +428,32 @@ describe("runSniffInstall", () => {
 			status: "project-local-required",
 			resolvedPath: null,
 		});
+	});
+
+	test("inventory reports project-local launchers without executing them", async () => {
+		const dir = tempDir("sniff-local-inventory-");
+		const marker = join(dir, "invoked");
+		const launcher = join(dir, "node_modules", ".bin", "eslint");
+		executable(launcher, `printf invoked > ${JSON.stringify(marker)}`);
+		const expectedPath = realpathSync(launcher);
+
+		for (const mode of ["probe", "diagnose", "install"] as const) {
+			const result = await runSniffInstall({
+				mode,
+				...(mode === "diagnose" || mode === "install" ? { bundles: ["js-ts"] } : {}),
+				...(mode === "install" ? { dryRun: true } : {}),
+				cwd: dir,
+				env: { PATH: "" },
+			});
+			const eslint = result.tools.find((tool) => tool.tool === "eslint");
+			expect(eslint).toMatchObject({
+				status: "policy-blocked",
+				resolvedPath: expectedPath,
+				attempts: [],
+			});
+			expect(eslint?.remediation).toContain("inventory does not execute project code");
+		}
+		expect(existsSync(marker)).toBe(false);
 	});
 
 	test("already-aborted install cancels before spawning a manager", async () => {
@@ -527,9 +650,9 @@ describe("runSniffInstall", () => {
 	test("rejects empty PATH entries instead of resolving a host executable", async () => {
 		const dir = tempDir("sniff-empty-path-");
 		const binDir = join(dir, "bin");
-		executable(join(binDir, "semgrep"), "exit 0");
-		const result = await runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}` } });
-		expect(result.tools.find(({ tool }) => tool === "semgrep")?.status).toBe("missing");
+		executable(join(binDir, "opengrep"), "exit 0");
+		const result = await runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}`, SNIFF_OPENGREP_CACHE_DIR: join(dir, "empty-opengrep-cache") } });
+		expect(result.tools.find(({ tool }) => tool === "opengrep")?.status).toBe("missing");
 	});
 });
 

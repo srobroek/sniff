@@ -6,6 +6,10 @@ document independently because that can drift from machine-readable findings. Ev
 finding remains in JSON. The plan contains KEEP and DOWNGRADE findings; the transparency section
 contains DROP findings.
 
+The caller supplies the capability and manifest ID; the host authenticates that pair and injects
+the exact issued `sniff.intake` manifest when the report extension is omitted. If the extension is
+present, it must match the issued manifest exactly.
+
 Every retained finding includes impact, evidence tier, value, cost, and backwards compatibility.
 Order the plan by value-per-cost, highest first. Every finding cites `file:line` and its
 refactoring.guru mapping when one exists. Drop optional sections that do not apply.

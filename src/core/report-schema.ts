@@ -19,7 +19,11 @@ function isCanonicalDateTime(value: string): boolean {
 
 const ajv = new Ajv2020({ allErrors: true, strict: true, strictRequired: false });
 ajv.addFormat("date-time", { type: "string", validate: isCanonicalDateTime });
-const validateReportInputSchema = ajv.compile(reportInputSchema);
+const reportInputValidationSchema = {
+	...reportInputSchema,
+	required: reportInputSchema.required.filter((field: string) => field !== "extensions"),
+};
+const validateReportInputSchema = ajv.compile(reportInputValidationSchema);
 const validateReportSchema = ajv.compile(reportSchema);
 
 function validationMessage(errors: ErrorObject[] | null | undefined): string {

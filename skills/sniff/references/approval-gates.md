@@ -26,4 +26,4 @@ This SKILL is a router. Load the referenced file for each step; do not inline it
 
 ## Skill directory and target directory
 
-Tools run with cwd set to the target repository, while shipped assets live under `skill://sniff/`, including `references/semgrep-rules/`. Read them through `skill://sniff/<path>`. When a tool needs a filesystem path, resolve the installed skill directory once and pass an absolute path.
+Tools run with cwd set to the target repository, while shipped assets live under `skill://sniff/`, including `references/opengrep-rules/`. Read them through `skill://sniff/<path>`. When a tool needs a filesystem path, resolve the installed skill directory once and pass an absolute path.

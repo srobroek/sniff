@@ -1,10 +1,10 @@
-# Sniff — hardcoded-value smell rules for semgrep.
+# Sniff — hardcoded-value smell rules for opengrep.
 #
 # AST-aware replacement for a grep pattern bank: these match string/number
 # LITERALS in code positions that signal a hardcoded value, while ignoring
 # constants, enums, and test files (where fixed values are expected). Run with:
 #
-#   semgrep --config "$SNIFF_SKILL_DIR/references/semgrep-rules/hardcoded-values.yml" --json <files>
+#   opengrep --config "$SNIFF_SKILL_DIR/references/opengrep-rules/hardcoded-values.yml" --json <files>
 #
 # Tune per repo: add paths to `paths.exclude` for generated/vendored trees.
 # These are heuristics surfaced for human judgment, not auto-fixes. Credential

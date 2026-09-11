@@ -5,7 +5,7 @@
 - Before analysis, resolve scope.
 - List every file in the resolved target.
 - Do not change commit IDs after resolution.
-- Use in-place work only for files and working-tree targets.
+- Use in-place work only for files, working-tree, directory, and module targets.
 - A whole-repo target means the committed `HEAD` snapshot, not current uncommitted changes: resolve its full SHA, enumerate `git ls-tree -r --name-only <sha>`, and materialize a temporary checkout.
 - Hold each immutable commit, whole-repo, and remote target in a host-owned lease.
 - Use `sniff_cancel` for abandoned runs.
@@ -104,7 +104,7 @@ file set, not from prose in the request.
 
 - A scoped-files recipe receives only compatible files from the resolved target.
 - A bounded-history recipe receives only the authenticated history window.
-- A repository-wide recipe runs only for an explicit repository target.
+- A repository-wide recipe runs only for an explicit `repository` or `whole-repo` target.
 - An empty file set selects no file-scoped analyzer.
 - Record incompatible recipes as skipped. Never widen the target to make a recipe runnable.
 
@@ -113,7 +113,7 @@ file set, not from prose in the request.
 - Ruff: `ruff check --output-format json <files>`
 - ESLint: `npx eslint --format json <files>`
 - ShellCheck: `shellcheck -f json <files>`
-- Semgrep: `semgrep --config <ruleset> --json <files-or-dirs>`
+- OpenGrep: `opengrep --config <ruleset> --json <files-or-dirs>`
 - Go: `golangci-lint run --out-format json <dirs-of-target-.go-files>`
 - Protobuf: `buf breaking --against ".git#ref=<base-ref>,subdir=<proto-dir>"`
 - GraphQL: `graphql-inspector diff <base-schema> <head-schema>`
@@ -137,8 +137,6 @@ file set, not from prose in the request.
 - Date and count windows use the captured head.
 - Release windows use the captured release and head commits.
 - The context-aware default compares the captured head with its parent.
-- A non-Git repository supports whole-repo targets.
-- A non-Git repository supports module targets.
 - A non-Git repository supports file targets.
 
 ## Apply boundary

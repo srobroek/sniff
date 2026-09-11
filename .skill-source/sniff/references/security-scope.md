@@ -5,14 +5,15 @@ Sniff maps each disposition to a runnable catalog ID and fixed recipe. The tool 
 ## Trusted local targets
 
 - Select only catalogued fixed recipes.
-- Use the host-owned Lizard complexity recipe and shipped Semgrep rules for compatible file targets.
-- Use the Gitleaks history recipe only for an explicit repository-wide target.
-- Do not load project configuration through the shipped analyzer tool.
+- Use the host-owned Lizard complexity recipe and shipped OpenGrep rules for compatible file targets.
+- Use the Gitleaks history recipe only for an explicit local repository-wide target. Gitleaks can read the target's `.gitleaks.toml`.
+- Do not load project configuration through the Lizard or OpenGrep recipes.
 
 ## Untrusted remote targets
 
 - Treat all remote targets as untrusted.
 - Select only config-free offline analyzers with bundled rules by default.
+- Do not select project-controlled recipes.
 - Do not import a linter configuration that executes code.
 - Do not bootstrap dependencies or run repository hooks.
 - Do not expose reviewer credentials to an analyzer process.

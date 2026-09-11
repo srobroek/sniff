@@ -23,6 +23,20 @@ const repoRoot = resolve(import.meta.dir, "..");
 const codexRoot = join(repoRoot, "dist", "codex");
 const claudeServerPath = join(repoRoot, "dist", "claude", "server.js");
 const codexServerPath = join(codexRoot, "server.js");
+const OPENGREP_RULE_NAME = "sniff-opengrep-hardcoded-values.yml";
+const opengrepRuleSourcePath = join(
+	repoRoot,
+	".skill-source",
+	"sniff",
+	"references",
+	"opengrep-rules",
+	"hardcoded-values.yml",
+);
+const opengrepRuleOutputPaths = [
+	join(repoRoot, "dist", "omp", OPENGREP_RULE_NAME),
+	join(repoRoot, "dist", "claude", OPENGREP_RULE_NAME),
+	join(repoRoot, "dist", "codex", OPENGREP_RULE_NAME),
+] as const;
 const packageJson = JSON.parse(
 	readFileSync(join(repoRoot, "package.json"), "utf8"),
 ) as JsonObject;
@@ -63,6 +77,7 @@ const EXPECTED_TOOLS = [
 	"sniff_install_tools",
 	"sniff_run_analyzer",
 	"sniff_report",
+	"sniff_read_report_artifact",
 ] as const;
 
 function pluginEntry(catalog: JsonObject): JsonObject {
@@ -176,7 +191,6 @@ async function listTools(
 		await Promise.race([child.exited, Bun.sleep(2_000)]);
 	}
 }
-
 function copyClaudePackage(destination: string): void {
 	mkdirSync(join(destination, ".claude-plugin"), { recursive: true });
 	mkdirSync(join(destination, ".claude", "skills"), { recursive: true });
@@ -190,11 +204,15 @@ function copyClaudePackage(destination: string): void {
 	});
 	cpSync(join(repoRoot, ".mcp.json"), join(destination, ".mcp.json"));
 	cpSync(claudeServerPath, join(destination, "dist", "claude", "server.js"));
+	cpSync(
+		join(repoRoot, "dist", "claude", OPENGREP_RULE_NAME),
+		join(destination, "dist", "claude", OPENGREP_RULE_NAME),
+	);
 }
 
 function copyCodexPackage(destination: string): void {
 	mkdirSync(destination, { recursive: true });
-	for (const file of ["plugin.json", "mcp.json", "server.js"] as const) {
+	for (const file of ["plugin.json", "mcp.json", "server.js", OPENGREP_RULE_NAME] as const) {
 		cpSync(join(codexRoot, file), join(destination, file));
 	}
 }
@@ -202,6 +220,7 @@ const OMP_EXTENSION = "sniff-plugin.js" as const;
 
 type RegisteredTool = {
 	readonly name: string;
+	readonly parameters?: JsonObject;
 	readonly execute: (
 		id: string,
 		params: JsonObject,
@@ -214,7 +233,7 @@ type RegisteredTool = {
 function fakeOmpApi(tools: Map<string, RegisteredTool>): JsonObject {
 	const schema: Record<string, unknown> = {};
 	const chain = () => schema;
-	for (const method of ["array", "boolean", "describe", "number", "object", "optional", "string", "unknown"]) {
+	for (const method of ["array", "boolean", "describe", "int", "nonnegative", "number", "object", "optional", "string", "unknown"]) {
 		schema[method] = chain;
 	}
 	schema.enum = chain;
@@ -238,6 +257,12 @@ function stringValue(value: unknown, description: string): string {
 	if (typeof value !== "string") throw new Error(`${description} must be a string`);
 	return value;
 }
+function assertOpenGrepResource(root: string, relativePath: string): void {
+	const outputPath = join(root, relativePath);
+	expect(existsSync(outputPath)).toBe(true);
+	expect(readFileSync(outputPath).equals(readFileSync(opengrepRuleSourcePath))).toBe(true);
+	expect(existsSync(join(root, ".skill-source"))).toBe(false);
+}
 
 test("Copied OMP package imports one bundled extension and completes a leased lifecycle", async () => {
 	const cache = mkdtempSync(join(tmpdir(), "sniff-omp-cache-"));
@@ -246,7 +271,7 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 	const originalPath = process.env.PATH;
 	process.env.PATH = `${analyzerBin}${delimiter}${originalPath ?? ""}`;
 	try {
-		writeFileSync(join(analyzerBin, "lizard"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+		writeFileSync(join(analyzerBin, "lizard"), "#!/bin/sh\nfor arg do last=$arg; done\nprintf 'NLOC,CCN,token,PARAM,length,location,file,function,long_name\\n1,1,1,0,1,1-1,%s,module,module\\n' \"$last\"\n", { mode: 0o755 });
 		writeFileSync(join(targetRoot, "source.ts"), "export const source = true;\n");
 
 		const rootOmp = object(packageJson.omp, "package omp metadata");
@@ -272,11 +297,15 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 		expect(readdirSync(pluginRoot).sort()).toEqual([".omp-plugin", "dist", "package.json"]);
 		expect(readdirSync(join(pluginRoot, ".omp-plugin")).sort()).toEqual(["plugin.json"]);
 		expect(readdirSync(join(pluginRoot, "dist")).sort()).toEqual(["omp"]);
-		expect(readdirSync(join(pluginRoot, "dist", "omp")).sort()).toEqual([OMP_EXTENSION]);
+		expect(readdirSync(join(pluginRoot, "dist", "omp")).sort()).toEqual([
+			OMP_EXTENSION,
+			OPENGREP_RULE_NAME,
+		].sort());
 		expect(existsSync(join(pluginRoot, "node_modules"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "src"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "extensions"))).toBe(false);
 		expect(existsSync(join(pluginRoot, "adapters"))).toBe(false);
+		assertOpenGrepResource(pluginRoot, join("dist", "omp", OPENGREP_RULE_NAME));
 
 		const tools = new Map<string, RegisteredTool>();
 		const bundlePath = join(pluginRoot, "dist", "omp", OMP_EXTENSION);
@@ -313,14 +342,13 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 		const intakeDetails = object(intakeOutput.details, "sniff_intake details");
 		expect(intakeDetails.ok).toBe(true);
 		const intakeResult = object(intakeDetails.result, "sniff_intake result");
-		const manifest = object(intakeResult.manifest, "sniff_intake manifest");
-		const resolvedTarget = object(manifest.resolvedTarget, "resolved target");
-		const resolvedRoot = stringValue(resolvedTarget.root, "resolved target root");
-		const canonicalTargetRoot = realpathSync(targetRoot);
-		assertContained(canonicalTargetRoot, resolvedRoot);
-		const files = resolvedTarget.files;
-		if (!Array.isArray(files)) throw new Error("Resolved target files must be an array");
-		for (const file of files) assertContained(canonicalTargetRoot, join(resolvedRoot, stringValue(file, "resolved target file")));
+		expect(intakeResult).not.toHaveProperty("manifest");
+		expect(intakeResult).not.toHaveProperty("files");
+		const confirmation = object(intakeResult.confirmation, "sniff_intake confirmation");
+		const confirmedTarget = object(confirmation.target, "confirmed target");
+		expect(confirmedTarget).not.toHaveProperty("root");
+		const reportTarget = object(intakeResult.reportTarget, "sniff_intake reportTarget");
+		expect(reportTarget).toEqual({ kind: "files", label: "selected files", scopeMode: "quick", filesAnalyzed: 1 });
 
 		const lease = object(intakeResult.lease, "sniff_intake lease");
 		const capability = stringValue(lease.capability, "lease capability");
@@ -340,6 +368,13 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 
 		const reportTool = tools.get("sniff_report");
 		if (!reportTool) throw new Error("sniff_report was not registered");
+		const reportParameters = object(reportTool.parameters, "sniff_report parameters");
+		const reportProperties = object(reportParameters.properties, "sniff_report properties");
+		const { description: _description, ...actualReportSchema } = object(reportProperties.report, "sniff_report report schema");
+		const canonicalReportSchema = JSON.parse(readFileSync(join(repoRoot, ".skill-source", "sniff", "references", "report-input.schema.json"), "utf8")) as JsonObject;
+		const { $schema: _schema, $id: _id, title: _title, $defs: canonicalDefinitions, ...canonicalReportBody } = canonicalReportSchema;
+		expect(reportParameters.$defs).toEqual(canonicalDefinitions);
+		expect(actualReportSchema).toEqual(canonicalReportBody);
 		const reportOutput = await reportTool.execute(
 			"report",
 			{
@@ -348,19 +383,12 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 				mode: "render",
 				report: {
 					generatedAt: "2026-09-11T00:00:00.000Z",
-					target: {
-						kind: "files",
-						label: stringValue(resolvedTarget.label, "resolved target label"),
-						scopeMode: "quick",
-						languages: ["TypeScript"],
-						filesAnalyzed: files.length,
-					},
+					target: { ...reportTarget, languages: ["TypeScript"] },
 					headline: "Deterministic lifecycle fixture completed.",
 					findings: [],
 					coverage: [{ dimension: "complexity", tool: "lizard", analysisClass: "local", status: "ran", notes: "The fixed fixture analyzer completed." }],
 					suppressionCount: 0,
 					systemicPatterns: [],
-					extensions: { "sniff.intake": manifest },
 				},
 			},
 			undefined,
@@ -369,6 +397,9 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 		);
 		const reportDetails = object(reportOutput.details, "sniff_report details");
 		expect(reportDetails.ok).toBe(true);
+		const reportDescriptors = reportDetails.descriptors;
+		expect(Array.isArray(reportDescriptors)).toBe(true);
+		expect((reportDescriptors as unknown[]).length).toBeGreaterThan(0);
 
 		const cancel = tools.get("sniff_cancel");
 		if (!cancel) throw new Error("sniff_cancel was not registered");
@@ -480,6 +511,14 @@ test("Codex marketplace entries use the current local source policy", () => {
 	expect(codexEntry.category).toBe("Productivity");
 });
 
+test("All harnesses ship the authoritative OpenGrep ruleset without source fallback", () => {
+	const source = readFileSync(opengrepRuleSourcePath);
+	for (const outputPath of opengrepRuleOutputPaths) {
+		expect(existsSync(outputPath)).toBe(true);
+		expect(readFileSync(outputPath).equals(source)).toBe(true);
+	}
+});
+
 test("Harness bundles are one byte-identical portable payload", () => {
 	expect(existsSync(claudeServerPath)).toBe(true);
 	expect(existsSync(codexServerPath)).toBe(true);
@@ -504,8 +543,9 @@ test("Copied Claude and nested Codex caches serve exactly five MCP tools", async
 		assertContained(claudeRoot, claudeArgs[1]);
 		expect(existsSync(join(claudeRoot, "node_modules"))).toBe(false);
 		expect(existsSync(join(claudeRoot, "adapters"))).toBe(false);
+		assertOpenGrepResource(claudeRoot, join("dist", "claude", OPENGREP_RULE_NAME));
 		const claudeTools = await listTools(String(claude.command), claudeArgs, claudeRoot);
-		expect(claudeTools).toHaveLength(5);
+		expect(claudeTools).toHaveLength(EXPECTED_TOOLS.length);
 		expect(claudeTools.map((tool) => tool.name)).toEqual(EXPECTED_TOOLS);
 
 		const codexRoot = join(cache, "codex");
@@ -518,8 +558,9 @@ test("Copied Claude and nested Codex caches serve exactly five MCP tools", async
 		assertContained(codexRoot, codexArgs[1]);
 		expect(existsSync(join(codexRoot, "node_modules"))).toBe(false);
 		expect(existsSync(join(codexRoot, "adapters"))).toBe(false);
+		assertOpenGrepResource(codexRoot, OPENGREP_RULE_NAME);
 		const codexTools = await listTools(String(codex.command), codexArgs, codexRoot);
-		expect(codexTools).toHaveLength(5);
+		expect(codexTools).toHaveLength(EXPECTED_TOOLS.length);
 		expect(codexTools.map((tool) => tool.name)).toEqual(EXPECTED_TOOLS);
 	} finally {
 		rmSync(cache, { recursive: true, force: true });

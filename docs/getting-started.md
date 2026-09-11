@@ -1,6 +1,6 @@
 # Getting started
 
-Sniff uses one portable core. OMP loads a native extension. Claude Code and Codex load MCP adapters. Every adapter exposes the same five tools.
+Sniff uses one portable core. OMP loads a native extension. Claude Code and Codex load MCP adapters. Every adapter exposes the same six tools.
 
 ## Requirements
 
@@ -61,13 +61,16 @@ Read [Interviewing](interviewing.md) for request patterns and noninteractive def
 
 Plan confirmation issues a capability bound to the manifest. Installation needs separate approval. Analyzer execution uses the live capability. Report saving needs separate approval. Refactoring needs separate approval.
 
-The five tools follow this sequence:
+The six tools follow this sequence:
 
 1. `sniff_intake` resolves the frontier and obtains host approval or denial.
 2. `sniff_install_tools` checks analyzer bundles and installs approved bundles.
 3. `sniff_run_analyzer` revalidates the target and runs one selected recipe.
 4. `sniff_report` validates and renders a report or saves its artifact set.
-5. `sniff_cancel` closes the capability and removes temporary materialization.
+5. `sniff_read_report_artifact` pages a complete descriptor artifact with the opaque read capability returned by `sniff_report`.
+6. `sniff_cancel` closes an unfinished run and removes temporary materialization.
+
+Each UTF-8-safe read page is at most 64 KiB. Continue with `nextOffset` until `eof`; each response also includes `totalBytes` and a SHA-256 digest. The read capability remains usable in-process until bounded registry eviction. Saving to a repository still needs separate approval.
 
 Before installation, Sniff needs explicit approval. Remote targets use config-free, remote-safe recipes. Remote targets do not load project executable configuration.
 

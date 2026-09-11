@@ -70,13 +70,14 @@ Supported fields are `maxMinutes`, `maxAnalyzers`, and `maxFiles`.
 
 ## Approval boundaries
 
-The five tools keep approvals separate:
+The six tools keep approvals separate:
 
 1. `sniff_intake` needs plan confirmation before it issues a capability.
 2. `sniff_install_tools` needs installation approval before it installs bundles. Probe, diagnose, and list stay read-only.
 3. `sniff_run_analyzer` needs the live capability and a selected recipe. The host revalidates the target before execution.
 4. `sniff_report` renders a validated report or needs save approval before it writes artifacts.
-5. `sniff_cancel` closes an unfinished run and releases its materialization.
+5. `sniff_read_report_artifact` reads a descriptor artifact with the opaque read capability returned by `sniff_report`; it does not grant repository write access.
+6. `sniff_cancel` closes an unfinished run and releases its materialization.
 
 
 ## Related guides

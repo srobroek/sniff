@@ -132,16 +132,14 @@ async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
   if (!existsSync(path)) throw new Error(`Timed out waiting for ${path}`);
 }
 
-function reportInputForManifest(manifest: Message): Message {
-  const target = object(manifest.resolvedTarget);
-  const scopeMode = typeof manifest.scopeMode === "string" ? manifest.scopeMode : "full";
-  const kind = target.kind === "working-tree" ? "uncommitted" : target.kind;
+function reportInputForConfirmation(summary: Message): Message {
+  const target = object(summary.target);
   const reportTarget: Message = {
-    kind,
+    kind: target.kind === "working-tree" ? "uncommitted" : target.kind,
     label: typeof target.label === "string" ? target.label : "working tree",
-    scopeMode,
-    languages: Array.isArray(target.languages) ? target.languages : ["TypeScript"],
-    filesAnalyzed: Array.isArray(target.files) ? target.files.length : 1,
+    scopeMode: typeof summary.scopeMode === "string" ? summary.scopeMode : "full",
+    languages: ["TypeScript"],
+    filesAnalyzed: typeof target.filesAnalyzed === "number" ? target.filesAnalyzed : 1,
   };
   if (typeof target.baseRef === "string") reportTarget.baseRef = target.baseRef;
   return {
@@ -152,7 +150,6 @@ function reportInputForManifest(manifest: Message): Message {
     coverage: [{ dimension: "complexity", tool: "lizard", analysisClass: "local", status: "skipped", notes: "The protocol fixture does not run analyzers." }],
     suppressionCount: 0,
     systemicPatterns: ["The fixture intentionally contains no findings."],
-    extensions: { "sniff.intake": structuredClone(manifest) },
   };
 }
 
@@ -160,7 +157,10 @@ function outputSchemaValidator(tools: Message[], name: string): (value: unknown)
   const tool = tools.find((candidate) => candidate.name === name);
   if (!tool) throw new Error(`Missing advertised tool ${name}`);
   const validate = new Ajv2020({ strict: false }).compile(tool.outputSchema as Record<string, unknown>);
-  return (value: unknown): boolean => validate(value) as boolean;
+  return (value: unknown): boolean => {
+    const valid = validate(value) as boolean;
+    return valid;
+  };
 }
 
 describe("MCP transport and concurrency units", () => {
@@ -231,20 +231,44 @@ describe("MCP Sniff server", () => {
     expect(claudeServer.command).toBe("bun");
     expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/dist/claude/server.js`]);
   });
-  test("initializes, lists exactly five tools, and asks one frontier question", async () => {
+  test("initializes, lists exactly six tools, and asks one frontier question", async () => {
     const client = startClient();
     try {
       const initialized = await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "sniff-test", version: "1" } });
       expect(object(initialized.result).serverInfo).toEqual({ name: "sniff", version: "0.1.0" });
       const listed = object((await client.request("tools/list")).result);
       const tools = listed.tools as Message[];
-      expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report"]);
+      expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report", "sniff_read_report_artifact"]);
       expect(tools.every((tool) => object(tool.inputSchema).type === "object" && object(tool.outputSchema).type === "object")).toBe(true);
       const call = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: {} } })).result);
       const structured = object(call.structuredContent);
       const interview = object(structured.interview);
       expect((interview.questions as Message[]).map((question) => question.id)).toEqual(["target"]);
       expect(call.content).toBeArray();
+    } finally {
+      await client.close();
+    }
+  });
+  test("advertises a compilable report schema with optional host-hydrated extension", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "report-schema-test", version: "1" } });
+      const tools = object((await client.request("tools/list")).result).tools as Message[];
+      const reportTool = tools.find((tool) => tool.name === "sniff_report");
+      if (!reportTool) throw new Error("Missing sniff_report tool");
+      const schema = object(reportTool.inputSchema);
+      const validate = new Ajv2020({ strict: false }).compile(schema as Record<string, unknown>);
+      const report = {
+        generatedAt: "2026-09-11T08:00:00Z",
+        target: { kind: "files", label: "a.ts", scopeMode: "full", languages: ["TypeScript"], filesAnalyzed: 1 },
+        headline: "Schema fixture",
+        findings: [],
+        coverage: [],
+        suppressionCount: 0,
+        systemicPatterns: [],
+      };
+      expect(validate({ capability: "capability", manifestId: "manifest-id", report })).toBe(true);
+      expect(object(schema.$defs).reportInput).toBeDefined();
     } finally {
       await client.close();
     }
@@ -275,14 +299,60 @@ describe("MCP Sniff server", () => {
       const structured = object(intake.structuredContent);
       expect(structured.ok).toBe(true);
       expect(client.elicitationParams).toHaveLength(0);
-      const manifest = object(structured.manifest);
-      expect(manifest.authorization).toMatchObject({ required: true, actor: "mcp-headless-read-authority", reason: expect.stringContaining("server-owned") });
-      expect(manifest).not.toHaveProperty("sandboxGrant");
+      const confirmation = object(structured.confirmation);
+      expect(confirmation.scopeMode).toBe("full");
+      expect(confirmation).not.toHaveProperty("files");
       const lease = object(structured.lease);
       expect(typeof lease.capability).toBe("string");
       expect(typeof lease.manifestId).toBe("string");
       const cancelled = object((await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } })).result);
       expect(object(cancelled.structuredContent).released).toBe(true);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("issues a minimal noninteractive lease with recorded defaults and gaps", async () => {
+    const root = repository();
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "minimal-headless-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { target: { kind: "working-tree", root }, intent: "audit", interactive: false } } })).result);
+      const structured = object(intake.structuredContent);
+      expect(structured.ok).toBe(true);
+      expect(client.elicitationParams).toHaveLength(0);
+      const confirmation = object(structured.confirmation);
+      expect(confirmation.scopeMode).toBe("full");
+      expect(confirmation).not.toHaveProperty("files");
+      expect(structured).not.toHaveProperty("manifest");
+      expect(structured).not.toHaveProperty("files");
+      const lease = object(structured.lease);
+      expect(typeof lease.capability).toBe("string");
+      expect(typeof lease.manifestId).toBe("string");
+      const cancelled = object((await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } })).result);
+      expect(object(cancelled.structuredContent).released).toBe(true);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps incomplete interactive intake at the ordered frontier", async () => {
+    const root = repository();
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "interactive-frontier-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { target: { kind: "working-tree", root }, intent: "audit", interactive: true } } })).result);
+      const structured = object(intake.structuredContent);
+      expect(structured.ok).toBe(true);
+      expect(object(structured.interview).questions).toEqual([
+        expect.objectContaining({ id: "scopeMode" }),
+      ]);
+      expect(structured.lease).toBeUndefined();
+      expect(client.elicitationParams).toHaveLength(0);
     } finally {
       await client.close();
       expect(await client.stderr()).toBe("");
@@ -310,6 +380,46 @@ describe("MCP Sniff server", () => {
       expect(validate({ kind: "working-tree", root: "/tmp/repo", path: "src" })).toBe(false);
       expect(validate({ kind: "whole-repo", root: "/tmp/repo", extra: true })).toBe(false);
       expect(validate({ kind: "unknown", root: "/tmp/repo" })).toBe(false);
+    } finally {
+      await client.close();
+    }
+  });
+
+  test("accepts minimal optional target and history window variants while rejecting extras", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "optional-schema-test", version: "1" } });
+      const tools = object((await client.request("tools/list")).result).tools as Message[];
+      const intakeTool = tools.find((tool) => tool.name === "sniff_intake");
+      if (!intakeTool) throw new Error("Missing sniff_intake tool");
+      const intakeInput = object(object(intakeTool.inputSchema).properties).input;
+      const targetSchema = object(object(intakeInput).properties).target;
+      const variants = object(targetSchema).oneOf as Message[];
+      const variant = (kind: string): Message => {
+        const found = variants.find((candidate) => object(object(candidate).properties).kind && object(object(object(candidate).properties).kind).const === kind);
+        if (!found) throw new Error(`Missing ${kind} target variant`);
+        return found;
+      };
+      const validateTarget = new Ajv2020({ strict: false }).compile(targetSchema as Record<string, unknown>);
+      expect(validateTarget({ kind: "branch", root: "/tmp/repo", branch: "main" })).toBe(true);
+      expect(validateTarget({ kind: "branch", root: "/tmp/repo", branch: "main", base: "origin/main" })).toBe(true);
+      expect(validateTarget({ kind: "repository", repository: "owner/repo" })).toBe(true);
+      expect(validateTarget({ kind: "repository", repository: "owner/repo", ref: "main" })).toBe(true);
+      expect(validateTarget({ kind: "release", repository: "owner/repo", tag: "v1.0.0" })).toBe(true);
+      expect(validateTarget({ kind: "release", repository: "owner/repo", tag: "v1.0.0", previousTag: "v0.9.0" })).toBe(true);
+      expect(validateTarget({ kind: "branch", root: "/tmp/repo", branch: "main", extra: true })).toBe(false);
+
+      const historyWindow = object(object(variant("history")).properties).window;
+      const validateWindow = new Ajv2020({ strict: false }).compile(historyWindow as Record<string, unknown>);
+      const history = (window: Message): Message => ({ kind: "history", rootOrRepository: "/tmp/repo", window });
+      expect(validateWindow({ kind: "refs", base: "main", head: "HEAD" })).toBe(true);
+      expect(validateWindow({ kind: "since-date", date: "2026-01-01" })).toBe(true);
+      expect(validateWindow({ kind: "last-commits", count: 1 })).toBe(true);
+      expect(validateWindow({ kind: "since-release", release: "v1.0.0" })).toBe(true);
+      expect(validateWindow({ kind: "previous-release" })).toBe(true);
+      expect(validateWindow({ kind: "context-aware-default" })).toBe(true);
+      expect(validateTarget(history({ kind: "context-aware-default" }))).toBe(true);
+      expect(validateWindow({ kind: "since-date", date: "2026-01-01", extra: true })).toBe(false);
     } finally {
       await client.close();
     }
@@ -473,17 +583,26 @@ exit 0
       const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
       const intakeStructured = object(intake.structuredContent);
       const lease = object(intakeStructured.lease);
-      const manifest = object(intakeStructured.manifest);
-      const rendered = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, mode: "render", report: reportInputForManifest(manifest) } })).result);
+      const rendered = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, mode: "render", report: reportInputForConfirmation(object(intakeStructured.confirmation)) } })).result);
       expect(rendered.isError).not.toBe(true);
       expect(object(rendered.structuredContent).savedPaths).toEqual([]);
-      expect(object(object(rendered.structuredContent).artifacts).markdown).toContain("Deterministic MCP report fixture.");
+      expect(object(rendered.structuredContent).summary).toContain("Deterministic MCP report fixture.");
+      const renderedStructured = object(rendered.structuredContent);
+      const listedTools = object((await client.request("tools/list")).result).tools as Message[];
+      const readValid = outputSchemaValidator(listedTools, "sniff_read_report_artifact");
+      const read = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { capability: renderedStructured.readCapability, reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
+      const readStructured = object(read.structuredContent);
+      expect(readStructured.content).toContain("Deterministic MCP report fixture.");
+      expect(readStructured.eof).toBe(true);
+      expect(readValid(readStructured)).toBe(true);
+      const rejectedRead = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { capability: "wrong-capability", reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
+      expect(rejectedRead.isError).toBe(true);
 
       const secondIntake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
       const secondStructured = object(secondIntake.structuredContent);
       const secondLease = object(secondStructured.lease);
       const output = outputRoot;
-      const saved = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: secondLease.capability, manifestId: secondLease.manifestId, mode: "save", path: output, report: reportInputForManifest(object(secondStructured.manifest)) } })).result);
+      const saved = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: secondLease.capability, manifestId: secondLease.manifestId, mode: "save", path: output, report: reportInputForConfirmation(object(secondStructured.confirmation)) } })).result);
       expect(object(saved.structuredContent).ok).toBe(true);
       const savedPaths = object(saved.structuredContent).savedPaths as string[];
       expect(savedPaths.every((path) => existsSync(path))).toBe(true);
@@ -504,7 +623,7 @@ exit 0
       const intake = object((await denied.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(deniedRoot) } })).result);
       const structured = object(intake.structuredContent);
       const lease = object(structured.lease);
-      const result = object((await denied.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, mode: "save", path: deniedOutput, report: reportInputForManifest(object(structured.manifest)) } })).result);
+      const result = object((await denied.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, mode: "save", path: deniedOutput, report: reportInputForConfirmation(object(structured.confirmation)) } })).result);
       expect(result.isError).toBe(true);
       expect(object(result.structuredContent).error).toMatchObject({ code: "confirmation_required" });
       expect(existsSync(deniedOutput)).toBe(false);
@@ -516,29 +635,35 @@ exit 0
     }
   });
   // @ts-expect-error Bun runtime supports timeout options despite installed test typings.
-  test("validates representative install and analyzer failures against advertised output schemas", { timeout: 30_000 }, async () => {
+  test("ignores unverified OpenGrep executables on PATH", { timeout: 30_000 }, async () => {
     const toolsFixture = fakeToolchain();
-    executable(join(toolsFixture.bin, "jscpd"), "#!/bin/sh\nexit 17\n");
-    executable(join(toolsFixture.bin, "semgrep"), "#!/bin/sh\nexit 17\n");
+    executable(join(toolsFixture.bin, "opengrep"), `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'OpenGrep fixture\\n'; exit 0; fi
+printf '%s' '{"results":[{"check_id":"hardcoded-http-url","path":"index.ts","start":{"line":1,"col":2},"extra":{"message":"bounded observation","severity":"INFO","metavars":{"raw":"raw-secret"}},"raw":"raw-secret"}]}'
+printf 'raw-stderr-secret' >&2
+`);
     const root = repository();
-    executable(join(toolsFixture.bin, "lizard"), "#!/bin/sh\nexit 17\n");
-    const client = startClient("accept", toolsFixture.env);
+    const client = startClient("accept", { ...toolsFixture.env, SNIFF_OPENGREP_CACHE_DIR: join(toolsFixture.root, "empty-opengrep-cache") });
     try {
-      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "schema-test", version: "1" } });
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "projection-test", version: "1" } });
       const tools = object((await client.request("tools/list")).result).tools as Message[];
-      const installValid = outputSchemaValidator(tools, "sniff_install_tools");
       const analyzerValid = outputSchemaValidator(tools, "sniff_run_analyzer");
-      const install = object((await client.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "diagnose", bundles: ["dup"], noMise: true } })).result);
-      expect(object(install.structuredContent).ok).toBe(false);
-      expect(installValid(install.structuredContent)).toBe(true);
-      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
+      const input = intakeInput(root);
+      input.budget = { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10 };
+      input.security = { lightweightStatic: ["opengrep:hardcoded-values"] };
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input } })).result);
       const structured = object(intake.structuredContent);
-      const selected = (object(structured.manifest).analyzers as Message[]).find((candidate) => candidate.disposition === "selected");
-      if (!selected || typeof selected.name !== "string") throw new Error("fixture issued no analyzer");
       const lease = object(structured.lease);
-      const analyzer = object((await client.request("tools/call", { name: "sniff_run_analyzer", arguments: { capability: lease.capability, manifestId: lease.manifestId, analyzer: selected.name } })).result);
-      expect(object(analyzer.structuredContent).ok).toBe(false);
-      expect(analyzerValid(analyzer.structuredContent)).toBe(true);
+      const analyzer = object((await client.request("tools/call", { name: "sniff_run_analyzer", arguments: { capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values" } })).result);
+      const analyzerStructured = object(analyzer.structuredContent);
+      expect(analyzerStructured.ok).toBe(false);
+      expect(analyzerStructured.outcome).toBe("not-run");
+      expect(object(analyzerStructured.error)).toMatchObject({ code: "analyzer_failed" });
+      expect(object(analyzerStructured.preflight)).toMatchObject({ tool: "opengrep", status: "missing", resolvedPath: null });
+      expect(analyzerStructured.observations).toBeUndefined();
+      expect(analyzerStructured.capture).toBeUndefined();
+      expect(analyzerStructured.execution).toBeUndefined();
+      expect(analyzerValid(analyzerStructured)).toBe(true);
     } finally {
       await client.close();
       expect(await client.stderr()).toBe("");
@@ -557,7 +682,7 @@ printf started > ${started}
 trap 'exit 143' TERM
 sleep 1; exit 0
 `;
-    executable(join(toolsFixture.bin, "semgrep"), sleepingAnalyzer);
+    executable(join(toolsFixture.bin, "opengrep"), sleepingAnalyzer);
     executable(join(toolsFixture.bin, "lizard"), sleepingAnalyzer);
     const root = repository();
     const client = startClient("accept", toolsFixture.env);
@@ -565,10 +690,9 @@ sleep 1; exit 0
       await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "cancel-test", version: "1" } });
       const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
       const intakeStructured = object(intake.structuredContent);
-      const selected = (object(intakeStructured.manifest).analyzers as Message[]).find((candidate) => candidate.disposition === "selected");
-      if (!selected || typeof selected.name !== "string") throw new Error("fixture issued no analyzer");
+      const analyzerName = "lizard:complexity";
       const lease = object(intakeStructured.lease);
-      const pending = client.rawRequest(700, { jsonrpc: "2.0", method: "tools/call", params: { name: "sniff_run_analyzer", arguments: { capability: lease.capability, manifestId: lease.manifestId, analyzer: selected.name } } });
+      const pending = client.rawRequest(700, { jsonrpc: "2.0", method: "tools/call", params: { name: "sniff_run_analyzer", arguments: { capability: lease.capability, manifestId: lease.manifestId, analyzer: analyzerName } } });
       await waitForFile(started);
       const released = object((await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } })).result);
       expect(object(released.structuredContent).released).toBe(true);
@@ -585,7 +709,7 @@ sleep 1; exit 0
   });
 
   // @ts-expect-error Bun runtime supports timeout options despite installed test typings.
-  test("finalizes malformed reports and rejects replay", { timeout: 30_000 }, async () => {
+  test("allows one corrected report after malformed input and rejects replay", { timeout: 30_000 }, async () => {
     const root = repository();
     const client = startClient("accept");
     try {
@@ -593,12 +717,15 @@ sleep 1; exit 0
       const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
       const structured = object(intake.structuredContent);
       const lease = object(structured.lease);
-      const malformed = reportInputForManifest(object(structured.manifest));
+      const malformed = reportInputForConfirmation(object(structured.confirmation));
       malformed.headline = "";
       const terminal = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, report: malformed } })).result);
       expect(terminal.isError).toBe(true);
       expect(object(terminal.structuredContent).error).toMatchObject({ code: "invalid_input" });
-      const replay = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, report: reportInputForManifest(object(structured.manifest)) } })).result);
+      const corrected = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, report: reportInputForConfirmation(object(structured.confirmation)) } })).result);
+      expect(corrected.isError).toBeUndefined();
+      expect(object(corrected.structuredContent).ok).toBe(true);
+      const replay = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, report: reportInputForConfirmation(object(structured.confirmation)) } })).result);
       expect(replay.isError).toBe(true);
       expect(object(replay.structuredContent).error).toMatchObject({ code: "invalid_capability" });
     } finally {

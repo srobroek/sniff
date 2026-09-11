@@ -21,7 +21,7 @@ runnable from its recipe alone, not improvised:
    set as **explicit paths**; if a tool keeps state or resolves config by cwd
    (sqlfluff, eslint, stylelint), `cd` to the repo root once and pass absolute or
    repo-relative paths -- do not let a previous step's cwd leak in. Shipped assets
-   (semgrep rules, configs) live at `skill://sniff/references/semgrep-rules/` and
+   (opengrep rules, configs) live at `skill://sniff/references/opengrep-rules/` and
    must be passed as an absolute filesystem path when a tool needs `--config`.
 2. **Project config wins (Step 2.5).** If the repo configures the tool, run it so
    that config governs; the recipe's flags are the *no-project-config* form. A
@@ -61,8 +61,8 @@ These cover dimensions per-language linters structurally miss; pre-select ON:
 | cspell | spelling across code + docs | local | offline, bundled dicts; identifier/comment/doc typos no linter catches |
 
 Opt-in cross-language: **ast-grep** (structural search/rewrite -- needs custom
-rules; also powers apply), **semgrep** (security-first; our shipped
-`semgrep-rules/hardcoded-values.yml` is the one default use), **SonarQube CE**
+rules; also powers apply), **opengrep** (security-first; our shipped
+`opengrep-rules/hardcoded-values.yml` is the one default use), **SonarQube CE**
 (heavy server -- only for a standing quality gate), **tokei** (redundant w/ scc).
 
 ## Overlap map (don't double-count)
@@ -114,15 +114,15 @@ bounded targets.
 
 ## Cross-language meta-tools (install once, broad coverage)
 
-### semgrep -- AST pattern + intra-file dataflow, 30+ languages
+### opengrep -- AST pattern + intra-file dataflow, 30+ languages
 - **Dimensions:** anti-patterns, security, hardcoded values, custom smells.
 - **Class:** local (intra-file rules) -- scope to the file list.
-- **Invocation:** the shipped ruleset is under `skill://sniff/references/semgrep-rules/`,
+- **Invocation:** the shipped ruleset is under `skill://sniff/references/opengrep-rules/`,
   not the target repo -- and Step 3 runs tools with cwd = the target (or a worktree).
-  So ALWAYS pass it as an absolute path, or semgrep silently matches nothing (the
+  So ALWAYS pass it as an absolute path, or opengrep silently matches nothing (the
   worst failure: looks clean). Resolve the installed sniff skill directory, then:
-  `semgrep --config "$SNIFF_SKILL_DIR/references/semgrep-rules/hardcoded-values.yml" --json <files>`
-  Registry sweep (no shipped asset, network): `semgrep --config auto --json <files>`.
+  `opengrep scan --config "$SNIFF_SKILL_DIR/references/opengrep-rules/hardcoded-values.yml" --json --no-rewrite-rule-ids --disable-version-check <files>`
+  Registry sweep (no shipped asset, network): `opengrep scan --config auto --json --no-rewrite-rule-ids <files>`.
   The same rule applies to any bundled-asset path: absolutize against the installed
   skill directory before use, because cwd is the target, not the skill.
 - **Overlap:** the writable layer; complements every native linter. Highest

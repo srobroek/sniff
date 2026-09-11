@@ -82,7 +82,7 @@ test("write mode writes only temporary output trees", () => {
 	}
 });
 
-test("generated skills preserve the five-tool workflow and security gates", () => {
+test("generated skills preserve the six-tool workflow and security gates", () => {
 	const skill = readFileSync(join(generatedRoots[0], "SKILL.md"), "utf8");
 	const sequence = [
 		"sniff_intake",
@@ -111,9 +111,8 @@ test("generated skills preserve the five-tool workflow and security gates", () =
 	expect(intake).toContain(
 		"Call `sniff_cancel` if the run ends without a report.",
 	);
-	expect(skill).toContain(
-		"Pass the capability and manifest ID to `sniff_report`.",
-	);
+	expect(skill).toContain("Copy `reportTarget` from `sniff_intake` into `report.target`");
+	expect(skill).toContain("Pass the capability and manifest ID to `sniff_report`");
 });
 
 test("generated Codex trees are OMP-free and byte-identical", () => {

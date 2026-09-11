@@ -16,12 +16,13 @@ The source skill generates native skill trees. It lives in `.skill-source/sniff/
 
 Claude Code and Codex load the bundled MCP server through plugin manifests.
 
-Every adapter exposes five tools:
+All adapters expose six tools:
 
 - `sniff_intake`
 - `sniff_install_tools`
 - `sniff_run_analyzer`
 - `sniff_report`
+- `sniff_read_report_artifact`
 - `sniff_cancel`
 
 The authored skill in `.skill-source/sniff/` generates native skill trees for OMP, Claude Code, and Codex.
@@ -83,9 +84,14 @@ A confirmed run follows this flow:
 6. Run approved analyzers.
 7. Challenge findings in `full` mode.
 8. Render a validated report.
-9. Ask before saving report files.
+9. Page complete report artifacts with `sniff_read_report_artifact` when needed.
+10. Ask before saving report files.
 
 Each approval has a separate boundary. A denied intake issues no lease. Installation approval does not authorize analysis. Save approval does not authorize a refactor. Use `sniff_cancel` to stop an unfinished run. Expiry and terminal report events also release the host-owned materialization.
+
+After `sniff_report`, call `sniff_read_report_artifact`. Pass its read capability and report ID. Pass the descriptor path. Continue with `nextOffset` until `eof`.
+
+Each UTF-8-safe page is at most 64 KiB. The response includes `totalBytes` and a SHA-256 digest. The read capability remains usable in-process until bounded registry eviction. Saving to a repository still needs separate approval.
 
 `quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 

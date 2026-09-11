@@ -4,8 +4,9 @@ import type { CanonicalConfirmationRequest } from "../src/core/intake.ts";
 import type { SniffIntakeRuntime } from "../src/core/intake-use-case.ts";
 import {
 	intakeInput,
+	publicSniffIntakeResult,
 	runSniffIntakeTool,
-	type SniffIntakeToolResult,
+	type SniffIntakePublicResult,
 } from "../src/core/intake-use-case.ts";
 import { cancelRunLease } from "../src/core/run-registry.ts";
 
@@ -57,16 +58,17 @@ function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): Snif
 
 export default function sniffIntakeTool(pi: ExtensionAPI): void {
 	const z = pi.zod;
-	pi.registerTool<TSchema, { readonly ok: boolean; readonly result?: SniffIntakeToolResult; readonly error?: string }>({
+	pi.registerTool<TSchema, { readonly ok: boolean; readonly result?: SniffIntakePublicResult; readonly error?: string }>({
 		name: "sniff_intake",
 		label: "Sniff adaptive intake",
-		description: "Resolve the Sniff decision frontier and materialize an immutable target before issuing a validated run manifest.",
+		description: "Resolve the Sniff decision frontier and materialize an immutable target before issuing a validated run manifest. Accepted responses include a bounded confirmation digest, a summary, and reportTarget for the matching sniff_report payload.",
 		approval: "read",
 		parameters: z.object({ input: z.unknown().describe("Adaptive intake request") }) as unknown as TSchema,
 		execute: async (_id, params: { input: unknown }, _signal, _onUpdate, ctx) => {
 			try {
 				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, true));
-				return { content: [{ type: "text", text: JSON.stringify(result) }], details: { ok: true, result } };
+				const publicResult = publicSniffIntakeResult(result);
+				return { content: [{ type: "text", text: JSON.stringify(publicResult) }], details: { ok: true, result: publicResult } };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { content: [{ type: "text", text: `sniff_intake failed: ${message}` }], details: { ok: false, error: message }, isError: true };

@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, resolve, sep } from "node:path";
 import { assertReportInput, assertSniffReportSchema } from "./report-schema.ts";
+import { openReportDirectory, saveReportEntriesAt, type OpenedReportDirectory } from "./report-native-persistence.ts";
 
 export const SNIFF_REPORT_SCHEMA_VERSION = "1.0.0" as const;
+export const MAX_REPORT_SUMMARY_BYTES = 60_000;
+export const MAX_REPORT_SUMMARY_FINDINGS = 64;
+export const MAX_PUBLIC_REPORT_DESCRIPTORS = 128;
+export const MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES = 256 * 1024;
 
 export type EvidenceTier = "observed" | "reproduced" | "corroborated" | "hypothesis";
 export type Impact = "critical" | "high" | "medium" | "low";
@@ -68,8 +74,9 @@ export interface SniffReport {
 
 export type FindingInput = Omit<SniffFinding, "id">;
 
-export interface ReportInput extends Omit<SniffReport, "schemaVersion" | "reportId" | "findings" | "census"> {
+export interface ReportInput extends Omit<SniffReport, "schemaVersion" | "reportId" | "findings" | "census" | "extensions"> {
   findings: FindingInput[];
+  extensions?: SniffReport["extensions"];
 }
 
 export interface ValidationReceipt {
@@ -78,14 +85,75 @@ export interface ValidationReceipt {
   reportSha256: string;
   markdownSha256: string;
   findingCount: number;
+  artifactCount: number;
 }
 
+export type ReportArtifactKind = "index" | "summary" | "manifest" | "coverage" | "receipt" | "file";
+
+export interface ReportArtifactDescriptor {
+  kind: ReportArtifactKind;
+  relativePath: string;
+  sha256: string;
+  bytes: number;
+  sourcePath?: string;
+  findingCount?: number;
+  savedPath?: string;
+}
+
+export interface ReportFileArtifact {
+  relativePath: string;
+  sourcePath: string;
+  findings: SniffFinding[];
+  json: string;
+  sha256: string;
+  bytes: number;
+}
+
+export interface ReportArtifactIndex {
+  schemaVersion: typeof SNIFF_REPORT_SCHEMA_VERSION;
+  reportId: string;
+  generatedAt: string;
+  target: Pick<ReportTarget, "kind" | "label" | "scopeMode" | "filesAnalyzed">;
+  headline: string;
+  census: SniffReport["census"];
+  references: {
+    summary: string;
+    manifest: string;
+    coverage: string;
+    receipt: string;
+  };
+  files: readonly Pick<ReportArtifactDescriptor, "sourcePath" | "relativePath" | "sha256" | "bytes" | "findingCount">[];
+  artifacts: readonly Pick<ReportArtifactDescriptor, "kind" | "relativePath" | "sha256" | "bytes">[];
+}
+
+/** Internal, complete artifacts. Adapters must use projectReportArtifacts before returning a result. */
 export interface ReportArtifacts {
   report: SniffReport;
   json: string;
+  /** Bounded Markdown summary returned directly to callers. */
   markdown: string;
+  /** Complete Markdown artifact retained for paged reads and explicit saves. */
+  fullMarkdown: string;
   receipt: ValidationReceipt;
+  index: ReportArtifactIndex;
+  indexJson: string;
+  manifestJson: string;
+  coverageJson: string;
+  fileArtifacts: readonly ReportFileArtifact[];
+  descriptors: readonly ReportArtifactDescriptor[];
 }
+
+export interface PublicReportArtifacts {
+  reportId: string;
+  /** Opaque capability for reading complete artifacts in bounded pages. */
+  readCapability: string;
+  summary: string;
+  descriptors: readonly ReportArtifactDescriptor[];
+  descriptorCount: number;
+  descriptorsTruncated: boolean;
+  receipt: Pick<ValidationReceipt, "schemaVersion" | "reportId" | "findingCount" | "artifactCount">;
+}
+
 function compareText(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -183,7 +251,7 @@ export function buildSniffReport(value: unknown): SniffReport {
     coverage,
     suppressionCount: input.suppressionCount,
     systemicPatterns: [...input.systemicPatterns].sort(compareText),
-    extensions: input.extensions,
+    extensions: input.extensions ?? {},
     census: calculateCensus(findings),
   };
   const report: SniffReport = { ...withoutId, reportId: `report-${sha256(reportIdentity(withoutId)).slice(0, 16)}` };
@@ -214,7 +282,7 @@ function escapeMarkdown(value: string): string {
   return value
     .replaceAll("\\", "\\\\")
     .replace(/\r\n?|[\n\u2028\u2029]/g, " ")
-    .replace(/[<>`*_[\]#]/g, "\\$&")
+    .replace(/[<>`*_\[\]#]/g, "\\$&")
     .replaceAll("|", "\\|");
 }
 
@@ -224,12 +292,54 @@ function comparePriority(left: SniffFinding, right: SniffFinding): number {
   return leftRatio === rightRatio ? compareText(left.id, right.id) : rightRatio - leftRatio;
 }
 
-export function renderSniffMarkdown(report: SniffReport): string {
+function boundedUtf8(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value);
+  if (bytes.byteLength <= maxBytes) return value;
+  const suffix = Buffer.from("\n[truncated]");
+  if (maxBytes <= suffix.byteLength) return suffix.subarray(0, Math.max(0, maxBytes)).toString("utf8");
+  let prefixEnd = maxBytes - suffix.byteLength;
+  while (prefixEnd > 0 && isContinuationByte(bytes[prefixEnd] ?? 0)) prefixEnd -= 1;
+  return `${bytes.subarray(0, prefixEnd).toString("utf8")}${suffix.toString("utf8")}`;
+}
+
+function isContinuationByte(value: number): boolean {
+  return (value & 0xc0) === 0x80;
+}
+function boundedInline(value: string, maxCharacters = 160): string {
+  return value.length <= maxCharacters ? value : `${value.slice(0, maxCharacters - 3)}...`;
+}
+
+
+function safeBasename(sourcePath: string): string {
+  const candidate = basename(sourcePath).replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "").slice(0, 96);
+  return candidate || "source";
+}
+
+export function reportFileRelativePath(sourcePath: string): string {
+  const normalized = normalizePath(sourcePath);
+  return `files/${sha256(normalized).slice(0, 12)}-${safeBasename(normalized)}.json`;
+}
+
+function fileArtifactNameMap(report: SniffReport): Map<string, string> {
+  const paths = [...new Set(report.findings.map((finding) => normalizePath(finding.location.path)))].sort(compareText);
+  const map = new Map<string, string>();
+  const names = new Set<string>();
+  for (const path of paths) {
+    const relativePath = reportFileRelativePath(path);
+    requireCondition(!names.has(relativePath), `file artifact name collides for ${path}`);
+    names.add(relativePath);
+    map.set(path, relativePath);
+  }
+  return map;
+}
+
+function renderMarkdown(report: SniffReport, bounded: boolean): string {
   validateSniffReport(report);
-  const retained = report.findings
-    .filter((finding) => finding.adversarial.verdict !== "drop")
-    .sort(comparePriority);
-  const challenged = report.findings.filter((finding) => finding.adversarial.verdict !== "keep");
+  const files = fileArtifactNameMap(report);
+  const allRetained = report.findings.filter((finding) => finding.adversarial.verdict !== "drop").sort(comparePriority);
+  const retained = bounded ? allRetained.slice(0, MAX_REPORT_SUMMARY_FINDINGS) : allRetained;
+  const allChallenged = report.findings.filter((finding) => finding.adversarial.verdict !== "keep").sort(comparePriority);
+  const challenged = bounded ? allChallenged.slice(0, MAX_REPORT_SUMMARY_FINDINGS) : allChallenged;
   const coverageRows = report.coverage.map(
     (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(entry.notes)} |`,
   );
@@ -238,13 +348,15 @@ export function renderSniffMarkdown(report: SniffReport): string {
       ? `[${escapeMarkdown(finding.smell.name)}](${finding.smell.url}) → [${escapeMarkdown(finding.refactoring.name)}](${finding.refactoring.url})`
       : "—";
     const compatibility = finding.compatibility.kind === "safe" ? "safe" : `breaking: ${escapeMarkdown(finding.compatibility.surface ?? "")}`;
-    return `| ${index + 1} | ${escapeMarkdown(finding.title)} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${mapping} | ${finding.impact} | ${finding.evidence.tier} | ${finding.value} | ${finding.cost} | ${compatibility} | ${finding.applyTier} |`;
+    const file = files.get(finding.location.path) ?? reportFileRelativePath(finding.location.path);
+    const findingLabel = `[${escapeMarkdown(finding.title)}](${file})`;
+    return `| ${index + 1} | ${findingLabel} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${mapping} | ${finding.impact} | ${finding.evidence.tier} | ${finding.value} | ${finding.cost} | ${compatibility} | ${finding.applyTier} |`;
   });
   const challengedRows = challenged.map(
     (finding) => `| ${escapeMarkdown(finding.title)} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${finding.adversarial.verdict.toUpperCase()} | ${escapeMarkdown(finding.adversarial.reason)} |`,
   );
   const lines = [
-    `# Sniff Refactoring Plan — ${escapeMarkdown(report.target.label)}`,
+    `# Sniff Refactoring Plan — ${bounded ? escapeMarkdown(boundedInline(report.target.label)) : escapeMarkdown(report.target.label)}`,
     "",
     `**Report:** \`${report.reportId}\`  ·  **Target:** ${report.target.kind}  ·  **Scope mode:** ${report.target.scopeMode}  ·  **Base ref:** ${report.target.baseRef ? escapeMarkdown(report.target.baseRef) : "none"}`,
     `**Languages:** ${report.target.languages.map(escapeMarkdown).join(", ") || "none"}  ·  **Date:** ${report.generatedAt.slice(0, 10)}`,
@@ -255,6 +367,7 @@ export function renderSniffMarkdown(report: SniffReport): string {
     `- By impact: critical ${report.census.byImpact.critical} · high ${report.census.byImpact.high} · medium ${report.census.byImpact.medium} · low ${report.census.byImpact.low}`,
     `- Suppressions observed: ${report.suppressionCount}`,
     `- Headline: ${escapeMarkdown(report.headline)}`,
+    ...(bounded && allRetained.length > retained.length ? [`- Showing ${retained.length} highest-priority findings; ${allRetained.length - retained.length} more findings are available in the per-file artifacts.`] : []),
     "",
     "## Tool coverage",
     "",
@@ -269,7 +382,8 @@ export function renderSniffMarkdown(report: SniffReport): string {
     ...(findingRows.length > 0 ? findingRows : ["| — | No findings survived adversarial review. | — | — | — | — | — | — | — |"]),
   ];
   if (report.systemicPatterns.length > 0) {
-    lines.push("", "## Systemic patterns", "", ...report.systemicPatterns.map((pattern) => `- ${escapeMarkdown(pattern)}`));
+    const patterns = bounded ? report.systemicPatterns.slice(0, 32) : report.systemicPatterns;
+    lines.push("", "## Systemic patterns", "", ...patterns.map((pattern) => `- ${escapeMarkdown(pattern)}`));
   }
   lines.push(
     "",
@@ -280,51 +394,169 @@ export function renderSniffMarkdown(report: SniffReport): string {
     ...(challengedRows.length > 0 ? challengedRows : ["| — | — | No findings were dropped or downgraded. |"]),
     "",
   );
-  return lines.join("\n");
+  if (files.size > 0) {
+    const listedFiles = bounded ? [...files.entries()].slice(0, MAX_REPORT_SUMMARY_FINDINGS) : [...files.entries()];
+    lines.push("## Source files", "", ...listedFiles.map(([path, relativePath]) => `- [${escapeMarkdown(path)}](${relativePath})`));
+    if (bounded && files.size > MAX_REPORT_SUMMARY_FINDINGS) lines.push(`- ${files.size - MAX_REPORT_SUMMARY_FINDINGS} additional source files are listed in index.json.`);
+    lines.push("");
+  }
+  const markdown = lines.join("\n");
+  return bounded ? boundedUtf8(markdown, MAX_REPORT_SUMMARY_BYTES) : `${markdown}\n`;
+}
+
+export function renderSniffMarkdown(report: SniffReport): string {
+  return renderMarkdown(report, true);
+}
+
+export function renderCompleteSniffMarkdown(report: SniffReport): string {
+  return renderMarkdown(report, false);
+}
+
+function manifestFromReport(report: SniffReport): unknown {
+  const manifest = report.extensions["sniff.intake"];
+  return manifest === undefined ? {} : manifest;
+}
+
+function createFileArtifacts(report: SniffReport): ReportFileArtifact[] {
+  const grouped = new Map<string, SniffFinding[]>();
+  for (const finding of report.findings) {
+    const path = normalizePath(finding.location.path);
+    const group = grouped.get(path);
+    if (group) group.push(finding);
+    else grouped.set(path, [finding]);
+  }
+  const names = new Set<string>();
+  return [...grouped.entries()].sort(([left], [right]) => compareText(left, right)).map(([sourcePath, findings]) => {
+    const relativePath = reportFileRelativePath(sourcePath);
+    requireCondition(!names.has(relativePath), `file artifact name collides for ${sourcePath}`);
+    names.add(relativePath);
+    const ordered = [...findings].sort((left, right) => compareText(left.id, right.id));
+    const json = canonicalJson({ path: sourcePath, findings: ordered });
+    return { relativePath, sourcePath, findings: ordered, json, sha256: sha256(json), bytes: Buffer.byteLength(json) };
+  });
 }
 
 export function createReportArtifacts(report: SniffReport): ReportArtifacts {
   validateSniffReport(report);
   const json = canonicalJson(report);
   const markdown = renderSniffMarkdown(report);
+  const fullMarkdown = renderCompleteSniffMarkdown(report);
+  const manifestJson = canonicalJson(manifestFromReport(report));
+  const coverageJson = canonicalJson(report.coverage);
+  const fileArtifacts = createFileArtifacts(report);
+  const nonIndex: ReportArtifactDescriptor[] = [
+    { kind: "summary", relativePath: "summary.md", sha256: sha256(fullMarkdown), bytes: Buffer.byteLength(fullMarkdown) },
+    { kind: "manifest", relativePath: "manifest.json", sha256: sha256(manifestJson), bytes: Buffer.byteLength(manifestJson) },
+    { kind: "coverage", relativePath: "coverage.json", sha256: sha256(coverageJson), bytes: Buffer.byteLength(coverageJson) },
+    ...fileArtifacts.map((file) => ({ kind: "file" as const, relativePath: file.relativePath, sourcePath: file.sourcePath, findingCount: file.findings.length, sha256: file.sha256, bytes: file.bytes })),
+  ];
+  const artifactCount = nonIndex.length + 2;
+  const receipt: ValidationReceipt = {
+    schemaVersion: SNIFF_REPORT_SCHEMA_VERSION,
+    reportId: report.reportId,
+    reportSha256: sha256(json),
+    markdownSha256: sha256(fullMarkdown),
+    findingCount: report.findings.length,
+    artifactCount,
+  };
+  const receiptJson = canonicalJson(receipt);
+  const receiptDescriptor: ReportArtifactDescriptor = { kind: "receipt", relativePath: "receipt.json", sha256: sha256(receiptJson), bytes: Buffer.byteLength(receiptJson) };
+  const descriptorsWithoutIndex = [...nonIndex, receiptDescriptor].sort((left, right) => compareText(left.relativePath, right.relativePath));
+  const index: ReportArtifactIndex = {
+    schemaVersion: SNIFF_REPORT_SCHEMA_VERSION,
+    reportId: report.reportId,
+    generatedAt: report.generatedAt,
+    target: { kind: report.target.kind, label: report.target.label, scopeMode: report.target.scopeMode, filesAnalyzed: report.target.filesAnalyzed },
+    headline: report.headline,
+    census: report.census,
+    references: { summary: "summary.md", manifest: "manifest.json", coverage: "coverage.json", receipt: "receipt.json" },
+    files: fileArtifacts.map(({ sourcePath, relativePath, sha256: fileSha256, bytes, findings }) => ({ sourcePath, relativePath, sha256: fileSha256, bytes, findingCount: findings.length })),
+    artifacts: descriptorsWithoutIndex.map(({ kind, relativePath, sha256: artifactSha256, bytes }) => ({ kind, relativePath, sha256: artifactSha256, bytes })),
+  };
+  const indexJson = canonicalJson(index);
+  const indexDescriptor: ReportArtifactDescriptor = { kind: "index", relativePath: "index.json", sha256: sha256(indexJson), bytes: Buffer.byteLength(indexJson) };
+  return { report, json, markdown, fullMarkdown, receipt, index, indexJson, manifestJson, coverageJson, fileArtifacts, descriptors: [indexDescriptor, ...descriptorsWithoutIndex] };
+}
+
+export function projectReportArtifacts(artifacts: ReportArtifacts, savedPaths: readonly string[] = [], readCapability = ""): PublicReportArtifacts {
+  const savedByRelativePath = new Map<string, string>();
+  const normalizedSavedPaths = savedPaths.map((path) => ({ path, normalized: path.replaceAll("\\", "/") }));
+  const indexSuffix = `/${artifacts.report.reportId}/index.json`;
+  const indexPath = normalizedSavedPaths.find(({ normalized }) => normalized.endsWith(indexSuffix));
+  const reportRoot = indexPath?.normalized.slice(0, -"/index.json".length);
+  if (reportRoot) {
+    for (const { path, normalized } of normalizedSavedPaths) {
+      const prefix = `${reportRoot}/`;
+      if (normalized.startsWith(prefix)) savedByRelativePath.set(normalized.slice(prefix.length), path);
+    }
+  }
+  const descriptors: ReportArtifactDescriptor[] = [];
+  for (const descriptor of artifacts.descriptors.slice(0, MAX_PUBLIC_REPORT_DESCRIPTORS)) {
+    const { sourcePath: _sourcePath, ...withoutSourcePath } = descriptor;
+    const savedPath = savedByRelativePath.get(descriptor.relativePath);
+    const withSavedPath = savedPath === undefined ? withoutSourcePath : { ...withoutSourcePath, savedPath };
+    const candidate = Buffer.byteLength(JSON.stringify([...descriptors, withSavedPath])) <= MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES
+      ? withSavedPath
+      : withoutSourcePath;
+    if (Buffer.byteLength(JSON.stringify([...descriptors, candidate])) > MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES) break;
+    descriptors.push(candidate);
+  }
   return {
-    report,
-    json,
-    markdown,
-    receipt: {
-      schemaVersion: SNIFF_REPORT_SCHEMA_VERSION,
-      reportId: report.reportId,
-      reportSha256: sha256(json),
-      markdownSha256: sha256(markdown),
-      findingCount: report.findings.length,
-    },
+    reportId: artifacts.report.reportId,
+    readCapability,
+    summary: artifacts.markdown,
+    descriptors,
+    descriptorCount: artifacts.descriptors.length,
+    descriptorsTruncated: artifacts.descriptors.length > descriptors.length,
+    receipt: { schemaVersion: artifacts.receipt.schemaVersion, reportId: artifacts.receipt.reportId, findingCount: artifacts.receipt.findingCount, artifactCount: artifacts.receipt.artifactCount },
   };
 }
 
-export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
+
+
+export function canonicalizeTrustedTemporaryPrefix(directory: string): string {
+  const lexical = resolve(directory);
+  const temporary = resolve(tmpdir());
+  if (lexical !== temporary && !lexical.startsWith(`${temporary}${sep}`)) return lexical;
+  return resolve(realpathSync(temporary), lexical.slice(temporary.length + (lexical === temporary ? 0 : 1)));
+}
+
+
+function saveEntries(artifacts: ReportArtifacts): readonly (readonly [string, string])[] {
+  return [
+    ["index.json", artifacts.indexJson],
+    ["summary.md", artifacts.fullMarkdown],
+    ["manifest.json", artifacts.manifestJson],
+    ["coverage.json", artifacts.coverageJson],
+    ["receipt.json", canonicalJson(artifacts.receipt)],
+    ...artifacts.fileArtifacts.map((file) => [file.relativePath, file.json] as const),
+  ];
+}
+
+function assertArtifactIntegrity(artifacts: ReportArtifacts): ReportArtifacts {
   const canonical = createReportArtifacts(artifacts.report);
   requireCondition(artifacts.json === canonical.json, "JSON artifact does not match report");
-  requireCondition(artifacts.markdown === canonical.markdown, "Markdown artifact does not match report");
+  requireCondition(artifacts.markdown === canonical.markdown, "Markdown summary does not match report");
+  requireCondition(artifacts.fullMarkdown === canonical.fullMarkdown, "Markdown artifact does not match report");
   requireCondition(stableJson(artifacts.receipt) === stableJson(canonical.receipt), "receipt does not match report artifacts");
-  mkdirSync(directory, { recursive: true });
-  const base = canonical.report.reportId;
-  const files = [
-    [join(directory, `${base}.json`), canonical.json],
-    [join(directory, `${base}.md`), canonical.markdown],
-    [join(directory, `${base}.receipt.json`), canonicalJson(canonical.receipt)],
-  ] as const;
-  const collision = files.find(([path]) => existsSync(path));
-  if (collision) throw new Error(`Sniff report artifact already exists: ${collision[0]}`);
+  requireCondition(artifacts.indexJson === canonical.indexJson, "index artifact does not match report");
+  requireCondition(artifacts.manifestJson === canonical.manifestJson, "manifest artifact does not match report");
+  requireCondition(artifacts.coverageJson === canonical.coverageJson, "coverage artifact does not match report");
+  requireCondition(stableJson(artifacts.fileArtifacts) === stableJson(canonical.fileArtifacts), "file artifacts do not match report");
+  return canonical;
+}
 
-  const written: string[] = [];
+export function saveReportArtifactsAt(artifacts: ReportArtifacts, directory: OpenedReportDirectory): string[] {
+  const canonical = assertArtifactIntegrity(artifacts);
+  const entries = saveEntries(canonical);
+  return saveReportEntriesAt(directory, canonical.report.reportId, entries);
+}
+
+export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
+  const opened = openReportDirectory(canonicalizeTrustedTemporaryPrefix(directory));
   try {
-    for (const [path, content] of files) {
-      writeFileSync(path, content, { encoding: "utf8", flag: "wx" });
-      written.push(path);
-    }
-    return written;
-  } catch (error) {
-    for (const path of written) rmSync(path, { force: true });
-    throw error;
+    return saveReportArtifactsAt(artifacts, opened);
+  } finally {
+    opened.close();
   }
 }

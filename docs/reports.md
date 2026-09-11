@@ -1,16 +1,76 @@
 # Reports
 
-After analysis, Sniff creates one canonical report.
+Sniff creates one canonical report from an authenticated intake lease.
 
-## Report contents
+Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`. Do not add these fields:
 
-The Markdown report contains these sections:
+- `root`
+- `paths`
+- `materialization`
+- `immutableRef`
+- `headRef`
+
+## Render mode
+
+Render mode returns a bounded Markdown summary and virtual artifact descriptors. It does not write files. The summary shows the highest-priority findings and links each shown source file to its per-file artifact. The complete findings remain available through the virtual descriptors.
+
+The OMP and MCP adapters return only the summary, bounded descriptors, census receipt, and saved-path metadata. They do not return the canonical report JSON or authenticated manifest.
+
+After rendering, call `sniff_read_report_artifact`. Pass the returned `readCapability` and `reportId`. Pass the descriptor `relativePath`. Continue with `nextOffset` until `eof`.
+
+Each UTF-8-safe page is at most 64 KiB. The response includes `totalBytes` and a SHA-256 digest. The capability remains usable in-process until registry eviction. Repository saves need separate approval.
+
+## Save mode
+
+Before Sniff creates a destination directory, save mode needs trusted confirmation for:
+
+- the exact report directory
+- every relative artifact path and SHA-256 digest
+- the manifest identity
+
+A successful save atomically installs this layout under the authorized parent:
+
+```text
+<report-id>/
+├── index.json
+├── summary.md
+├── manifest.json
+├── coverage.json
+├── receipt.json
+└── files/
+    └── <12-hex>-<safe-basename>.json
+```
+
+The files contain:
+
+- `index.json`: report metadata and census values, with each artifact's reference, byte count, and SHA-256 digest
+- `summary.md`: the bounded high-priority view
+- `manifest.json`: the authenticated intake manifest
+- `coverage.json`: canonical analyzer coverage
+- each file record: one normalized source path and its sorted findings
+- `receipt.json`: report identity and digests, with finding and artifact counts
+
+Sniff groups findings by normalized source path. It writes files and findings in sorted order. The report ID derives from the complete semantic report, so splitting artifacts does not change its identity.
+
+Sniff rejects:
+
+- output traversal or symlink components
+- existing report destinations or staging collisions
+- duplicate artifact names
+- partial writes
+
+It uses a sibling staging directory. If a write or rename fails, Sniff removes that directory.
+
+## Summary and coverage
+
+The Markdown summary contains these sections:
 
 - summary
 - tool coverage
 - prioritized refactoring plan
 - systemic patterns when present
 - dropped and downgraded findings
+- source-file links when findings exist
 
 Coverage rows use these states:
 
@@ -21,43 +81,11 @@ Coverage rows use these states:
 
 Read the Notes column for details about any state other than `ran`.
 
-The prioritized plan includes `keep` and `downgrade` findings. The disposition table lists only `downgrade` and `drop` results. Quick mode skips the challenge pass.
-
 Each finding has a deterministic ID. If the analyzer key and structural location stay unchanged, presentation changes do not change the ID.
-
-## Render mode
-
-Render mode returns Markdown to the OMP session. Tool details expose the validated report and receipt. It does not write files.
-
-While you review findings or change the plan, use render mode.
-
-## Save mode
-
-Save mode needs an explicit output directory. Sniff writes these files:
-
-```text
-<report-id>.json
-<report-id>.md
-<report-id>.receipt.json
-```
-
-If the directory does not exist, Sniff creates it. If any destination exists, Sniff refuses the complete save.
-
-## Validation receipt
-
-The receipt records:
-
-- schema version
-- report ID
-- SHA-256 hash of canonical JSON
-- SHA-256 hash of Markdown
-- finding count
-
-Before saving, Sniff regenerates each artifact and verifies its canonical hash.
 
 ## Manifest authentication
 
-The report carries the exact intake manifest under the `sniff.intake` extension key. The report tool also receives the capability and manifest ID.
+The report carries the exact intake manifest under the internal `sniff.intake` extension key. Before calculating report identity, the report tool authenticates the lease. The hydrated manifest determines report identity.
 
 Sniff rejects these states:
 

@@ -117,7 +117,7 @@ function authorizedTarget(record: LeaseRecord, recipe: SniffAnalyzerRecipe): { t
       ? target.files.filter((file) => recipe.fileExtensions?.includes(extname(file).toLowerCase()))
       : [...target.files];
     if (operands.length === 0) throw new Error(`Analyzer ${recipe.id} has no compatible files in the exact target scope`);
-  } else if (recipe.scope === "repository-wide" && target.kind !== "repository") {
+  } else if (recipe.scope === "repository-wide" && target.kind !== "repository" && target.kind !== "whole-repo") {
     throw new Error(`Analyzer ${recipe.id} requires an explicitly repository-wide target`);
   } else if (recipe.scope === "bounded-history" && target.kind !== "history") {
     throw new Error(`Analyzer ${recipe.id} requires an explicitly bounded history target`);
@@ -146,7 +146,7 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
     reservationId,
     target,
     recipe,
-    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? ["--", ...operands] : [])],
+    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...("targetSeparator" in recipe ? recipe.targetSeparator : ["--"]), ...operands] : [])],
     acceptedExitCodes: recipe.acceptedExitCodes,
     home: record.home,
     trust: record.manifest.route.trust,
@@ -232,6 +232,9 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
   if (record.now() > analyzerDeadline(record)) throw new Error("Sniff analyzer exceeded the manifest maxMinutes budget");
 }
 
+export function readRunManifest(capability: string, manifestId: string): RunManifest {
+	return activeLease(capability, manifestId).manifest;
+}
 export function validateReportManifest(capability: string, manifestId: string, supplied: unknown): RunManifest {
   const lease = activeLease(capability, manifestId);
   let serialized: string;

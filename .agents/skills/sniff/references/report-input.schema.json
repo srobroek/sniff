@@ -4,10 +4,11 @@
   "title": "Sniff report input",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns", "extensions"],
+  "required": ["generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns"],
   "properties": {
     "generatedAt": { "type": "string", "format": "date-time" },
     "target": {
+      "description": "Copy reportTarget from sniff_intake, then add languages. Do not add root, paths, materialization, immutableRef, or headRef.",
       "type": "object",
       "additionalProperties": false,
       "required": ["kind", "label", "scopeMode", "languages", "filesAnalyzed"],

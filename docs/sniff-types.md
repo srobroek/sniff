@@ -1,6 +1,6 @@
 # Sniff types
 
-Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same five tools.
+Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same six tools.
 
 Use these values in structured intake. Natural-language requests describe interaction. They are not shell commands.
 
@@ -104,8 +104,10 @@ Sniff records each analyzer as selected, skipped, or unavailable. It rejects fuz
 `SNIFF_ANALYZER_RECIPES` is the execution catalog. Recipe IDs differ from installer bundle names.
 
 - `lizard:complexity`: tool `lizard`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
-- `semgrep:hardcoded-values`: tool `semgrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
-- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; remote-safe and config-free.
+- `opengrep:hardcoded-values`: tool `opengrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
+- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; local; reads target configuration.
+
+If a function has cyclomatic complexity of at least 10, Lizard emits an observation.
 
 The security catalog uses these three recipe IDs. Each recipe is default-enabled. A capability authorizes a selected recipe once for the confirmed target.
 
@@ -113,7 +115,7 @@ The security catalog uses these three recipe IDs. Each recipe is default-enabled
 
 `BUNDLES` contains fourteen values. `TOOLS` defines membership. Bundles group catalog entries by target family. Bundles do not authorize execution.
 
-- `core`: `semgrep` `lizard` `scc` `ast-grep` `tokei`
+- `core`: `opengrep` `lizard` `scc` `ast-grep` `tokei`
 - `dup`: `jscpd`
 - `security`: `trivy` `checkov` `gitleaks`
 - `rust`: `cargo-clippy` `cargo-machete` `cargo-udeps` `cargo-geiger`
@@ -151,6 +153,10 @@ Save mode writes:
 - `<report-id>.receipt.json`
 
 If a destination exists, Sniff refuses the complete save. The receipt records the report ID. It records the schema version. It records the canonical JSON SHA-256. It records the Markdown SHA-256. It records the finding count.
+
+After `sniff_report` returns render descriptors, call `sniff_read_report_artifact`. Pass its `readCapability` and `reportId`. Pass a descriptor `relativePath`. Continue with `nextOffset` until `eof`.
+
+Each UTF-8-safe page is at most 64 KiB. The response includes `totalBytes` and a SHA-256 digest. The capability remains usable in-process until registry eviction. Repository saves still need separate approval.
 
 `CoverageStatus` contains four values:
 

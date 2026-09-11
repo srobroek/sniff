@@ -50,8 +50,8 @@ type AnalyzerCatalogEntry = {
 
 export const SECURITY_ANALYZER_CATALOG = {
   "lizard:complexity": { tool: SNIFF_ANALYZER_RECIPES["lizard:complexity"].tool, recipe: "lizard:complexity", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "semgrep:hardcoded-values": { tool: SNIFF_ANALYZER_RECIPES["semgrep:hardcoded-values"].tool, recipe: "semgrep:hardcoded-values", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "gitleaks:tracked-history": { tool: SNIFF_ANALYZER_RECIPES["gitleaks:tracked-history"].tool, recipe: "gitleaks:tracked-history", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
+  "opengrep:hardcoded-values": { tool: SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].tool, recipe: "opengrep:hardcoded-values", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
+  "gitleaks:tracked-history": { tool: SNIFF_ANALYZER_RECIPES["gitleaks:tracked-history"].tool, recipe: "gitleaks:tracked-history", tier: "lightweight-static", remoteSafe: false, defaultEnabled: true },
 } as const satisfies Record<SniffAnalyzerRecipeId, AnalyzerCatalogEntry>;
 
 const FORBIDDEN_ALIAS: Record<string, string> = {
@@ -69,7 +69,7 @@ const FORBIDDEN_ALIAS: Record<string, string> = {
 };
 
 const DEFAULT_PROJECT_NATIVE = [] as const;
-const DEFAULT_LIGHTWEIGHT_STATIC = ["lizard:complexity", "semgrep:hardcoded-values", "gitleaks:tracked-history"] as const;
+const DEFAULT_LIGHTWEIGHT_STATIC = ["lizard:complexity", "opengrep:hardcoded-values", "gitleaks:tracked-history"] as const;
 const DEFAULT_DEEP_STATIC = [] as const;
 
 function normalizedAlias(value: string): string {
@@ -93,7 +93,7 @@ function scopeCompatibility(name: SniffAnalyzerRecipeId, target: ResolvedTarget 
   if (!target) return undefined;
   const recipe: SniffAnalyzerRecipe = SNIFF_ANALYZER_RECIPES[name];
   if (recipe.scope === "repository-wide") {
-    return target.kind === "repository" ? undefined : "Analyzer requires an explicitly repository-wide target.";
+    return target.kind === "repository" || target.kind === "whole-repo" ? undefined : "Analyzer requires an explicitly repository-wide target.";
   }
   if (target.files.length === 0) return "Exact target contains no analyzable files; scope was not widened.";
   if (recipe.fileExtensions && !target.files.some((file) => recipe.fileExtensions?.includes(extname(file).toLowerCase()))) {
@@ -134,14 +134,15 @@ export function selectSecurityAnalyzers(request: SecurityRequest = {}, context: 
   for (const name of lightweight) {
     const absent = unavailable.has(name);
     const incompatible = scopeCompatibility(name, context.target);
+    const remoteBlocked = trust === "untrusted-remote" && !SECURITY_ANALYZER_CATALOG[name].remoteSafe;
     const scopeBlocked = context.scopeMode === "plan-only" ? "Plan-only mode does not execute analyzers." : context.scopeMode === "quick" && name === "gitleaks:tracked-history" ? "Quick mode omits bounded-history coverage." : undefined;
     dispositions.push({
       name,
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "lightweight-static",
-      disposition: absent ? "unavailable" : scopeBlocked || incompatible ? "skipped" : "selected",
-      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ?? incompatible ?? "Config-free offline static coverage is enabled.",
+      disposition: absent ? "unavailable" : scopeBlocked || incompatible || remoteBlocked ? "skipped" : "selected",
+      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ?? incompatible ?? (remoteBlocked ? "Untrusted remote targets cannot use target-controlled analyzer configuration." : "Config-free offline static coverage is enabled."),
     });
   }
   for (const name of deep) {
