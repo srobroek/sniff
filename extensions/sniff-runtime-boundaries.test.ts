@@ -338,7 +338,15 @@ describe("adaptive runtime boundaries", () => {
         return { argv, exitCode: scan ? 1 : 0, stdout: scan ? "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n60,2,1,0,51,1-51,a.ts,long,long\n" : "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    expect(await runSniffAnalyzer({ capability: lease.capability, manifestId: manifest.manifestId, analyzer: "lizard:complexity", runtime })).toMatchObject({ ok: true, outcome: "completed-with-findings" });
+    const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: manifest.manifestId, analyzer: "lizard:complexity", runtime });
+    expect(result).toMatchObject({
+      ok: true,
+      acceptedExitCodes: [0, 1],
+      outcome: "completed-with-findings",
+      report: expect.stringContaining("exit 1"),
+      observations: [{ ruleId: "lizard:complexity", path: "a.ts", message: expect.stringContaining("51 lines") }],
+    });
+    expect(calls.find(({ argv }) => argv[0]?.endsWith("lizard") && !argv.includes("--version"))?.argv).toEqual(expect.arrayContaining(["-C", "10", "-L", "50", "-a", "5", "--csv"]));
     cancelRunLease(lease.capability, manifest.manifestId);
   });
 
