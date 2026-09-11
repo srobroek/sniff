@@ -1,68 +1,74 @@
 ---
 name: sniff
-description: Audit code for smells, map to refactoring.guru, and produce a vetted refactoring plan. Use when asked to sniff, audit quality, or plan a refactor.
+description: Audit code smells and produce reviewed refactoring plans. Use when asked to sniff, audit quality, or plan a refactor.
 ---
 
 # Sniff
 
-Audit code smells, map surviving findings to refactoring.guru, and produce an
-adversarially-vetted plan. Edit code only after explicit approval in step 7.
-
-## Approval gates
-
-LOAD `skill://sniff/references/approval-gates.md` before reading code or dispatching `bloodhound`.
+Until step 7 grants approval, do not edit code. Audit smells and produce a reviewed plan. Before reading code, read `skill://sniff/references/approval-gates.md`. Use direct evidence to identify structural risk. Preserve disputed findings for the challenge pass. Report only findings that survive that pass.
 
 ## Workflow
 
-LOAD `skill://sniff/references/workflow.md` before starting. Run in order:
+Read `skill://sniff/references/workflow.md` first. Follow these steps in order:
 
-1. **Resolve target & detect stack.** If user did not name a target, STOP and ask.
-   LOAD `skill://sniff/references/targeting.md`: resolve to an explicit file list + base ref, decide
-   in-place vs. isolated checkout (`isolated: true` / Worktrunk lease), and confirm scope. Detect every language/format
-   present in the target and map each to `skill://sniff/references/languages/index.md`.
-2. **Probe & propose the full tool set (mandatory blocking checkpoint, interactive runs).**
-   Run `sniff_install_tools` (mode `probe`), enumerate every viable tool per detected
-   language as a tiered table. **Stop and wait** unless the brief already authorizes that set.
-   See `skill://sniff/references/tooling.md` + `skill://sniff/references/installer.md`.
-   - **2.5. Inventory project lint config FIRST.** Before substantive scans, find and read
-     every config that governs it. **Honor it** -- a rule the project disabled is advisory
-     at most, never a regression. See `skill://sniff/references/workflow.md` Step 2.5.
-3. **Tool-driven detection.** Run every selected analyzer through
-   `sniff_run_analyzer`, honoring the Step 2.5 configuration. Its preflight and
-   exact-path execution are atomic; record unavailable analyzers as coverage gaps.
-4. **Detection reading.** For smells tools cannot see, read the code guided by
-   `skill://sniff/references/languages/<lang>.md`. Small target → read inline. Otherwise propose a
-   `bloodhound` fan-out plan -- one hound per language as the floor, splitting oversized
-   languages by subtree/crate. Build each Brief from `skill://sniff/references/scout-brief.md`;
-   include the `skill://sniff/references/languages/<lang>.md` path
-   in the Brief so the hound does not resolve it from the target repository.
-5. **Map to refactoring.guru.** Attach smell name, pattern(s), technique(s), and URL
-   from `skill://sniff/references/refactoring-catalog.md`. Fetch the full technique page only when
-   step-by-step detail is needed.
-6. **Adversarial pass.** Stress-test with `refactor-challenger`. Build its Brief from
-   `skill://sniff/references/adversarial-brief.md`. Drop or downgrade findings it refutes.
-7. **Report & (optional) apply.** Build canonical post-challenge JSON against
-   `skill://sniff/references/report-input.schema.json`, then call `sniff_report` in `render` mode.
-   Present its Markdown and validation receipt. Save only when the user explicitly requests it,
-   using `sniff_report` in `save` mode with the approved directory. Apply only explicitly approved
-   low-risk/mechanical refactors, then re-run step 3 checks.
+1. Adaptive intake.
+   - Read `skill://sniff/references/intake.md` and `skill://sniff/references/targeting.md`.
+   - Call `sniff_intake`.
+   - Ask only the highest-impact unresolved question.
+   - Confirm one resolved plan.
+   - Keep the issued capability and manifest ID.
+   - Treat remote targets as untrusted.
+2. Detect the stack.
+   - Detect every language and format in the resolved target.
+   - Map each one through `skill://sniff/references/languages/index.md`.
+3. Probe tools.
+   - Run `sniff_install_tools` in `probe` mode.
+   - Show viable tools by language and tier.
+   - Stop unless the brief already authorizes that set.
+   - Read `skill://sniff/references/tooling.md` and `skill://sniff/references/installer.md`.
+   - For trusted local work, read each governing configuration file.
+   - For remote work, do not load executable configuration or install dependencies.
+4. Run detection.
+   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`.
+   - Record unavailable analyzers as coverage gaps.
+   - Read small targets inline.
+   - For large targets, propose a `bloodhound` plan by language and subtree.
+   - Build each brief from `skill://sniff/references/scout-brief.md`.
+   - Include the matching `skill://sniff/references/languages/<lang>.md` path.
+5. Map findings.
+   - Use `skill://sniff/references/refactoring-catalog.md`.
+   - Attach the complete catalog entry.
+6. Challenge findings.
+   - Build the `refactor-challenger` brief from `skill://sniff/references/adversarial-brief.md`.
+   - Drop or downgrade refuted findings.
+7. Report or apply.
+   - Put the exact manifest under `sniff.intake`.
+   - Pass the capability and manifest ID to `sniff_report`.
+   - Call `sniff_cancel` when a run stops before reporting.
+   - Save or apply only with explicit approval.
 
 ## Rules
 
-MUST Use real analyzers; no low-precision grep fallback for smell detection.
-MUST Exact-file checksum/diff is allowed only as the duplication floor.
-MUST Keep steps 1 to 6 read-only.
-MUST Scope analyzers by local, relational, global, or baseline class.
-MUST Headline base-ref breaking changes; skip and record invalid scoped global runs.
-MUST Resolve shipped assets through `skill://sniff/`; pass absolute paths to tools.
-MUST Run every selected analyzer only through `sniff_run_analyzer`; never invoke it through Bash, Eval, Hub, or a hand-built command.
-MUST Pass selected hosted packages and the exact documented analyzer completion exits to `sniff_run_analyzer`.
-MUST Prefix each Bash command during a sniff run with `OMP_SNIFF_ACTIVE=1`; this command-local marker activates the direct-analyzer advisory and grants no analyzer execution authority.
-MUST Keep evidence tier and impact independent, preserve challenged findings and coverage data, render ephemerally, and save only with explicit intent and path.
-DEFAULT Load only references needed by the detected stack.
+- MUST use real analyzers. Do not use low-precision grep for smell detection.
+- MUST use exact-file checksums only as the duplication floor.
+- MUST keep steps 1 through 6 read-only.
+- MUST classify each analyzer by scope class.
+- MUST headline base-ref breaks. Skip invalid scoped global runs and record them.
+- MUST resolve shipped assets through `skill://sniff/`.
+- MUST run each selected analyzer only through `sniff_run_analyzer`.
+- MUST pass only the issued capability, manifest ID, and recipe ID.
+- MUST prefix Sniff Bash commands with `OMP_SNIFF_ACTIVE=1`.
+- MUST keep evidence tier separate from impact.
+- MUST preserve challenged findings and coverage data.
+- MUST save only with explicit intent and a path.
+- DEFAULT load only references needed by the detected stack.
 
-Modes: **quick** skips the full sweep/challenge; **full** runs all steps;
-**plan-only** never applies changes. Debug annotations are off unless requested.
+Modes:
+
+- `quick` skips the full sweep and challenge.
+- `full` runs all steps.
+- `plan-only` never applies changes.
+- Keep debug annotations off by default.
 
 ## References
 
@@ -70,19 +76,10 @@ Modes: **quick** skips the full sweep/challenge; **full** runs all steps;
 |------|-----------|
 | `references/workflow.md` | Always, before step 1 |
 | `references/targeting.md` | Target resolution/reduction |
-| `references/tooling.md` | Tool class, overlap, invocation |
-| `references/installer.md` | Approved installation |
-| `references/languages/index.md` | Stack routing |
-| `references/languages/<lang>.md` | Detected target reading |
-| `references/scout-brief.md` | `bloodhound` dispatch |
-| `references/refactoring-catalog.md` | Mapping |
-| `references/adversarial-brief.md` | Challenge |
+| `references/intake.md` | Intake decisions |
+| `references/providers.md` | Provider decisions |
+| `references/objectives.md` | Objective decisions |
+| `references/security-scope.md` | Security decisions |
 | `references/report-template.md` | Report |
-| `references/report-input.schema.json`, `references/report.schema.json` | Strict input and output contracts |
-
-## Agents
-
-| Agent | Role |
-|-------|------|
-| `bloodhound` | Read-only language-slice detector |
-| `refactor-challenger` | Read-only pragmatism critic |
+| `references/report-input.schema.json` | Strict input contract |
+| `references/report.schema.json` | Strict output contract |

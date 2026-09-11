@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRunManifest } from "./sniff-intake.ts";
 import {
   buildSniffReport,
   createReportArtifacts,
@@ -13,6 +14,8 @@ import {
   validateSniffReport,
 } from "./sniff-report.ts";
 import { runSniffReportTool } from "./sniff-report-tool.ts";
+import { issueRunLease } from "./sniff-run-registry.ts";
+import { validateResolvedTarget } from "./sniff-target.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -71,6 +74,24 @@ function reportInput(findings: FindingInput[] = [finding()]): ReportInput {
     suppressionCount: 2,
     systemicPatterns: ["Validation and transport concerns repeat across three parser entry points."],
     extensions: { "example.dev/team": { owner: "platform" } },
+  };
+}
+
+function authorizedReport(input: ReportInput = reportInput()): Parameters<typeof runSniffReportTool>[0] {
+  const root = mkdtempSync(join(tmpdir(), "sniff-report-lease-"));
+  temporaryDirectories.push(root);
+  const files = Array.from({ length: input.target.filesAnalyzed }, (_, index) => `fixture-${index}.ts`);
+  for (const file of files) writeFileSync(join(root, file), "export {};\n");
+  const manifest = createRunManifest({
+    target: validateResolvedTarget({ kind: "pr", label: input.target.label, root, files, baseRef: input.target.baseRef, materialization: "in-place" }),
+    intent: "audit",
+    confirmation: { confirmed: true },
+  });
+  const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined });
+  return {
+    capability: lease.capability,
+    manifestId: lease.manifestId,
+    report: { ...input, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
   };
 }
 
@@ -242,17 +263,17 @@ describe("structured Sniff reports", () => {
     expect(readdirSync(directory)).toEqual([]);
   });
   test("tool rendering remains ephemeral unless save is explicit", () => {
-    const rendered = runSniffReportTool({ report: reportInput() });
+    const rendered = runSniffReportTool(authorizedReport());
     expect(rendered.savedPaths).toEqual([]);
 
     const directory = mkdtempSync(join(tmpdir(), "sniff-report-tool-"));
     temporaryDirectories.push(directory);
-    const saved = runSniffReportTool({ mode: "save", report: reportInput(), path: directory });
+    const saved = runSniffReportTool({ ...authorizedReport(), mode: "save", path: directory });
     expect(saved.savedPaths).toHaveLength(3);
   });
 
   test("tool save mode rejects an absent output path", () => {
-    expect(() => runSniffReportTool({ mode: "save", report: reportInput() })).toThrow(
+    expect(() => runSniffReportTool({ ...authorizedReport(), mode: "save" })).toThrow(
       "mode=save requires path",
     );
   });

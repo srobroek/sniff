@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	mkdirSync,
 	mkdtempSync,
+	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -10,7 +11,6 @@ import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import sniffInstallTool, {
 	type CommandResult,
-	runSniffAnalyzer,
 	runSniffInstall,
 	type SniffInstallRuntime,
 } from "./sniff-install-tool.ts";
@@ -220,7 +220,7 @@ describe("runSniffInstall", () => {
 		expect(result.ok).toBe(false);
 		expect(result.tools[0]).toMatchObject({
 			status: "shimmed",
-			resolvedPath: join(shimDir, "jscpd"),
+			resolvedPath: realpathSync(join(shimDir, "jscpd")),
 		});
 	});
 
@@ -252,7 +252,7 @@ describe("runSniffInstall", () => {
 		expect(result.ok).toBe(false);
 		expect(result.tools[0]).toMatchObject({
 			status: "unrunnable",
-			resolvedPath: join(binDir, "jscpd"),
+			resolvedPath: realpathSync(join(binDir, "jscpd")),
 		});
 	});
 
@@ -471,394 +471,16 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("(dry run — no changes will be made)");
 		expect(result.report).toContain("[core]");
 	});
+	test("rejects empty PATH entries instead of resolving a host executable", () => {
+		const dir = tempDir("sniff-empty-path-");
+		const binDir = join(dir, "bin");
+		executable(join(binDir, "semgrep"), "exit 0");
+		const result = runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}` } });
+		expect(result.tools.find(({ tool }) => tool === "semgrep")?.status).toBe("missing");
+	});
+
 });
 
-describe("runSniffAnalyzer", () => {
-	test("preflights the exact tool before every execution", () => {
-		const calls: string[][] = [];
-		const runtime = fakeRuntime({
-			run: (argv, _cwd, _env, timeoutMs) => {
-				calls.push(argv);
-				return commandResult(argv, timeoutMs, {
-					stdout: argv.at(-1) === "--version" ? "1.0" : "scan",
-				});
-			},
-		});
-		const first = runSniffAnalyzer({
-			tool: "semgrep",
-			args: ["--json", "src"],
-			runtime,
-		});
-		const second = runSniffAnalyzer({
-			tool: "semgrep",
-			args: ["--json", "tests"],
-			runtime,
-		});
-		expect(first.ok).toBe(true);
-		expect(second.ok).toBe(true);
-		expect(calls).toEqual([
-			["/fake/bin/semgrep", "--version"],
-			["/fake/bin/semgrep", "--json", "src"],
-			["/fake/bin/semgrep", "--version"],
-			["/fake/bin/semgrep", "--json", "tests"],
-		]);
-	});
-
-	test("npm-local execution uses the same project PATH as preflight", () => {
-		const dir = tempDir("sniff-local-run-");
-		const localBin = join(dir, "node_modules", ".bin");
-		mkdirSync(localBin, { recursive: true });
-		writeFileSync(join(localBin, "eslint"), "#!/bin/sh\nexit 0\n", {
-			mode: 0o755,
-		});
-		const paths: string[] = [];
-		const runtime = fakeRuntime({
-			resolveCommand: (bin, _cwd, env) =>
-				bin === "eslint" && env.PATH === localBin
-					? join(localBin, "eslint")
-					: null,
-			run: (argv, _cwd, env, timeoutMs) => {
-				paths.push(env.PATH ?? "");
-				return commandResult(argv, timeoutMs);
-			},
-		});
-		const result = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["--format", "json", "."],
-			cwd: dir,
-			env: { PATH: "/usr/bin" },
-			runtime,
-		});
-		expect(result.ok).toBe(true);
-		expect(paths).toEqual([
-			`${localBin}${delimiter}/usr/bin`,
-			`${localBin}${delimiter}/usr/bin`,
-		]);
-	});
-
-	test("selected hosted packages and analyzer config are required", () => {
-		const dir = tempDir("sniff-hosted-");
-		const localBin = join(dir, "node_modules", ".bin");
-		mkdirSync(localBin, { recursive: true });
-		writeFileSync(join(localBin, "eslint"), "#!/bin/sh\nexit 0\n", {
-			mode: 0o755,
-		});
-		const runtime = fakeRuntime({
-			resolveCommand: (bin) =>
-				bin === "eslint" ? join(localBin, "eslint") : `/fake/bin/${bin}`,
-		});
-		const missingPackage = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(missingPackage).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: { missing: ["eslint-plugin-unicorn"] },
-		});
-
-		const pluginDir = join(dir, "node_modules", "eslint-plugin-unicorn");
-		mkdirSync(pluginDir, { recursive: true });
-		writeFileSync(join(pluginDir, "package.json"), "{}");
-		const missingConfig = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(missingConfig).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: { missing: [], detectedConfig: null },
-		});
-
-		writeFileSync(
-			join(dir, "eslint.config.js"),
-			"// eslint-plugin-unicorn is not configured here\nexport default [];\n",
-		);
-		const unrelatedConfig = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(unrelatedConfig).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: {
-				missing: [],
-				unconfigured: ["eslint-plugin-unicorn"],
-				detectedConfig: "eslint.config.js",
-			},
-		});
-
-		rmSync(join(dir, "eslint.config.js"));
-		writeFileSync(
-			join(dir, ".eslintrc.js"),
-			'module.exports = { plugins: ["unicorn"] };\n',
-		);
-		const legacyReady = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(legacyReady).toMatchObject({
-			ok: true,
-			outcome: "completed",
-			hostCoverage: {
-				unconfigured: [],
-				detectedConfig: ".eslintrc.js",
-			},
-		});
-
-		writeFileSync(
-			join(dir, ".eslintrc.js"),
-			'module.exports = { settings: { label: "unicorn" } };\n',
-		);
-		const incidentalAlias = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(incidentalAlias).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: { unconfigured: ["eslint-plugin-unicorn"] },
-		});
-
-		rmSync(join(dir, ".eslintrc.js"));
-		writeFileSync(join(dir, ".eslintrc.json"), '{"plugins":["unicorn"]}\n');
-		const jsonReady = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(jsonReady).toMatchObject({
-			ok: true,
-			outcome: "completed",
-			hostCoverage: {
-				unconfigured: [],
-				detectedConfig: ".eslintrc.json",
-			},
-		});
-
-		writeFileSync(join(dir, ".eslintrc.json"), '{"myplugins":["unicorn"]}\n');
-		const incidentalJsonKey = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(incidentalJsonKey).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: { unconfigured: ["eslint-plugin-unicorn"] },
-		});
-
-		rmSync(join(dir, ".eslintrc.json"));
-		writeFileSync(join(dir, ".eslintrc.yaml"), "plugins:\n  - unicorn\n");
-		const yamlReady = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(yamlReady).toMatchObject({
-			ok: true,
-			outcome: "completed",
-			hostCoverage: {
-				unconfigured: [],
-				detectedConfig: ".eslintrc.yaml",
-			},
-		});
-
-		rmSync(join(dir, ".eslintrc.yaml"));
-		writeFileSync(join(dir, ".eslintrc.yml"), "plugins:\n  - unicorn\n");
-		const ymlReady = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(ymlReady).toMatchObject({
-			ok: true,
-			outcome: "completed",
-			hostCoverage: {
-				unconfigured: [],
-				detectedConfig: ".eslintrc.yml",
-			},
-		});
-		writeFileSync(
-			join(dir, "eslint.config.js"),
-			'import unicorn from "eslint-plugin-unicorn";\nexport default [{ plugins: { unicorn } }];\n',
-		);
-		const ready = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-unicorn"],
-			cwd: dir,
-			runtime,
-		});
-		expect(ready).toMatchObject({
-			ok: true,
-			outcome: "completed",
-			hostCoverage: {
-				missing: [],
-				unrecognized: [],
-				unconfigured: [],
-				detectedConfig: "eslint.config.js",
-			},
-		});
-	});
-
-	test("uncatalogued hosted packages are refused", () => {
-		const result = runSniffAnalyzer({
-			tool: "eslint",
-			args: ["."],
-			hostPackages: ["eslint-plugin-not-approved"],
-			runtime: fakeRuntime(),
-		});
-		expect(result).toMatchObject({
-			ok: false,
-			outcome: "not-run",
-			hostCoverage: { unrecognized: ["eslint-plugin-not-approved"] },
-		});
-	});
-
-	test("execution exit must satisfy the per-run contract", () => {
-		const runtime = fakeRuntime({
-			run: (argv, _cwd, _env, timeoutMs) =>
-				commandResult(argv, timeoutMs, {
-					exitCode: argv.at(-1) === "--version" ? 0 : 3,
-				}),
-		});
-		const rejected = runSniffAnalyzer({
-			tool: "actionlint",
-			args: [".github/workflows"],
-			runtime,
-		});
-		expect(rejected).toMatchObject({
-			ok: false,
-			outcome: "rejected-exit",
-			acceptedExitCodes: [0],
-			execution: { exitCode: 3 },
-		});
-
-		const findingsRuntime = fakeRuntime({
-			run: (argv, _cwd, _env, timeoutMs) =>
-				commandResult(argv, timeoutMs, {
-					exitCode: argv.at(-1) === "--version" ? 0 : 1,
-				}),
-		});
-		const accepted = runSniffAnalyzer({
-			tool: "actionlint",
-			args: [".github/workflows"],
-			acceptedExitCodes: [0, 1],
-			runtime: findingsRuntime,
-		});
-		expect(accepted).toMatchObject({
-			ok: true,
-			outcome: "completed-with-findings",
-			execution: { exitCode: 1 },
-		});
-	});
-
-	test("invalid exit contracts are refused before preflight", () => {
-		let touched = false;
-		const result = runSniffAnalyzer({
-			tool: "semgrep",
-			args: ["src"],
-			acceptedExitCodes: [1, 3],
-			runtime: fakeRuntime({
-				resolveCommand: () => {
-					touched = true;
-					return "/fake/bin/semgrep";
-				},
-			}),
-		});
-		expect(result).toMatchObject({ ok: false, outcome: "not-run" });
-		expect(touched).toBe(false);
-	});
-
-	test("a failed per-tool preflight cannot fall through to execution", () => {
-		const calls: string[][] = [];
-		const runtime = fakeRuntime({
-			resolveCommand: () => "/fake/bin/jscpd",
-			run: (argv, _cwd, _env, timeoutMs) => {
-				calls.push(argv);
-				return commandResult(argv, timeoutMs, {
-					exitCode: 1,
-					stderr: "broken shim",
-				});
-			},
-		});
-		const result = runSniffAnalyzer({
-			tool: "jscpd",
-			args: ["--reporters", "json", "."],
-			runtime,
-		});
-		expect(result.ok).toBe(false);
-		expect(result.preflight?.status).toBe("unrunnable");
-		expect(result.execution).toBeUndefined();
-		expect(calls).toEqual([
-			["/fake/bin/jscpd", "--version"],
-			["/fake/bin/jscpd", "--help"],
-		]);
-	});
-
-	test("unknown tools are refused without resolving or executing", () => {
-		let touched = false;
-		const runtime = fakeRuntime({
-			resolveCommand: () => {
-				touched = true;
-				return null;
-			},
-		});
-		const result = runSniffAnalyzer({
-			tool: "not-in-catalog",
-			args: [],
-			runtime,
-		});
-		expect(result.ok).toBe(false);
-		expect(result.preflight).toBeNull();
-		expect(touched).toBe(false);
-	});
-
-	test("tool-specific probe and run prefixes stay coupled", () => {
-		const calls: string[][] = [];
-		const runtime = fakeRuntime({
-			resolveCommand: (bin) => `/fake/bin/${bin}`,
-			run: (argv, _cwd, _env, timeoutMs) => {
-				calls.push(argv);
-				return commandResult(argv, timeoutMs);
-			},
-		});
-		const result = runSniffAnalyzer({
-			tool: "cargo-clippy",
-			args: ["--all-targets"],
-			runtime,
-		});
-		expect(result.ok).toBe(true);
-		expect(calls).toEqual([
-			["/fake/bin/cargo", "clippy", "--version"],
-			["/fake/bin/cargo", "clippy", "--all-targets"],
-		]);
-	});
-});
 
 describe("sniff tools integration", () => {
 	test("registration exposes catalog preflight and atomic analyzer runner", async () => {

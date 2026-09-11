@@ -2,16 +2,21 @@ import {
 	accessSync,
 	closeSync,
 	constants,
-	existsSync,
 	openSync,
-	readFileSync,
 	readSync,
 	realpathSync,
 	statSync,
 } from "node:fs";
-import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import {
+	type AnalyzerRunAuthorization,
+	abandonAnalyzerReservation,
+	authorizeAnalyzerRun,
+	completeAnalyzerReservation,
+	prepareAnalyzerSpawn,
+} from "./sniff-run-registry.ts";
 import {
 	BUNDLES,
 	type BundleName,
@@ -147,17 +152,16 @@ function resolveCommand(
 	cwd: string,
 	env: ProcessEnvironment,
 ): string | null {
+	const pathEntries = (env.PATH ?? "").split(delimiter);
+	if (!bin.includes(sep) && pathEntries.some((entry) => entry.length === 0 || !isAbsolute(entry))) return null;
 	const candidates = bin.includes(sep)
 		? [isAbsolute(bin) ? bin : resolve(cwd, bin)]
-		: (env.PATH ?? "")
-				.split(delimiter)
-				.filter(Boolean)
-				.map((dir) => join(dir, bin));
+		: pathEntries.map((dir) => join(dir, bin));
 	for (const candidate of candidates) {
 		try {
 			if (!statSync(candidate).isFile()) continue;
 			accessSync(candidate, constants.X_OK);
-			return candidate;
+			return realpathSync(candidate);
 		} catch {
 			// Not an executable candidate.
 		}
@@ -247,13 +251,15 @@ function inspectTool(
 	cwd: string,
 	env: ProcessEnvironment,
 	runtime: SniffInstallRuntime,
+	validateResolvedPath?: (path: string) => string,
 ): SniffToolResult {
 	const effectiveEnv = projectEnvironment(rec, cwd, env);
-	const resolvedPath = runtime.resolveCommand(
+	const foundPath = runtime.resolveCommand(
 		rec.bin,
 		cwd,
 		resolutionEnvironment(rec, cwd, env),
 	);
+	let resolvedPath = foundPath;
 	if (!resolvedPath) {
 		return {
 			bundle,
@@ -265,6 +271,22 @@ function inspectTool(
 			remediation: rec.hint,
 			attempts: [],
 		};
+	}
+	if (validateResolvedPath) {
+		try {
+			resolvedPath = validateResolvedPath(resolvedPath);
+		} catch (error) {
+			return {
+				bundle,
+				tool: rec.name,
+				bin: rec.bin,
+				required,
+				status: "policy-blocked",
+				resolvedPath: null,
+				remediation: error instanceof Error ? error.message : String(error),
+				attempts: [],
+			};
+		}
 	}
 	const launcher = runtime.readLauncher(resolvedPath);
 	if (isShimLauncher(resolvedPath, launcher)) {
@@ -537,23 +559,10 @@ export type SniffInstallOptions = {
 };
 
 export type SniffAnalyzerRunOptions = {
-	tool: string;
-	args: string[];
-	hostPackages?: string[];
-	acceptedExitCodes?: number[];
-	cwd?: string;
-	env?: ProcessEnvironment;
+	capability: string;
+	manifestId: string;
+	analyzer: string;
 	runtime?: SniffInstallRuntime;
-};
-
-export type SniffHostCoverage = {
-	requested: string[];
-	allowed: string[];
-	unrecognized: string[];
-	missing: string[];
-	unconfigured: string[];
-	configCandidates: string[];
-	detectedConfig: string | null;
 };
 
 export type SniffAnalyzerOutcome =
@@ -566,7 +575,6 @@ export type SniffAnalyzerRunResult = {
 	ok: boolean;
 	report: string;
 	preflight: SniffToolResult | null;
-	hostCoverage?: SniffHostCoverage;
 	acceptedExitCodes?: number[];
 	outcome: SniffAnalyzerOutcome;
 	execution?: CommandResult;
@@ -580,268 +588,128 @@ function findTool(tool: string): { bundle: BundleName; rec: ToolRec } | null {
 	return null;
 }
 
-function detectHostConfig(
-	rec: ToolRec,
-	cwd: string,
-): { source: string; content: string } | null {
-	for (const candidate of rec.configFiles ?? []) {
-		const path = join(cwd, candidate);
-		if (!existsSync(path)) continue;
-		try {
-			return { source: candidate, content: readFileSync(path, "utf8") };
-		} catch {
-			return null;
-		}
-	}
-	if (!rec.packageConfigKeys?.length) return null;
-	const manifest = join(cwd, "package.json");
-	if (!existsSync(manifest)) return null;
-	try {
-		const parsed = JSON.parse(readFileSync(manifest, "utf8")) as Record<
-			string,
-			unknown
-		>;
-		for (const key of rec.packageConfigKeys) {
-			if (!Object.hasOwn(parsed, key)) continue;
-			return {
-				source: `package.json#${key}`,
-				content: JSON.stringify(parsed[key]),
-			};
-		}
-	} catch {
-		return null;
-	}
-	return null;
-}
 
-function yamlListConfigured(
-	key: "plugins" | "extends",
-	value: string,
-	content: string,
-): boolean {
-	const lines = content.split(/\r?\n/);
-	for (let index = 0; index < lines.length; index += 1) {
-		const header = /^(\s*)["']?(plugins|extends)["']?\s*:\s*(?:#.*)?$/.exec(
-			lines[index] ?? "",
-		);
-		if (!header || header[2] !== key) continue;
-		const baseIndent = header[1]?.length ?? 0;
-		for (let itemIndex = index + 1; itemIndex < lines.length; itemIndex += 1) {
-			const line = lines[itemIndex] ?? "";
-			if (/^\s*(?:#.*)?$/.test(line)) continue;
-			const indent = /^\s*/.exec(line)?.[0].length ?? 0;
-			if (indent <= baseIndent) break;
-			const item = /^\s*-\s*["']?([^"'#\s]+)["']?\s*(?:#.*)?$/.exec(line);
-			if (item?.[1] === value) return true;
-		}
-	}
-	return false;
-}
-
-function fullPackageConfigured(packageName: string, content: string): boolean {
-	const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const moduleReference = new RegExp(
-		`(?:\\bfrom\\s*|\\bimport\\s*(?:\\(\\s*)?|\\brequire\\s*\\(\\s*)["']${escaped}["']`,
-	);
-	const configArray = new RegExp(
-		`(?:^|[,{\\s])["']?(?:plugins|extends)["']?\\s*:\\s*\\[[^\\]]*["']${escaped}["']`,
-		"s",
-	);
-	const extendsScalar = new RegExp(
-		`(?:^|[,{\\s])["']?extends["']?\\s*:\\s*["']${escaped}["']`,
-		"s",
-	);
-	return (
-		moduleReference.test(content) ||
-		configArray.test(content) ||
-		extendsScalar.test(content) ||
-		yamlListConfigured("plugins", packageName, content) ||
-		yamlListConfigured("extends", packageName, content)
-	);
-}
-
-function hostPackageConfigured(
-	rec: ToolRec,
-	packageName: string,
-	content: string,
-): boolean {
-	if (fullPackageConfigured(packageName, content)) return true;
-	const aliases = rec.hostPackageConfigNames?.[packageName] ?? [];
-	return aliases.some((alias) => {
-		if (content.includes(`plugin:${alias}/`)) return true;
-		if (yamlListConfigured("plugins", alias, content)) return true;
-		const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(
-			`(?:^|[,{\\s])["']?plugins["']?\\s*:\\s*\\[[^\\]]*["']${escaped}["']`,
-			"s",
-		).test(content);
-	});
-}
-
-function inspectHostCoverage(
-	rec: ToolRec,
-	requested: string[],
-	cwd: string,
-): SniffHostCoverage {
-	const allowed = [...(rec.hostPackages ?? [])];
-	const uniqueRequested = [...new Set(requested)];
-	const unrecognized = uniqueRequested.filter(
-		(packageName) => !allowed.includes(packageName),
-	);
-	const missing = uniqueRequested.filter((packageName) => {
-		if (unrecognized.includes(packageName)) return false;
-		const manifest = join(
-			cwd,
-			"node_modules",
-			...packageName.split("/"),
-			"package.json",
-		);
-		return !existsSync(manifest);
-	});
-	const configCandidates = [
-		...(rec.configFiles ?? []),
-		...(rec.packageConfigKeys ?? []).map((key) => `package.json#${key}`),
-	];
-	const config =
-		uniqueRequested.length > 0 && configCandidates.length > 0
-			? detectHostConfig(rec, cwd)
-			: null;
-	const unconfigured = config
-		? uniqueRequested.filter(
-				(packageName) =>
-					!missing.includes(packageName) &&
-					!unrecognized.includes(packageName) &&
-					!hostPackageConfigured(rec, packageName, config.content),
-			)
-		: [];
-	return {
-		requested: uniqueRequested,
-		allowed,
-		unrecognized,
-		missing,
-		unconfigured,
-		configCandidates,
-		detectedConfig: config?.source ?? null,
+function analyzerEnvironment(home: string): ProcessEnvironment {
+	const env: ProcessEnvironment = {
+		HOME: home,
+		TMPDIR: home,
+		NO_COLOR: "1",
 	};
+	for (const name of ["PATH", "LANG", "LC_ALL", "TZ"] as const) {
+		if (process.env[name] !== undefined) env[name] = process.env[name];
+	}
+	return env;
 }
 
-function validExitContract(codes: number[]): boolean {
-	return (
-		codes.length > 0 &&
-		codes.includes(0) &&
-		new Set(codes).size === codes.length &&
-		codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 255)
-	);
+function hostAnalyzerExecutable(path: string, targetRoot: string): string {
+	if (!isAbsolute(path)) throw new Error("Analyzer executable did not resolve to an absolute host path");
+	const executable = realpathSync(path);
+	const root = realpathSync(targetRoot);
+	const relation = relative(root, executable);
+	if (relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))) {
+		throw new Error("Analyzer executable resolves inside the target root");
+	}
+	if (!statSync(executable).isFile()) throw new Error("Analyzer executable is not a file");
+	accessSync(executable, constants.X_OK);
+	return executable;
 }
 
-export function runSniffAnalyzer(
-	opts: SniffAnalyzerRunOptions,
-): SniffAnalyzerRunResult {
-	const cwd = opts.cwd ?? process.cwd();
-	const env = { ...process.env, ...opts.env };
+function validExitContract(codes: readonly number[]): boolean {
+	return codes.length > 0 && codes.includes(0) && new Set(codes).size === codes.length && codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 255);
+}
+
+export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRunResult {
+	let authorization: AnalyzerRunAuthorization;
+	try {
+		authorization = authorizeAnalyzerRun(opts.capability, opts.manifestId, opts.analyzer);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, report: `sniff analyzer authorization blocked: ${message}`, preflight: null, outcome: "not-run" };
+	}
 	const runtime = opts.runtime ?? DEFAULT_RUNTIME;
-	const catalog = findTool(opts.tool);
+	const abandon = () => {
+		try {
+			abandonAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+		} catch {
+			// Expiry or cancellation already released the reservation and its resources.
+		}
+	};
+	const catalog = findTool(authorization.recipe.tool);
 	if (!catalog) {
-		return {
-			ok: false,
-			report: `sniff analyzer: unknown tool "${opts.tool}"; choose a tool from sniff_install_tools mode=list`,
-			preflight: null,
-			outcome: "not-run",
-		};
+		abandon();
+		return { ok: false, report: `sniff analyzer policy references unknown tool "${authorization.recipe.tool}"`, preflight: null, outcome: "not-run" };
 	}
-	const acceptedExitCodes = opts.acceptedExitCodes ?? [0];
+	const acceptedExitCodes = [...authorization.acceptedExitCodes];
 	if (!validExitContract(acceptedExitCodes)) {
-		return {
-			ok: false,
-			report:
-				"sniff analyzer: acceptedExitCodes must be unique integers from 0 to 255 and include 0",
-			preflight: null,
-			acceptedExitCodes,
-			outcome: "not-run",
-		};
+		abandon();
+		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
-
+	const env = analyzerEnvironment(authorization.home);
 	const preflight = inspectTool(
 		catalog.bundle,
 		catalog.rec,
 		true,
-		cwd,
+		authorization.target.root,
 		env,
 		runtime,
+		(path) => hostAnalyzerExecutable(path, authorization.target.root),
 	);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
+		abandon();
 		return {
 			ok: false,
-			report: `sniff analyzer preflight blocked ${opts.tool}: ${preflight.status}; ${preflight.remediation}`,
+			report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`,
 			preflight,
 			acceptedExitCodes,
 			outcome: "not-run",
 		};
 	}
-	const hostCoverage = inspectHostCoverage(
-		catalog.rec,
-		opts.hostPackages ?? [],
-		cwd,
-	);
-	const missingConfig =
-		hostCoverage.requested.length > 0 &&
-		hostCoverage.configCandidates.length > 0 &&
-		hostCoverage.detectedConfig === null;
-	if (
-		hostCoverage.unrecognized.length > 0 ||
-		hostCoverage.missing.length > 0 ||
-		hostCoverage.unconfigured.length > 0 ||
-		missingConfig
-	) {
-		const gaps = [
-			hostCoverage.unrecognized.length > 0
-				? `unsupported host packages: ${hostCoverage.unrecognized.join(", ")}`
-				: "",
-			hostCoverage.missing.length > 0
-				? `missing project packages: ${hostCoverage.missing.join(", ")}`
-				: "",
-			hostCoverage.unconfigured.length > 0
-				? `selected packages absent from config: ${hostCoverage.unconfigured.join(", ")}`
-				: "",
-			missingConfig
-				? `missing analyzer config (${hostCoverage.configCandidates.join(", ")})`
-				: "",
-		].filter(Boolean);
-		return {
-			ok: false,
-			report: `sniff analyzer coverage blocked ${opts.tool}: ${gaps.join("; ")}`,
-			preflight,
-			hostCoverage,
-			acceptedExitCodes,
-			outcome: "not-run",
+	const executable = preflight.resolvedPath;
+	try {
+		authorization = prepareAnalyzerSpawn(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+	} catch (error) {
+		abandon();
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, report: `sniff analyzer launch blocked: ${message}`, preflight, acceptedExitCodes, outcome: "not-run" };
+	}
+	let execution: CommandResult;
+	let completionError: string | undefined;
+	try {
+		execution = runtime.run(
+			[executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv],
+			authorization.target.root,
+			env,
+			Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs),
+		);
+	} catch (error) {
+		execution = {
+			argv: [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv],
+			exitCode: null,
+			stdout: "",
+			stderr: "",
+			timedOut: false,
+			error: error instanceof Error ? error.message : String(error),
+			timeoutMs: Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs),
 		};
 	}
-	const execution = runtime.run(
-		[preflight.resolvedPath, ...(catalog.rec.runPrefix ?? []), ...opts.args],
-		cwd,
-		projectEnvironment(catalog.rec, cwd, env),
-		INSTALL_TIMEOUT_MS,
-	);
-	const completed =
-		!execution.timedOut && !execution.error && execution.exitCode !== null;
-	const accepted =
-		completed && acceptedExitCodes.includes(execution.exitCode as number);
+	try {
+		completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+	} catch (error) {
+		completionError = error instanceof Error ? error.message : String(error);
+	}
+	const completed = !completionError && !execution.timedOut && !execution.error && execution.exitCode !== null;
+	const accepted = completed && acceptedExitCodes.includes(execution.exitCode as number);
 	const outcome: SniffAnalyzerOutcome = accepted
-		? execution.exitCode === 0
-			? "completed"
-			: "completed-with-findings"
-		: completed
-			? "rejected-exit"
-			: "not-run";
+		? execution.exitCode === 0 ? "completed" : "completed-with-findings"
+		: completed ? "rejected-exit" : "not-run";
 	return {
 		ok: accepted,
 		report: accepted
-			? `sniff analyzer ran ${opts.tool} after usable preflight (exit ${execution.exitCode}, accepted by [${acceptedExitCodes.join(", ")}])`
+			? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
 			: completed
-				? `sniff analyzer coverage invalid ${opts.tool}: exit ${execution.exitCode} is outside accepted contract [${acceptedExitCodes.join(", ")}]`
-				: `sniff analyzer could not run ${opts.tool} after preflight: ${execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`,
+				? `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`
+				: `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`,
 		preflight,
-		hostCoverage,
 		acceptedExitCodes,
 		outcome,
 		execution,
@@ -961,11 +829,18 @@ type ToolParams = {
 };
 
 type AnalyzerParams = {
-	tool: string;
-	args: string[];
-	hostPackages?: string[];
+	capability: string;
+	manifestId: string;
+	analyzer: string;
+};
+
+type AnalyzerDetails = {
+	ok: boolean;
+	error?: string;
+	preflight: SniffToolResult | null;
 	acceptedExitCodes?: number[];
-	path?: string;
+	outcome?: SniffAnalyzerOutcome;
+	execution?: CommandResult;
 };
 
 export default function sniffInstallTool(pi: ExtensionAPI): void {
@@ -1026,46 +901,19 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerTool({
+	pi.registerTool<TSchema, AnalyzerDetails>({
 		name: "sniff_run_analyzer",
 		label: "Sniff run analyzer",
 		description:
-			"Run one catalogued sniff analyzer. Every invocation validates the executable, selected host packages, analyzer configuration, and exit contract immediately before execution; bundles are not runtime gates.",
+			"Run one analyzer selected by a live sniff_intake capability. The host revalidates the materialized target and enforces the catalogued fixed recipe immediately before execution.",
 		parameters: z.object({
-			tool: z
-				.string()
-				.describe(
-					"Canonical analyzer tool id from sniff_install_tools mode=list",
-				),
-			args: z
-				.array(z.string())
-				.describe("Analyzer arguments, excluding the executable"),
-			hostPackages: z
-				.array(z.string())
-				.optional()
-				.describe(
-					"Selected hosted plugins required by this run; each must be catalogued and installed in the target project",
-				),
-			acceptedExitCodes: z
-				.array(z.number())
-				.optional()
-				.describe(
-					"Exact analyzer completion exits for this invocation; defaults to [0], must include 0",
-				),
-			path: z
-				.string()
-				.optional()
-				.describe("Exact target cwd for preflight and execution"),
+			capability: z.string().describe("Opaque capability returned by sniff_intake"),
+			manifestId: z.string().describe("Manifest ID returned by sniff_intake"),
+			analyzer: z.string().describe("Selected analyzer recipe ID from the issued manifest"),
 		}) as unknown as TSchema,
-		execute: async (_id, params: AnalyzerParams, _signal, _onUpdate, ctx) => {
+		execute: async (_id, params: AnalyzerParams) => {
 			try {
-				const result = runSniffAnalyzer({
-					tool: params.tool,
-					args: params.args,
-					hostPackages: params.hostPackages,
-					acceptedExitCodes: params.acceptedExitCodes,
-					cwd: params.path ?? ctx?.cwd ?? process.cwd(),
-				});
+				const result = runSniffAnalyzer(params);
 				const text = result.execution
 					? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}`
 					: result.report;
@@ -1074,19 +922,16 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
 					details: {
 						ok: result.ok,
 						preflight: result.preflight,
-						hostCoverage: result.hostCoverage,
 						acceptedExitCodes: result.acceptedExitCodes,
 						outcome: result.outcome,
 						execution: result.execution,
 					},
 					isError: !result.ok,
 				};
-			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
 				return {
-					content: [
-						{ type: "text", text: `sniff_run_analyzer failed: ${message}` },
-					],
+					content: [{ type: "text", text: `sniff_run_analyzer failed: ${message}` }],
 					details: { ok: false, error: message, preflight: null },
 					isError: true,
 				};
