@@ -42,7 +42,7 @@ Install Git.
 
 Install Bun for the bundled Claude Code and Codex MCP server. The clean-room probe used Bun `1.4.2`.
 
-Use the published GitHub repository in each harness.
+After the cross-harness branch or release reaches public main or a public release, run the GitHub marketplace commands for your harness.
 
 ### OMP
 
@@ -65,11 +65,9 @@ codex plugin marketplace add https://github.com/srobroek/sniff.git
 codex plugin add sniff@srobroek/sniff
 ```
 
-These commands install the published Sniff package.
+After the cross-harness branch or release reaches public main or a public release, run these commands.
 
-The 2026-09-11 probes used copied marketplace sources.
-
-The probes did not test remote publication.
+Validation on 2026-09-11 used copied local marketplace sources. The remaining delivery gate is publication to public main or a public release. Remote publication was not tested.
 
 ## Use Sniff
 
