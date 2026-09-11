@@ -10,6 +10,7 @@ const LEASE_TTL_MS = 60 * 60 * 1_000;
 const TERMINAL_LIMIT = 1_024;
 
 type TerminalState = "cancelled" | "expired" | "released";
+type TerminalRecord = { readonly state: TerminalState; readonly reason?: string };
 type ReservationState = "reserved" | "running" | "completed";
 
 type AnalyzerReservation = {
@@ -53,7 +54,7 @@ export type AnalyzerRunAuthorization = {
 };
 
 const activeLeases = new Map<string, LeaseRecord>();
-const terminalLeases = new Map<string, TerminalState>();
+const terminalLeases = new Map<string, TerminalRecord>();
 
 function stableValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -63,8 +64,8 @@ function stableValue(value: unknown): unknown {
   return value;
 }
 
-function rememberTerminal(capability: string, state: TerminalState): void {
-  terminalLeases.set(capability, state);
+function rememberTerminal(capability: string, state: TerminalState, reason?: string): void {
+  terminalLeases.set(capability, { state, ...(reason ? { reason } : {}) });
   while (terminalLeases.size > TERMINAL_LIMIT) {
     const oldest = terminalLeases.keys().next().value;
     if (typeof oldest !== "string") break;
@@ -72,7 +73,9 @@ function rememberTerminal(capability: string, state: TerminalState): void {
   }
 }
 
-function releaseRecord(record: LeaseRecord, state: TerminalState): void {
+const boundedReason = (reason: string): string => reason.trim().slice(0, 256) || "process shutdown";
+
+function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: string): void {
   if (activeLeases.get(record.capability) !== record) return;
   activeLeases.delete(record.capability);
   clearTimeout(record.expiryTimer);
@@ -80,7 +83,7 @@ function releaseRecord(record: LeaseRecord, state: TerminalState): void {
     record.releaseTarget();
   } finally {
     rmSync(record.home, { recursive: true, force: true });
-    rememberTerminal(record.capability, state);
+    rememberTerminal(record.capability, state, reason);
   }
 }
 
@@ -88,7 +91,7 @@ function activeLease(capability: string, manifestId: string): LeaseRecord {
   const record = activeLeases.get(capability);
   if (!record) {
     const terminal = terminalLeases.get(capability);
-    throw new Error(terminal ? `Sniff run capability was already ${terminal}` : "Unknown Sniff run capability");
+    throw new Error(terminal ? `Sniff run capability was already ${terminal.state}${terminal.reason ? ` (${terminal.reason})` : ""}` : "Unknown Sniff run capability");
   }
   if (record.manifestId !== manifestId) throw new Error("Sniff run capability does not match the manifest ID");
   if (record.now() >= record.expiresAt) {
@@ -252,4 +255,15 @@ export function cancelRunLease(capability: string, manifestId: string): void {
 export function finalizeRunLease(capability: string, manifestId: string): void {
   const record = activeLeases.get(capability);
   if (record?.manifestId === manifestId) releaseRecord(record, "released");
+}
+
+export function releaseAllRunLeases(reason: string): void {
+  const bounded = boundedReason(reason);
+  for (const record of [...activeLeases.values()]) {
+    try {
+      releaseRecord(record, "cancelled", bounded);
+    } catch {
+      // Shutdown cleanup is best-effort; continue releasing every active lease.
+    }
+  }
 }

@@ -8,7 +8,7 @@ import { createRunManifest, type RunManifest } from "../src/core/intake.ts";
 import { runSniffIntakeTool, type SniffIntakeToolResult } from "../src/core/intake-use-case.ts";
 import type { ReportInput, ReportTarget } from "../src/core/report.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
-import { cancelRunLease, issueRunLease } from "../src/core/run-registry.ts";
+import { authorizeAnalyzerRun, cancelRunLease, issueRunLease, releaseAllRunLeases } from "../src/core/run-registry.ts";
 import { type ArgvResult, type ArgvRunner, type TargetKind, validateResolvedTarget } from "../src/core/target.ts";
 import { detectProvider, withResolvedTarget } from "../src/core/target-provider.ts";
 import sniffIntakeExtension from "./sniff-intake-tool.ts";
@@ -180,6 +180,25 @@ describe("adaptive runtime boundaries", () => {
     expect(existsSync(checkout)).toBe(false);
     expect(() => cancelRunLease(result.lease?.capability ?? "", result.lease?.manifestId ?? "")).toThrow("already cancelled");
   }, 15_000);
+
+  test("releases every active lease and preserves terminal replay evidence", () => {
+    const first = localLease({ remote: true, removeRootOnRelease: true });
+    const second = localLease({ remote: true, removeRootOnRelease: true });
+    const firstHome = authorizeAnalyzerRun(first.lease.capability, first.lease.manifestId, "lizard:complexity").home;
+    const secondHome = authorizeAnalyzerRun(second.lease.capability, second.lease.manifestId, "lizard:complexity").home;
+    expect(existsSync(firstHome)).toBe(true);
+    expect(existsSync(secondHome)).toBe(true);
+
+    releaseAllRunLeases("SIGTERM: adapter shutdown");
+
+    expect(existsSync(first.root)).toBe(false);
+    expect(existsSync(second.root)).toBe(false);
+    expect(existsSync(firstHome)).toBe(false);
+    expect(existsSync(secondHome)).toBe(false);
+    expect(() => cancelRunLease(first.lease.capability, first.lease.manifestId)).toThrow("already cancelled");
+    expect(() => cancelRunLease(second.lease.capability, second.lease.manifestId)).toThrow("already cancelled");
+    expect(() => releaseAllRunLeases("second shutdown")).not.toThrow();
+  });
 
   test("registered headless intake applies host-authorized defaults and direct calls fail closed", async () => {
     const { root } = repository();
