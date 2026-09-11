@@ -1,7 +1,23 @@
-import { createInterface } from "node:readline";
+import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
+import type { Readable, Writable } from "node:stream";
+import { Server } from "@modelcontextprotocol/sdk/server";
+import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport";
+import {
+  CallToolRequestSchema,
+  type CallToolResult,
+  type ElicitRequestFormParams,
+  ErrorCode,
+  InitializeRequestSchema,
+  type JSONRPCMessage, ListToolsRequestSchema,
+  McpError,
+  SUPPORTED_PROTOCOL_VERSIONS
+} from "@modelcontextprotocol/sdk/types";
+import reportInputSchema from "../../skills/sniff/references/report-input.schema.json" with { type: "json" };
 import {
   cancelRunLease,
   decisionFrontier,
+  finalizeRunLease,
   intakeInput,
   type ReportInput,
   releaseAllRunLeases,
@@ -9,38 +25,122 @@ import {
   runSniffInstall,
   runSniffIntakeTool,
   runSniffReportTool,
+  type SaveAuthorizationRequest,
   type SniffInstallMode,
   type SniffReportMode,
 } from "../../src/core/index.ts";
 
-type JsonRpcId = string | number;
+const SERVER_VERSION = "0.1.0";
+const MAX_FRAME_BYTES = 1_048_576;
+const MAX_INPUT_STRING_BYTES = 131_072;
+const MAX_INPUT_ARRAY_LENGTH = 2_000;
+const MAX_INPUT_OBJECT_KEYS = 2_000;
+const MAX_OUTPUT_TEXT_BYTES = 65_536;
+const MAX_OUTPUT_STRUCTURED_BYTES = 524_288;
+const MAX_CONCURRENT_REQUESTS = 8;
+const ELICITATION_TIMEOUT_MS = 120_000;
+
+// MCP stdio is newline-delimited JSON. The SDK's transport already provides
+// ordered, backpressured writes; this small transport adds an input frame cap
+// and emits protocol errors for malformed/oversized frames.
+class BoundedStdioTransport implements Transport {
+  private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
+  private started = false;
+  private closed = false;
+  private writeQueue = Promise.resolve();
+  private readonly onData = (chunk: Buffer | string) => this.consume(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  private readonly onEnd = () => void this.close();
+  private readonly onError = (error: Error) => this.onerror?.(error);
+
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  onmessage?: <T extends JSONRPCMessage>(message: T) => void;
+
+  constructor(
+    private readonly input: Readable = process.stdin,
+    private readonly output: Writable = process.stdout,
+    private readonly maxFrameBytes = MAX_FRAME_BYTES,
+  ) {}
+
+  async start(): Promise<void> {
+    if (this.started) throw new Error("MCP stdio transport already started");
+    this.started = true;
+    this.input.on("data", this.onData);
+    this.input.once("end", this.onEnd);
+    this.input.once("error", this.onError);
+  }
+
+  private consume(chunk: Buffer): void {
+    if (this.closed) return;
+    this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
+    for (;;) {
+      const newline = this.buffer.indexOf(10);
+      if (newline < 0) {
+        if (this.buffer.length > this.maxFrameBytes) {
+          this.buffer = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
+          void this.sendProtocolError("Frame exceeds the maximum MCP input size");
+        }
+        return;
+      }
+      const line = this.buffer.subarray(0, newline);
+      this.buffer = this.buffer.subarray(newline + 1) as Buffer<ArrayBufferLike>;
+      const text = line[line.length - 1] === 13 ? line.subarray(0, line.length - 1).toString("utf8") : line.toString("utf8");
+      if (line.length > this.maxFrameBytes) {
+        void this.sendProtocolError("Frame exceeds the maximum MCP input size");
+        continue;
+      }
+      if (text.length === 0) continue;
+      try {
+        const message = JSON.parse(text) as JSONRPCMessage;
+        this.onmessage?.(message);
+      } catch {
+        void this.sendProtocolError("Parse error", ErrorCode.ParseError);
+      }
+    }
+  }
+
+  private sendProtocolError(message: string, code = ErrorCode.InvalidRequest): Promise<void> {
+    return this.send({ jsonrpc: "2.0", id: null, error: { code, message } } as unknown as JSONRPCMessage);
+  }
+
+  send(message: JSONRPCMessage, _options?: TransportSendOptions): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    const encoded = `${JSON.stringify(message)}\n`;
+    this.writeQueue = this.writeQueue.then(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const done = (error?: Error | null) => (error ? reject(error) : resolve());
+          try {
+            if (this.output.write(encoded, done)) resolve();
+          } catch (error) {
+            reject(error);
+          }
+        }),
+    );
+    return this.writeQueue;
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    this.input.off("data", this.onData);
+    this.input.off("end", this.onEnd);
+    this.input.off("error", this.onError);
+    this.input.pause();
+    this.onclose?.();
+  }
+}
+
 type JsonObject = Record<string, unknown>;
-type JsonRpcMessage = JsonObject & { jsonrpc: "2.0" };
-type ToolResult = {
-  readonly content: readonly [{ readonly type: "text"; readonly text: string }];
-  readonly structuredContent: JsonObject;
-  readonly isError?: boolean;
-};
-type PendingClientRequest = {
-  readonly resolve: (value: unknown) => void;
-  readonly reject: (error: Error) => void;
-  readonly timer: ReturnType<typeof setTimeout>;
+type ToolResponse = CallToolResult & { readonly structuredContent: JsonObject };
+type DigestRequest = {
+  readonly digest: string;
+  readonly [key: string]: unknown;
 };
 
-const SERVER_VERSION = "0.1.0";
-const ELICITATION_TIMEOUT_MS = 120_000;
-let nextClientRequestId = 1;
-let clientCapabilities: JsonObject = {};
-let shuttingDown = false;
-const pendingClientRequests = new Map<JsonRpcId, PendingClientRequest>();
-const activeLeases = new Map<string, { readonly capability: string; readonly manifestId: string }>();
 
 class SniffMcpError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-    readonly data: JsonObject = {},
-  ) {
+  constructor(readonly code: string, message: string) {
     super(message);
     this.name = "SniffMcpError";
   }
@@ -48,176 +148,87 @@ class SniffMcpError extends Error {
 
 const stringSchema = { type: "string" } as const;
 const positiveIntegerSchema = { type: "integer", minimum: 1 } as const;
-const targetSchema = {
-  oneOf: [
-    { type: "object", properties: { kind: { const: "working-tree" }, root: stringSchema }, required: ["kind", "root"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "files" }, root: stringSchema, paths: { type: "array", items: stringSchema } }, required: ["kind", "root", "paths"], additionalProperties: false },
-    { type: "object", properties: { kind: { enum: ["directory", "module"] }, root: stringSchema, path: stringSchema }, required: ["kind", "root", "path"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "commit" }, root: stringSchema, commit: stringSchema }, required: ["kind", "root", "commit"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "range" }, root: stringSchema, base: stringSchema, head: stringSchema }, required: ["kind", "root", "base", "head"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "branch" }, root: stringSchema, branch: stringSchema, base: stringSchema }, required: ["kind", "root", "branch"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "ref" }, root: stringSchema, ref: stringSchema }, required: ["kind", "root", "ref"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "repository" }, repository: stringSchema, ref: stringSchema }, required: ["kind", "repository"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "release" }, repository: stringSchema, tag: stringSchema, previousTag: stringSchema }, required: ["kind", "repository", "tag"], additionalProperties: false },
-    {
+const errorSchema = {
+  type: "object",
+  required: ["ok", "error"],
+  properties: {
+    ok: { const: false },
+    error: {
       type: "object",
-      properties: {
-        kind: { const: "history" },
-        rootOrRepository: stringSchema,
-        window: {
-          oneOf: [
-            { type: "object", properties: { kind: { const: "refs" }, base: stringSchema, head: stringSchema }, required: ["kind", "base", "head"], additionalProperties: false },
-            { type: "object", properties: { kind: { const: "since-date" }, date: stringSchema, head: stringSchema }, required: ["kind", "date"], additionalProperties: false },
-            { type: "object", properties: { kind: { const: "last-commits" }, count: positiveIntegerSchema, head: stringSchema }, required: ["kind", "count"], additionalProperties: false },
-            { type: "object", properties: { kind: { const: "since-release" }, release: stringSchema, head: stringSchema }, required: ["kind", "release"], additionalProperties: false },
-            { type: "object", properties: { kind: { const: "previous-release" }, release: stringSchema, head: stringSchema }, required: ["kind"], additionalProperties: false },
-            { type: "object", properties: { kind: { const: "context-aware-default" }, head: stringSchema }, required: ["kind"], additionalProperties: false },
-          ],
-        },
-      },
-      required: ["kind", "rootOrRepository", "window"],
+      required: ["code", "message"],
+      properties: { code: stringSchema, message: stringSchema },
       additionalProperties: false,
     },
-    { type: "object", properties: { kind: { const: "pr" }, repository: stringSchema, number: { oneOf: [stringSchema, { type: "integer" }] } }, required: ["kind", "repository", "number"], additionalProperties: false },
-    { type: "object", properties: { kind: { const: "mr" }, repository: stringSchema, iid: { oneOf: [stringSchema, { type: "integer" }] } }, required: ["kind", "repository", "iid"], additionalProperties: false },
-  ],
+  },
+  additionalProperties: true,
 } as const;
+
+const targetSchema = {
+  type: "object",
+  additionalProperties: true,
+  required: ["kind"],
+  properties: {
+    kind: stringSchema,
+    root: stringSchema,
+    path: stringSchema,
+    paths: { type: "array", items: stringSchema, maxItems: MAX_INPUT_ARRAY_LENGTH },
+    commit: stringSchema,
+    base: stringSchema,
+    head: stringSchema,
+    branch: stringSchema,
+    ref: stringSchema,
+    repository: stringSchema,
+    tag: stringSchema,
+    previousTag: stringSchema,
+    iid: { oneOf: [stringSchema, { type: "integer" }] },
+    number: { oneOf: [stringSchema, { type: "integer" }] },
+    rootOrRepository: stringSchema,
+    window: { type: "object" },
+  },
+} as const;
+
 const intakeInputSchema = {
   type: "object",
+  additionalProperties: false,
   properties: {
     target: targetSchema,
     intent: { enum: ["audit", "review-change", "release-risk", "history", "plan-only"] },
-    objectives: { type: "array", items: stringSchema, uniqueItems: true },
-    exclusions: { type: "array", items: stringSchema, uniqueItems: true },
+    scopeMode: { enum: ["quick", "full", "plan-only"] },
+    objectives: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
+    exclusions: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
     budget: {
       type: "object",
+      additionalProperties: false,
       properties: { maxMinutes: positiveIntegerSchema, maxAnalyzers: positiveIntegerSchema, maxFiles: positiveIntegerSchema },
-      additionalProperties: false,
     },
-    security: {
-      type: "object",
-      properties: {
-        deepStatic: { type: "boolean" },
-        unavailable: { type: "array", items: stringSchema, uniqueItems: true },
-        projectNative: { type: "array", items: stringSchema, uniqueItems: true },
-        lightweightStatic: { type: "array", items: stringSchema, uniqueItems: true },
-        deepStaticAnalyzers: { type: "array", items: stringSchema, uniqueItems: true },
-        requestedActions: { type: "array", items: stringSchema, uniqueItems: true },
-      },
-      additionalProperties: false,
-    },
+    security: { type: "object" },
     interactive: { type: "boolean" },
-    authorization: {
-      type: "object",
-      properties: { granted: { const: true }, actor: stringSchema, reason: stringSchema },
-      required: ["granted"],
-      additionalProperties: false,
-    },
-    confirmation: {
-      type: "object",
-      properties: { confirmed: { type: "boolean" }, actor: stringSchema },
-      required: ["confirmed"],
-      additionalProperties: false,
-    },
+    // Deliberately not accepted as authority by the core boundary.
+    authorization: { type: "object" },
   },
-  additionalProperties: false,
 } as const;
 
-const interviewSchema = {
-  type: "object",
-  properties: {
-    questions: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: { id: { enum: ["target", "intent", "objectives", "budget"] }, impact: { type: "number" }, prompt: stringSchema, reason: stringSchema },
-        required: ["id", "impact", "prompt", "reason"],
-        additionalProperties: false,
-      },
-    },
-    plan: { type: "object" },
-    confirmationRequired: { type: "boolean" },
-  },
-  required: ["questions", "confirmationRequired"],
-  additionalProperties: true,
-} as const;
-const reportLinkSchema = {
-  type: "object",
-  properties: { name: stringSchema, url: { type: "string", pattern: "^https://refactoring\\.guru/[A-Za-z0-9/_-]+$" } },
-  required: ["name", "url"],
-  additionalProperties: false,
-} as const;
-const reportFindingSchema = {
-  type: "object",
-  properties: {
-    stableKey: stringSchema,
-    title: stringSchema,
-    location: { type: "object", properties: { path: stringSchema, line: positiveIntegerSchema, column: positiveIntegerSchema, anchor: stringSchema }, required: ["path", "line", "anchor"], additionalProperties: false },
-    evidence: { type: "object", properties: { tier: { enum: ["observed", "reproduced", "corroborated", "hypothesis"] }, source: stringSchema, detail: stringSchema }, required: ["tier", "source", "detail"], additionalProperties: false },
-    impact: { enum: ["critical", "high", "medium", "low"] },
-    value: { enum: ["high", "medium", "low"] },
-    cost: { enum: ["S", "M", "L"] },
-    compatibility: { type: "object", properties: { kind: { enum: ["safe", "breaking"] }, surface: stringSchema }, required: ["kind"], additionalProperties: false },
-    applyTier: { enum: ["mechanical", "assisted", "manual"] },
-    smell: reportLinkSchema,
-    refactoring: reportLinkSchema,
-    adversarial: { type: "object", properties: { verdict: { enum: ["keep", "downgrade", "drop"] }, reason: stringSchema }, required: ["verdict", "reason"], additionalProperties: false },
-  },
-  required: ["stableKey", "title", "location", "evidence", "impact", "value", "cost", "compatibility", "applyTier", "adversarial"],
-  additionalProperties: false,
-} as const;
-const reportCoverageSchema = {
-  type: "object",
-  properties: { dimension: stringSchema, tool: stringSchema, analysisClass: { enum: ["local", "relational", "global", "baseline"] }, status: { enum: ["ran", "skipped", "gap", "not-applicable"] }, notes: stringSchema, config: stringSchema },
-  required: ["dimension", "tool", "analysisClass", "status", "notes"],
-  additionalProperties: false,
-} as const;
-const reportInputSchema = {
-  type: "object",
-  required: ["generatedAt", "target", "headline", "findings", "coverage", "suppressionCount", "systemicPatterns", "extensions"],
-  properties: {
-    generatedAt: stringSchema,
-    target: {
-      type: "object",
-      required: ["kind", "label", "scopeMode", "languages", "filesAnalyzed"],
-      properties: { kind: stringSchema, label: stringSchema, scopeMode: { enum: ["quick", "full", "plan-only"] }, baseRef: stringSchema, languages: { type: "array", items: stringSchema }, filesAnalyzed: { type: "integer", minimum: 0 } },
-      additionalProperties: false,
-    },
-    headline: stringSchema,
-    findings: { type: "array", items: reportFindingSchema },
-    coverage: { type: "array", items: reportCoverageSchema },
-    suppressionCount: { type: "integer", minimum: 0 },
-    systemicPatterns: { type: "array", items: stringSchema },
-    extensions: { type: "object", additionalProperties: true },
-  },
-  additionalProperties: false,
-} as const;
+const resultSchema = (successProperties: JsonObject) => ({
+  type: "object" as const,
+  oneOf: [
+    { required: ["ok"], properties: { ok: { const: true }, ...successProperties }, additionalProperties: true },
+    errorSchema,
+  ],
+});
 
 const outputSchemas = {
-  intake: {
-    type: "object",
-    required: ["ok", "interview"],
-    properties: {
-      ok: { type: "boolean" },
-      interview: interviewSchema,
-      manifest: { type: "object" },
-      lease: { type: "object", properties: { capability: stringSchema, manifestId: stringSchema, expiresAt: stringSchema }, required: ["capability", "manifestId", "expiresAt"], additionalProperties: false },
-      confirmation: { type: "object", additionalProperties: true },
-      error: { type: "object", additionalProperties: true },
-    },
-    additionalProperties: true,
-  },
-  cancel: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" }, capability: stringSchema, manifestId: stringSchema, released: { type: "boolean" }, error: { type: "object", additionalProperties: true } }, additionalProperties: true },
-  install: { type: "object", required: ["ok", "report", "tools"], properties: { ok: { type: "boolean" }, report: stringSchema, tools: { type: "array", items: { type: "object" } }, error: { type: "object", additionalProperties: true } }, additionalProperties: true },
-  analyzer: { type: "object", required: ["ok", "report", "outcome"], properties: { ok: { type: "boolean" }, report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, execution: { type: "object" }, acceptedExitCodes: { type: "array", items: { type: "integer" } }, error: { type: "object", additionalProperties: true } }, additionalProperties: true },
-  report: { type: "object", required: ["ok", "artifacts", "savedPaths"], properties: { ok: { type: "boolean" }, artifacts: { type: "object" }, savedPaths: { type: "array", items: stringSchema }, error: { type: "object", additionalProperties: true } }, additionalProperties: true },
+  intake: resultSchema({ interview: { type: "object" }, confirmation: { type: "object" }, confirmationRequired: { type: "boolean" }, manifest: { type: "object" }, lease: { type: "object" } }),
+  cancel: resultSchema({ capability: stringSchema, manifestId: stringSchema, released: { type: "boolean" } }),
+  install: resultSchema({ report: stringSchema, tools: { type: "array", items: { type: "object" } } }),
+  analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, execution: { type: "object" }, acceptedExitCodes: { type: "array", items: { type: "integer" } } }),
+  report: resultSchema({ artifacts: { type: "object" }, savedPaths: { type: "array", items: stringSchema } }),
 } as const;
 
 const tools = [
   {
     name: "sniff_intake",
     title: "Sniff adaptive intake",
-    description: "Resolve one highest-impact Sniff intake question, then obtain a trusted MCP confirmation before issuing a run lease.",
+    description: "Resolve the Sniff intake plan and obtain a trusted MCP elicitation before issuing a run lease.",
     inputSchema: { type: "object", properties: { input: intakeInputSchema }, required: ["input"], additionalProperties: false },
     outputSchema: outputSchemas.intake,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -225,7 +236,7 @@ const tools = [
   {
     name: "sniff_cancel",
     title: "Cancel Sniff run",
-    description: "Cancel an issued Sniff run and release its host-owned temporary materialization.",
+    description: "Cancel an issued Sniff run and release its host-owned materialization.",
     inputSchema: { type: "object", properties: { capability: stringSchema, manifestId: stringSchema }, required: ["capability", "manifestId"], additionalProperties: false },
     outputSchema: outputSchemas.cancel,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
@@ -233,12 +244,12 @@ const tools = [
   {
     name: "sniff_install_tools",
     title: "Sniff install tools",
-    description: "Probe, diagnose, list, or install Sniff analyzer catalog entries. Installation is explicit and never uses sudo.",
+    description: "Probe, diagnose, list, or explicitly authorize installation of Sniff analyzer catalog entries.",
     inputSchema: {
       type: "object",
       properties: {
         mode: { enum: ["probe", "diagnose", "list", "install"] },
-        bundles: { type: "array", items: stringSchema, uniqueItems: true },
+        bundles: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
         all: { type: "boolean" },
         dryRun: { type: "boolean" },
         noMise: { type: "boolean" },
@@ -247,12 +258,12 @@ const tools = [
       additionalProperties: false,
     },
     outputSchema: outputSchemas.install,
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
   {
     name: "sniff_run_analyzer",
     title: "Sniff run analyzer",
-    description: "Run one analyzer selected by a live sniff_intake capability with its fixed catalogued recipe and one-shot budget reservation.",
+    description: "Run one analyzer selected by a live Sniff intake capability and its fixed catalogued recipe.",
     inputSchema: { type: "object", properties: { capability: stringSchema, manifestId: stringSchema, analyzer: stringSchema }, required: ["capability", "manifestId", "analyzer"], additionalProperties: false },
     outputSchema: outputSchemas.analyzer,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
@@ -260,10 +271,16 @@ const tools = [
   {
     name: "sniff_report",
     title: "Sniff structured report",
-    description: "Validate and render or save a Sniff report bound to the exact issued intake manifest, then finalize its lease.",
+    description: "Validate and render or explicitly authorize saving a Sniff report bound to the issued intake manifest.",
     inputSchema: {
       type: "object",
-      properties: { capability: stringSchema, manifestId: stringSchema, mode: { enum: ["render", "save"] }, report: reportInputSchema, path: stringSchema },
+      properties: {
+        capability: stringSchema,
+        manifestId: stringSchema,
+        mode: { enum: ["render", "save"] },
+        report: reportInputSchema,
+        path: stringSchema,
+      },
       required: ["capability", "manifestId", "report"],
       additionalProperties: false,
     },
@@ -276,253 +293,351 @@ function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function asObject(value: unknown, message: string): JsonObject {
-  if (!isObject(value)) throw new SniffMcpError("invalid_input", message);
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > MAX_INPUT_STRING_BYTES) throw new SniffMcpError("invalid_input", `${field} is invalid`);
   return value;
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new SniffMcpError("invalid_input", `${field} must be a non-empty string`);
-  return value;
+function inspectInput(value: unknown, depth = 0): void {
+  if (depth > 32) throw new SniffMcpError("invalid_input", "Input nesting is too deep");
+  if (typeof value === "string") {
+    if (Buffer.byteLength(value) > MAX_INPUT_STRING_BYTES) throw new SniffMcpError("input_too_large", "Input string is too large");
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > MAX_INPUT_ARRAY_LENGTH) throw new SniffMcpError("input_too_large", "Input array is too large");
+    for (const item of value) inspectInput(item, depth + 1);
+    return;
+  }
+  if (isObject(value)) {
+    const keys = Object.keys(value);
+    if (keys.length > MAX_INPUT_OBJECT_KEYS) throw new SniffMcpError("input_too_large", "Input object is too large");
+    for (const [key, item] of Object.entries(value)) {
+      if (Buffer.byteLength(key) > MAX_INPUT_STRING_BYTES) throw new SniffMcpError("input_too_large", "Input key is too large");
+      inspectInput(item, depth + 1);
+    }
+  }
 }
 
 function errorDetails(error: unknown): { code: string; message: string } {
-  const message = error instanceof Error ? error.message : String(error);
-  if (error instanceof SniffMcpError) return { code: error.code, message };
-  if (/input|target|budget|security|mode|bundles|report/i.test(message)) return { code: "invalid_input", message };
-  if (/capability|manifest|reservation|lease|selected|recipe|authorized/i.test(message)) return { code: "invalid_capability", message };
-  if (/confirm|authoriz/i.test(message)) return { code: "confirmation_required", message };
-  return { code: "sniff_operation_failed", message };
+  if (error instanceof SniffMcpError) return { code: error.code, message: error.message };
+  if (error instanceof Error && error.name === "AbortError") return { code: "cancelled", message: "The MCP request was cancelled." };
+  const message = error instanceof Error ? error.message : "Sniff operation failed";
+  if (/capability|manifest|lease|reservation|authorization|authorized/i.test(message)) return { code: "invalid_capability", message: "The capability or manifest is invalid, expired, or already finalized." };
+  if (/confirm|elicitation|denied/i.test(message)) return { code: "confirmation_required", message: "Trusted MCP confirmation was not accepted." };
+  if (/input|target|budget|security|mode|bundles|report|path|schema/i.test(message)) return { code: "invalid_input", message: "The request does not satisfy the Sniff input contract." };
+  return { code: "sniff_operation_failed", message: "Sniff could not complete the requested operation." };
 }
 
-function toolError(name: string, error: unknown): ToolResult {
+function boundedString(value: string, max = MAX_OUTPUT_TEXT_BYTES): string {
+  if (Buffer.byteLength(value) <= max) return value;
+  const bytes = Buffer.from(value);
+  return `${bytes.subarray(0, max).toString("utf8")}\n[truncated]`;
+}
+
+function boundedValue(value: unknown, depth = 0): unknown {
+  if (typeof value === "string") return boundedString(value);
+  if (depth > 12) return "[truncated]";
+  if (Array.isArray(value)) return value.slice(0, MAX_INPUT_ARRAY_LENGTH).map((item) => boundedValue(item, depth + 1));
+  if (isObject(value)) return Object.fromEntries(Object.entries(value).slice(0, MAX_INPUT_OBJECT_KEYS).map(([key, item]) => [key, boundedValue(item, depth + 1)]));
+  return value;
+}
+
+function toolError(name: string, error: unknown): ToolResponse {
   const details = errorDetails(error);
-  const value = { ok: false, error: { code: details.code, message: details.message } };
+  const value = { ok: false, error: details };
   return {
-    content: [{ type: "text", text: `${name} failed [${details.code}]: ${details.message}` }],
+    content: [{ type: "text", text: `${name} failed [${details.code}]` }],
     structuredContent: value,
     isError: true,
   };
 }
 
-function toolSuccess(value: JsonObject, text: string): ToolResult {
-  return { content: [{ type: "text", text }], structuredContent: value };
-}
-
-function activeLeaseKey(capability: string, manifestId: string): string {
-  return `${capability}\0${manifestId}`;
-}
-
-function supportsElicitation(): boolean {
-  const elicitation = clientCapabilities.elicitation;
-  return isObject(elicitation) && isObject(elicitation.form);
-}
-
-function send(message: JsonRpcMessage): void {
-  if (!process.stdout.writable || shuttingDown) return;
-  process.stdout.write(`${JSON.stringify(message)}\n`);
-}
-
-function requestClient(method: string, params: JsonObject): Promise<unknown> {
-  if (shuttingDown) return Promise.reject(new SniffMcpError("server_shutting_down", "MCP server is shutting down"));
-  const id = nextClientRequestId++;
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingClientRequests.delete(id);
-      reject(new SniffMcpError("elicitation_timeout", "MCP elicitation timed out"));
-    }, ELICITATION_TIMEOUT_MS);
-    pendingClientRequests.set(id, { resolve, reject, timer });
-    send({ jsonrpc: "2.0", id, method, params });
-  });
-}
-
-async function confirmThroughElicitation(summary: Readonly<{ target: string; files: number }>): Promise<boolean> {
-  const response = await requestClient("elicitation/create", {
-    mode: "form",
-    message: `Confirm Sniff intake for ${summary.target} (${summary.files} files)? This authorizes read-only analysis and temporary materialization only.`,
-    requestedSchema: {
-      type: "object",
-      properties: { confirmed: { type: "boolean", title: "Confirm Sniff intake" } },
-      required: ["confirmed"],
-      additionalProperties: false,
-    },
-  });
-  if (!isObject(response) || response.action !== "accept") return false;
-  const content = response.content;
-  return isObject(content) && content.confirmed === true;
-}
-
-async function handleIntake(args: JsonObject): Promise<ToolResult> {
-  const input = intakeInput(args.input);
-  if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not a trusted MCP confirmation receipt");
-  const frontier = decisionFrontier(input);
-  if (!frontier.plan) return toolSuccess({ ok: true, interview: frontier }, JSON.stringify(frontier));
-  if (input.interactive === false) {
-    return toolSuccess(
-      { ok: false, interview: frontier, confirmationRequired: true, confirmation: { required: true, reason: "MCP callers cannot authorize intake with interactive=false; use MCP elicitation." } },
-      "Sniff intake requires MCP elicitation confirmation before issuing a lease.",
-    );
+function toolSuccess(value: JsonObject, text: string): ToolResponse {
+  const bounded = boundedValue(value) as JsonObject;
+  let structured = bounded;
+  try {
+    if (Buffer.byteLength(JSON.stringify(structured)) > MAX_OUTPUT_STRUCTURED_BYTES) structured = { ok: false, error: { code: "output_too_large", message: "Sniff output exceeded the MCP size limit." } };
+  } catch {
+    structured = { ok: false, error: { code: "output_too_large", message: "Sniff output could not be serialized within the MCP size limit." } };
   }
-  if (!supportsElicitation()) {
-    return toolSuccess(
-      { ok: false, interview: frontier, confirmationRequired: true, confirmation: { required: true, mechanism: "elicitation", reason: "The MCP client did not advertise elicitation support." } },
-      "Sniff intake is complete but requires a client that supports MCP elicitation; no lease was issued.",
-    );
+  const isError = structured.ok === false;
+  return { content: [{ type: "text", text: boundedString(text) }], structuredContent: structured, ...(isError ? { isError: true } : {}) };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function digest(value: unknown): string {
+  return createHash("sha256").update(stableJson(value)).digest("hex");
+}
+
+function abortError(): Error {
+  return new DOMException("The MCP request was cancelled.", "AbortError");
+}
+
+function assertNotAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortError();
+}
+
+async function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  assertNotAborted(signal);
+  const { promise: aborted, reject } = Promise.withResolvers<never>();
+  const onAbort = () => reject(abortError());
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([operation, aborted]);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
-  const result = await runSniffIntakeTool(
-    { input: { ...input, interactive: true } },
-    { confirmInteractive: confirmThroughElicitation },
-  );
-  if (result.lease) activeLeases.set(activeLeaseKey(result.lease.capability, result.lease.manifestId), result.lease);
-  return toolSuccess({ ok: true, ...result }, JSON.stringify(result));
 }
 
-function handleCancel(args: JsonObject): ToolResult {
-  const capability = requiredString(args.capability, "capability");
-  const manifestId = requiredString(args.manifestId, "manifestId");
-  cancelRunLease(capability, manifestId);
-  activeLeases.delete(activeLeaseKey(capability, manifestId));
-  return toolSuccess({ ok: true, capability, manifestId, released: true }, "Sniff run cancelled and materialization released.");
-}
+class Semaphore {
+  private permits = MAX_CONCURRENT_REQUESTS;
+  private readonly waiters: Array<{ readonly signal: AbortSignal; readonly resolve: (release: () => void) => void; readonly reject: (error: Error) => void; readonly onAbort: () => void }> = [];
 
-function handleInstall(args: JsonObject): ToolResult {
-  const mode = args.mode as SniffInstallMode | undefined;
-  if (mode !== undefined && !["probe", "diagnose", "list", "install"].includes(mode)) throw new SniffMcpError("invalid_input", "mode is invalid");
-  const bundles = args.bundles;
-  if (bundles !== undefined && (!Array.isArray(bundles) || bundles.some((bundle) => typeof bundle !== "string"))) throw new SniffMcpError("invalid_input", "bundles must be an array of strings");
-  const result = runSniffInstall({
-    ...(mode ? { mode } : {}),
-    ...(bundles ? { bundles } : {}),
-    ...(typeof args.all === "boolean" ? { all: args.all } : {}),
-    ...(typeof args.dryRun === "boolean" ? { dryRun: args.dryRun } : {}),
-    ...(typeof args.noMise === "boolean" ? { noMise: args.noMise } : {}),
-    cwd: typeof args.path === "string" ? args.path : process.cwd(),
-  });
-  return { ...toolSuccess({ ok: result.ok, report: result.report, tools: result.tools }, result.report), ...(result.ok ? {} : { isError: true }) };
-}
+  async acquire(signal: AbortSignal): Promise<() => void> {
+    assertNotAborted(signal);
+    if (this.permits > 0) {
+      this.permits -= 1;
+      return this.release;
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { signal, resolve, reject, onAbort: () => reject(abortError()) };
+      signal.addEventListener("abort", waiter.onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
 
-function handleAnalyzer(args: JsonObject): ToolResult {
-  const capability = requiredString(args.capability, "capability");
-  const manifestId = requiredString(args.manifestId, "manifestId");
-  const analyzer = requiredString(args.analyzer, "analyzer");
-  const result = runSniffAnalyzer({ capability, manifestId, analyzer });
-  const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}` : result.report;
-  return {
-    ...toolSuccess(
-      { ok: result.ok, report: result.report, preflight: result.preflight, ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}), outcome: result.outcome, ...(result.execution ? { execution: result.execution } : {}) },
-      text,
-    ),
-    ...(result.ok ? {} : { isError: true }),
+  private readonly release = (): void => {
+    const waiter = this.waiters.shift();
+    if (!waiter) {
+      this.permits += 1;
+      return;
+    }
+    waiter.signal.removeEventListener("abort", waiter.onAbort);
+    if (waiter.signal.aborted) {
+      waiter.reject(abortError());
+      this.release();
+      return;
+    }
+    waiter.resolve(this.release);
   };
 }
 
-function handleReport(args: JsonObject): ToolResult {
+const semaphore = new Semaphore();
+const server = new Server({ name: "sniff", version: SERVER_VERSION }, { capabilities: { tools: { listChanged: false } }, enforceStrictCapabilities: true });
+let negotiatedVersion: string | undefined;
+let shuttingDown = false;
+const activeLeases = new Set<string>();
+
+function supportsFormElicitation(): boolean {
+  if (!negotiatedVersion || negotiatedVersion < "2025-06-18") return false;
+  const capabilities = server.getClientCapabilities();
+  return isObject(capabilities?.elicitation) && isObject(capabilities.elicitation.form);
+}
+
+function leaseKey(capability: string, manifestId: string): string {
+  return `${capability}\0${manifestId}`;
+}
+
+function setClientHandshake(request: { params: { protocolVersion: string; capabilities?: unknown; clientInfo?: unknown } }, version: string): void {
+  const mutable = server as unknown as { _clientCapabilities?: unknown; _clientVersion?: unknown; _protocolVersion?: string };
+  mutable._clientCapabilities = request.params.capabilities ?? {};
+  mutable._clientVersion = request.params.clientInfo;
+  mutable._protocolVersion = version;
+}
+
+server.setRequestHandler(InitializeRequestSchema, (request) => {
+  const requested = request.params.protocolVersion;
+  if (!SUPPORTED_PROTOCOL_VERSIONS.includes(requested)) throw new McpError(ErrorCode.InvalidRequest, "Unsupported MCP protocol version");
+  negotiatedVersion = requested;
+  setClientHandshake(request, requested);
+  return {
+    protocolVersion: requested,
+    capabilities: { tools: { listChanged: false } },
+    serverInfo: { name: "sniff", version: SERVER_VERSION },
+  };
+});
+
+server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
+
+async function elicitDigest(request: DigestRequest, signal: AbortSignal, label: string): Promise<false | { acceptedDigest: string; actor?: string; reason?: string }> {
+  assertNotAborted(signal);
+  if (!supportsFormElicitation()) return false;
+  const fields = Object.fromEntries(Object.entries(request).filter(([key]) => key !== "digest").map(([key, value]) => [key, { const: value }]));
+  const requestedSchema = {
+    type: "object" as const,
+    properties: {
+      ...fields,
+      acceptedDigest: { type: "string" as const, const: request.digest },
+      actor: stringSchema,
+      reason: stringSchema,
+    },
+    required: ["acceptedDigest"],
+    additionalProperties: false,
+  } as ElicitRequestFormParams["requestedSchema"];
+  const response = await server.elicitInput(
+    { mode: "form", message: `${label}\n${boundedString(JSON.stringify(request), MAX_OUTPUT_TEXT_BYTES)}`, requestedSchema },
+    { signal, timeout: ELICITATION_TIMEOUT_MS, maxTotalTimeout: ELICITATION_TIMEOUT_MS },
+  );
+  assertNotAborted(signal);
+  if (response.action !== "accept" || !isObject(response.content) || response.content.acceptedDigest !== request.digest) return false;
+  return {
+    acceptedDigest: request.digest,
+    ...(typeof response.content.actor === "string" ? { actor: boundedString(response.content.actor, 1_024) } : {}),
+    ...(typeof response.content.reason === "string" ? { reason: boundedString(response.content.reason, 1_024) } : {}),
+  };
+}
+
+async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
+  const input = intakeInput(args.input);
+  if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
+  const frontier = decisionFrontier(input);
+  if (!frontier.plan) return toolSuccess({ ok: true, interview: frontier }, JSON.stringify(frontier));
+  if (!supportsFormElicitation()) {
+    return toolSuccess(
+      { ok: false, interview: frontier, confirmationRequired: true, error: { code: "confirmation_required", message: "MCP form elicitation is required before issuing a lease" } },
+      "Sniff intake requires MCP form elicitation; no lease was issued.",
+    );
+  }
+  const resultPromise = runSniffIntakeTool(
+    { input: { ...input, interactive: true } },
+    { confirmInteractive: (request) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request."), },
+  );
+  const result = await raceWithAbort(resultPromise, signal).catch((error) => {
+    void resultPromise.then((late) => {
+      if (late.lease) {
+        try {
+          cancelRunLease(late.lease.capability, late.lease.manifestId);
+        } catch {
+          // The request was already cancelled or expired.
+        }
+      }
+    });
+    throw error;
+  });
+  assertNotAborted(signal);
+  if (result.lease) activeLeases.add(leaseKey(result.lease.capability, result.lease.manifestId));
+  return toolSuccess({ ok: true, ...result }, JSON.stringify(result));
+}
+
+async function install(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
+  const mode = args.mode as SniffInstallMode | undefined;
+  if (mode !== undefined && !["probe", "diagnose", "list", "install"].includes(mode)) throw new SniffMcpError("invalid_input", "Install mode is invalid");
+  const bundles = args.bundles;
+  if (bundles !== undefined && (!Array.isArray(bundles) || bundles.some((bundle) => typeof bundle !== "string"))) throw new SniffMcpError("invalid_input", "Install bundles are invalid");
+  inspectInput(args);
+  const selectedMode = mode ?? "probe";
+  if (selectedMode === "install" && args.path !== undefined) throw new SniffMcpError("invalid_input", "Install mode does not accept a caller-controlled cwd");
+  const options = {
+    ...(mode ? { mode } : {}),
+    ...(bundles ? { bundles: bundles as string[] } : {}),
+    ...(typeof args.all === "boolean" ? { all: args.all } : {}),
+    ...(typeof args.dryRun === "boolean" ? { dryRun: args.dryRun } : {}),
+    ...(typeof args.noMise === "boolean" ? { noMise: args.noMise } : {}),
+    cwd: selectedMode === "install" ? process.cwd() : typeof args.path === "string" ? args.path : process.cwd(),
+    signal,
+  };
+  if (selectedMode === "install") {
+    if (!supportsFormElicitation()) return toolError("sniff_install_tools", new SniffMcpError("confirmation_required", "MCP form elicitation is required before installation"));
+    const plan = await runSniffInstall({ ...options, mode: "diagnose", signal });
+    assertNotAborted(signal);
+    if (plan.tools.length === 0) {
+      return toolSuccess(
+        { ok: false, report: plan.report, tools: plan.tools, error: { code: "invalid_input", message: "No tools matched the requested install bundles" } },
+        plan.report,
+      );
+    }
+    const planTools = plan.tools.map((tool) => ({ bundle: tool.bundle, tool: tool.tool, bin: tool.bin, status: tool.status, resolvedPath: tool.resolvedPath, routes: tool.attempts.map((attempt) => ({ argv: attempt.argv, exitCode: attempt.exitCode, timeoutMs: attempt.timeoutMs })) }));
+    const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
+    const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, noMise: options.noMise ?? false, cwd: tmpdir(), tools: planTools };
+    const request = { ...authorization, digest: digest(authorization) };
+    const accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ");
+    if (!accepted) throw new SniffMcpError("confirmation_required", "Sniff installation authorization was denied");
+    assertNotAborted(signal);
+    const installed = await runSniffInstall({ ...options, mode: "install", signal });
+    return toolSuccess({ ok: installed.ok, report: installed.report, tools: installed.tools }, installed.report);
+  }
+  const result = await runSniffInstall(options);
+  return toolSuccess({ ok: result.ok, report: result.report, tools: result.tools }, result.report);
+}
+
+async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const capability = requiredString(args.capability, "capability");
   const manifestId = requiredString(args.manifestId, "manifestId");
-  if (args.mode !== undefined && args.mode !== "render" && args.mode !== "save") throw new SniffMcpError("invalid_input", "mode is invalid");
-  const mode = args.mode as SniffReportMode | undefined;
+  const analyzerName = requiredString(args.analyzer, "analyzer");
+  const result = await runSniffAnalyzer({ capability, manifestId, analyzer: analyzerName, signal });
+  const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}` : result.report;
+  return toolSuccess({ ok: result.ok, report: result.report, preflight: result.preflight, ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}), outcome: result.outcome, ...(result.execution ? { execution: result.execution } : {}) }, text);
+}
+
+async function report(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
+  const capability = requiredString(args.capability, "capability");
+  const manifestId = requiredString(args.manifestId, "manifestId");
+  let delegatedToCore = false;
   try {
-    if (!isObject(args.report)) throw new SniffMcpError("invalid_input", "report must be an object");
-    const result = runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}) });
+    if (args.mode !== undefined && args.mode !== "render" && args.mode !== "save") throw new SniffMcpError("invalid_input", "Report mode is invalid");
+    if (!isObject(args.report)) throw new SniffMcpError("invalid_input", "Report must be an object");
+    inspectInput(args.report);
+    const mode = args.mode as SniffReportMode | undefined;
+    const runtime = mode === "save" ? { authorizeSave: async (request: SaveAuthorizationRequest) => elicitDigest(request, signal, "Authorize saving this exact canonical Sniff report (directory, manifest, artifacts, and digest).") } : undefined;
+    delegatedToCore = true;
+    const result = await runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
+    assertNotAborted(signal);
     return toolSuccess({ ok: true, artifacts: result.artifacts, savedPaths: result.savedPaths }, result.artifacts.markdown);
   } finally {
-    activeLeases.delete(activeLeaseKey(capability, manifestId));
-  }
-}
-
-async function callTool(name: string, args: JsonObject): Promise<ToolResult> {
-  try {
-    switch (name) {
-      case "sniff_intake":
-        return await handleIntake(args);
-      case "sniff_cancel":
-        return handleCancel(args);
-      case "sniff_install_tools":
-        return handleInstall(args);
-      case "sniff_run_analyzer":
-        return handleAnalyzer(args);
-      case "sniff_report":
-        return handleReport(args);
-      default:
-        throw new SniffMcpError("unknown_tool", `Unknown tool ${name}`);
-    }
-  } catch (error) {
-    return toolError(name, error);
-  }
-}
-
-function rpcError(id: JsonRpcId | null, code: number, message: string, data?: JsonObject): void {
-  send({ jsonrpc: "2.0", id, error: { code, message, ...(data ? { data } : {}) } });
-}
-
-function responseId(value: unknown): JsonRpcId | null {
-  return typeof value === "string" || (typeof value === "number" && Number.isFinite(value)) ? value : null;
-}
-
-async function handleMessage(value: unknown): Promise<void> {
-  if (!isObject(value) || value.jsonrpc !== "2.0") {
-    rpcError(null, -32600, "Invalid JSON-RPC request");
-    return;
-  }
-  const id = responseId(value.id);
-  if (typeof value.method !== "string") {
-    if (id !== null) {
-      const pending = pendingClientRequests.get(id);
-      if (pending) {
-        pendingClientRequests.delete(id);
-        clearTimeout(pending.timer);
-        if (isObject(value.error)) pending.reject(new SniffMcpError("elicitation_rejected", typeof value.error.message === "string" ? value.error.message : "MCP client rejected request"));
-        else pending.resolve(value.result);
+    // Core finalizes after every delegated report attempt. This fallback is
+    // only for validation failures before entering the core use case.
+    if (!delegatedToCore) {
+      try {
+        finalizeRunLease(capability, manifestId);
+      } catch {
+        // Expiry, cancellation, or an already-finalized lease is terminal.
       }
     }
-    return;
+    activeLeases.delete(leaseKey(capability, manifestId));
   }
-  const method = value.method;
-  if (method === "notifications/initialized" || method === "notifications/cancelled") return;
-  if (method === "initialize") {
-    const params = asObject(value.params ?? {}, "initialize params must be an object");
-    clientCapabilities = isObject(params.capabilities) ? params.capabilities : {};
-    if (id === null) return;
-    send({
-      jsonrpc: "2.0",
-      id,
-      result: {
-        protocolVersion: typeof params.protocolVersion === "string" ? params.protocolVersion : "2025-06-18",
-        capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "sniff", version: SERVER_VERSION },
-      },
-    });
-    return;
-  }
-  if (method === "ping") {
-    if (id !== null) send({ jsonrpc: "2.0", id, result: {} });
-    return;
-  }
-  if (method === "tools/list") {
-    if (id !== null) send({ jsonrpc: "2.0", id, result: { tools } });
-    return;
-  }
-  if (method === "tools/call") {
-    if (id === null) return;
-    try {
-      const params = asObject(value.params ?? {}, "tools/call params must be an object");
-      const name = requiredString(params.name, "name");
-      const args = asObject(params.arguments ?? {}, "tools/call arguments must be an object");
-      send({ jsonrpc: "2.0", id, result: await callTool(name, args) });
-    } catch (error) {
-      const details = errorDetails(error);
-      rpcError(id, -32602, details.message, { code: details.code });
-    }
-    return;
-  }
-  if (method === "shutdown") {
-    if (id !== null) send({ jsonrpc: "2.0", id, result: null });
-    return;
-  }
-  if (id !== null) rpcError(id, -32601, `Method not found: ${method}`);
 }
 
-function releaseLeases(reason: string): void {
+async function callTool(name: string, args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
+  inspectInput(args);
+  switch (name) {
+    case "sniff_intake": return intake(args, signal);
+    case "sniff_cancel": {
+      const capability = requiredString(args.capability, "capability");
+      const manifestId = requiredString(args.manifestId, "manifestId");
+      cancelRunLease(capability, manifestId);
+      activeLeases.delete(leaseKey(capability, manifestId));
+      return toolSuccess({ ok: true, capability, manifestId, released: true }, "Sniff run cancelled and materialization released.");
+    }
+    case "sniff_install_tools": return install(args, signal);
+    case "sniff_run_analyzer": return analyzer(args, signal);
+    case "sniff_report": return report(args, signal);
+    default: throw new SniffMcpError("unknown_tool", "Unknown Sniff tool");
+  }
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const release = await semaphore.acquire(extra.signal);
+  try {
+    const args = isObject(request.params.arguments) ? request.params.arguments : {};
+    try {
+      return await callTool(request.params.name, args, extra.signal);
+    } catch (error) {
+      return toolError(request.params.name, error);
+    }
+  } finally {
+    release();
+  }
+});
+
+function cleanup(reason: string): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
   try {
     releaseAllRunLeases(reason);
   } finally {
@@ -530,52 +645,37 @@ function releaseLeases(reason: string): void {
   }
 }
 
-function terminate(reason: string): void {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  for (const pending of pendingClientRequests.values()) {
-    clearTimeout(pending.timer);
-    pending.reject(new SniffMcpError("server_shutting_down", "MCP server is shutting down"));
-  }
-  pendingClientRequests.clear();
-  releaseLeases(reason);
-  process.stdin.pause();
-  process.exit(0);
-}
-
-process.once("SIGINT", () => terminate("SIGINT"));
-process.once("SIGTERM", () => terminate("SIGTERM"));
-process.once("exit", () => releaseLeases("process-exit"));
-
 export async function serve(): Promise<void> {
-  const readline = createInterface({ input: process.stdin, crlfDelay: Infinity });
-  let resolveClosed: (() => void) | undefined;
-  const closed = new Promise<void>((resolve) => {
-    resolveClosed = resolve;
+  const transport = new BoundedStdioTransport();
+  let closedResolve: (() => void) | undefined;
+  const closed = new Promise<void>((resolve) => { closedResolve = resolve; });
+  transport.onclose = () => {
+    cleanup("stdin-closed");
+    closedResolve?.();
+  };
+  transport.onerror = () => {
+    cleanup("stdio-error");
+  };
+  server.onclose = () => {
+    cleanup("server-closed");
+  };
+  process.once("SIGINT", () => {
+    cleanup("SIGINT");
+    void transport.close();
   });
-  readline.on("line", (line) => {
-    let value: unknown;
-    try {
-      value = JSON.parse(line);
-    } catch {
-      rpcError(null, -32700, "Parse error");
-      return;
-    }
-    void handleMessage(value);
+  process.once("SIGTERM", () => {
+    cleanup("SIGTERM");
+    void transport.close();
   });
-  readline.on("close", () => {
-    if (!shuttingDown) {
-      shuttingDown = true;
-      for (const pending of pendingClientRequests.values()) {
-        clearTimeout(pending.timer);
-        pending.reject(new SniffMcpError("stdin_closed", "MCP client closed stdin"));
-      }
-      pendingClientRequests.clear();
-      releaseLeases("stdin-closed");
-    }
-    resolveClosed?.();
-  });
+  process.once("exit", () => cleanup("process-exit"));
+  await server.connect(transport);
   await closed;
 }
 
-if (import.meta.main) void serve();
+if (import.meta.main) {
+  void serve().catch((error: unknown) => {
+    cleanup("serve-error");
+    console.error(error instanceof Error ? error.message : "MCP server failed");
+    process.exitCode = 1;
+  });
+}

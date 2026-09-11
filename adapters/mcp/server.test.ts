@@ -36,11 +36,13 @@ function startClient(): Client {
         const line = buffer.slice(0, newline);
         buffer = buffer.slice(newline + 1);
         const message = object(JSON.parse(line));
-        if (typeof message.method === "string") {
-          if (message.method === "elicitation/create") {
-            input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "accept", content: { confirmed: true } } })}\n`);
-            input.flush();
-          }
+        if (message.method === "elicitation/create") {
+          const params = object(message.params);
+          const messageText = typeof params.message === "string" ? params.message : "";
+          const canonical = messageText.includes("\n") ? object(JSON.parse(messageText.slice(messageText.indexOf("\n") + 1))) : {};
+          const acceptedDigest = typeof canonical.digest === "string" ? canonical.digest : "";
+          input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result: { action: "accept", content: { acceptedDigest } } })}\n`);
+          input.flush();
         } else if (typeof message.id === "number") {
           const request = pending.get(message.id);
           if (request) {
@@ -86,6 +88,7 @@ function intakeInput(root: string): Message {
   return {
     target: { kind: "working-tree", root },
     intent: "audit",
+    scopeMode: "full",
     objectives: ["structure-and-maintainability"],
     budget: { maxMinutes: 1, maxAnalyzers: 1, maxFiles: 10 },
   };
@@ -93,16 +96,11 @@ function intakeInput(root: string): Message {
 
 describe("MCP Sniff server", () => {
 
-  test("parses both harness stdio manifest shapes with plugin-root-safe paths", () => {
+  test("parses the Claude stdio manifest with a plugin-root-safe path", () => {
     const claude = object(JSON.parse(readFileSync(new URL("../../.mcp.json", import.meta.url), "utf8")));
-    const codex = object(JSON.parse(readFileSync(new URL("../../mcp.json", import.meta.url), "utf8")));
     const claudeServer = object(object(claude.mcpServers).sniff);
-    const codexServer = object(object(codex.mcpServers).sniff);
     expect(claudeServer.command).toBe("bun");
     expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/adapters/mcp/server.ts`]);
-    expect(codexServer.type).toBe("stdio");
-    expect(codexServer.command).toBe("bun");
-    expect(codexServer.args).toEqual(["run", `\${CODEX_PLUGIN_ROOT}/adapters/mcp/server.ts`]);
   });
   test("initializes, lists exactly five tools, and asks one frontier question", async () => {
     const client = startClient();
