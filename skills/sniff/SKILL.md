@@ -41,9 +41,11 @@ LOAD `skill://sniff/references/workflow.md` before starting. Run in order:
    step-by-step detail is needed.
 6. **Adversarial pass.** Stress-test with `refactor-challenger`. Build its Brief from
    `skill://sniff/references/adversarial-brief.md`. Drop or downgrade findings it refutes.
-7. **Report & (optional) apply.** Emit the prioritized plan via `skill://sniff/references/report-template.md`.
-   If the user explicitly approves, apply **low-risk/mechanical** refactors only, then
-   re-run step 3 checks to verify.
+7. **Report & (optional) apply.** Build canonical post-challenge JSON against
+   `skill://sniff/references/report-input.schema.json`, then call `sniff_report` in `render` mode.
+   Present its Markdown and validation receipt. Save only when the user explicitly requests it,
+   using `sniff_report` in `save` mode with the approved directory. Apply only explicitly approved
+   low-risk/mechanical refactors, then re-run step 3 checks.
 
 ## Rules
 
@@ -56,6 +58,7 @@ MUST Resolve shipped assets through `skill://sniff/`; pass absolute paths to too
 MUST Run every selected analyzer only through `sniff_run_analyzer`; never invoke it through Bash, Eval, Hub, or a hand-built command.
 MUST Pass selected hosted packages and the exact documented analyzer completion exits to `sniff_run_analyzer`.
 MUST Prefix each Bash command during a sniff run with `OMP_SNIFF_ACTIVE=1`; this command-local marker activates the direct-analyzer advisory and grants no analyzer execution authority.
+MUST Keep evidence tier and impact independent, preserve challenged findings and coverage data, render ephemerally, and save only with explicit intent and path.
 DEFAULT Load only references needed by the detected stack.
 
 Modes: **quick** skips the full sweep/challenge; **full** runs all steps;
@@ -75,6 +78,7 @@ Modes: **quick** skips the full sweep/challenge; **full** runs all steps;
 | `references/refactoring-catalog.md` | Mapping |
 | `references/adversarial-brief.md` | Challenge |
 | `references/report-template.md` | Report |
+| `references/report-input.schema.json`, `references/report.schema.json` | Strict input and output contracts |
 
 ## Agents
 
