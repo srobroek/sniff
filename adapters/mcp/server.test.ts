@@ -26,7 +26,9 @@ function object(value: unknown): Message {
   return value as Message;
 }
 
-function startClient(action: "accept" | "decline" = "accept", env: Record<string, string> = {}, sequence: readonly ("accept" | "decline")[] = []): Client {
+type ElicitationAction = "accept" | "decline" | "method-not-found";
+
+function startClient(action: ElicitationAction = "accept", env: Record<string, string> = {}, sequence: readonly ElicitationAction[] = []): Client {
   const child = Bun.spawn([process.execPath, "run", serverPath], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
   const input = child.stdin;
   if (!input) throw new Error("MCP process stdin was not piped");
@@ -55,8 +57,12 @@ function startClient(action: "accept" | "decline" = "accept", env: Record<string
             const canonical = messageText.includes("\n") ? object(JSON.parse(messageText.slice(messageText.indexOf("\n") + 1))) : {};
             const acceptedDigest = typeof canonical.digest === "string" ? canonical.digest : "";
             const responseAction = sequence[elicitationParams.length - 1] ?? action;
-            const result = responseAction === "accept" ? { action: "accept", content: { acceptedDigest } } : { action: "decline" };
-            input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);
+            if (responseAction === "method-not-found") {
+              input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } })}\n`);
+            } else {
+              const result = responseAction === "accept" ? { action: "accept", content: { acceptedDigest } } : { action: "decline" };
+              input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);
+            }
             input.flush();
           } else if (typeof message.id === "number") {
             const request = pending.get(message.id);
@@ -231,14 +237,14 @@ describe("MCP Sniff server", () => {
     expect(claudeServer.command).toBe("bun");
     expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/dist/claude/server.js`]);
   });
-  test("initializes, lists exactly six tools, and asks one frontier question", async () => {
+  test("initializes, lists exactly seven tools, and asks one frontier question", async () => {
     const client = startClient();
     try {
       const initialized = await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "sniff-test", version: "1" } });
       expect(object(initialized.result).serverInfo).toEqual({ name: "sniff", version: "0.1.0" });
       const listed = object((await client.request("tools/list")).result);
       const tools = listed.tools as Message[];
-      expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report", "sniff_read_report_artifact"]);
+      expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report", "sniff_read_report_artifact", "sniff_read_analyzer_artifact"]);
       expect(tools.every((tool) => object(tool.inputSchema).type === "object" && object(tool.outputSchema).type === "object")).toBe(true);
       const call = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: {} } })).result);
       const structured = object(call.structuredContent);
@@ -571,6 +577,28 @@ exit 0
       await denied.close();
       expect(await denied.stderr()).toBe("");
       rmSync(deniedTools.root, { recursive: true, force: true });
+    }
+  });
+  test("classifies a Codex method-not-found elicitation failure without installing", async () => {
+    const toolsFixture = fakeToolchain();
+    const mutationMarker = join(toolsFixture.root, "install-called");
+    const usableTool = "#!/bin/sh\nexit 0\n";
+    for (const bin of ["opengrep", "lizard", "scc", "sg", "tokei"]) executable(join(toolsFixture.bin, bin), usableTool);
+    for (const bin of ["pipx", "brew", "cargo"]) {
+      executable(join(toolsFixture.bin, bin), `#!/bin/sh\nprintf called > ${mutationMarker}\nexit 0\n`);
+    }
+    const client = startClient("method-not-found", toolsFixture.env);
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "codex-headless-install-test", version: "1" } });
+      const result = object((await client.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["core"], dryRun: true } })).result);
+      expect(result.isError).toBe(true);
+      expect(object(result.structuredContent).error).toMatchObject({ code: "confirmation_required" });
+      expect(existsSync(mutationMarker)).toBe(false);
+      expect(client.elicitationParams).toHaveLength(1);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(toolsFixture.root, { recursive: true, force: true });
     }
   });
   // @ts-expect-error Bun runtime supports timeout options despite installed test typings.

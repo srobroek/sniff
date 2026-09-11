@@ -6,13 +6,14 @@ Sniff ships one portable core with three adapters.
 - Claude Code loads the bundled MCP server from its plugin manifest.
 - Codex loads the bundled MCP server from its plugin manifest.
 
-Every adapter exposes exactly six tools:
+Every adapter exposes exactly seven tools:
 
 - `sniff_intake`
 - `sniff_install_tools`
 - `sniff_run_analyzer`
 - `sniff_report`
 - `sniff_read_report_artifact`
+- `sniff_read_analyzer_artifact`
 - `sniff_cancel`
 
 The authored skill in `.skill-source/sniff/` generates native skill trees for each adapter.
@@ -32,7 +33,7 @@ The matrix columns are OMP, CC for Claude Code, and CX for Codex.
 
 ```text
 Capability | OMP | CC | CX
-Core and six tools | NOT-RERUN | NOT-RERUN | NOT-RERUN
+Core and seven tools | NOT-RERUN | NOT-RERUN | NOT-RERUN
 Skill discovery | NATIVE | NATIVE | NATIVE
 Generated skill | VERIFIED | VERIFIED | VERIFIED
 sniff_intake | NATIVE | NATIVE | NATIVE
@@ -40,6 +41,7 @@ sniff_install_tools | NATIVE | NATIVE | NATIVE
 sniff_run_analyzer | FOCUSED | FOCUSED | FOCUSED
 sniff_report render and save | FOCUSED | FOCUSED | FOCUSED
 sniff_read_report_artifact | NOT-RERUN | NOT-RERUN | NOT-RERUN
+sniff_read_analyzer_artifact | FOCUSED | FOCUSED | FOCUSED
 Approval and denial | NATIVE | NATIVE | NATIVE
 Cancellation and cleanup | NATIVE | FOCUSED | FOCUSED
 Expiry and replay rejection | FOCUSED | FOCUSED | FOCUSED

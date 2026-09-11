@@ -1,5 +1,6 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { type AnalyzerArtifactDescriptor, type AnalyzerArtifactReadOptions, type AnalyzerObservationPreview, readAnalyzerArtifact } from "../src/core/analyzer-artifact-registry.ts";
 import type { AnalyzerCapture, AnalyzerObservation } from "../src/core/analyzer-output.ts";
 import {
   runSniffAnalyzer,
@@ -17,7 +18,32 @@ function publicPreflight(value: SniffToolResult | null): SniffToolResult | null 
   return safe;
 }
 
- export default function sniffInstallTool(pi: ExtensionAPI): void {
+function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
+  const z = pi.zod;
+  pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
+    name: "sniff_read_analyzer_artifact",
+    label: "Read Sniff analyzer artifact",
+    description: "Read one UTF-8-safe page from complete analyzer observations using an opaque capability. Provide relativePath or sourcePath.",
+    parameters: z.object({
+      capability: z.string().describe("Opaque analyzer artifact read capability returned by sniff_run_analyzer"),
+      analyzerResultId: z.string().describe("Analyzer result ID returned by sniff_run_analyzer"),
+      relativePath: z.string().optional().describe("Artifact relative path from the analyzer result index"),
+      sourcePath: z.string().optional().describe("Normalized source path for direct lookup"),
+      offset: z.number().int().nonnegative().optional().describe("UTF-8 byte offset returned as nextOffset; defaults to zero"),
+    }) as unknown as TSchema,
+    execute: async (_id, params: AnalyzerArtifactReadOptions) => {
+      try {
+        const result = readAnalyzerArtifact(params);
+        return { content: [{ type: "text", text: result.content }], details: { ok: true, analyzerResultId: result.analyzerResultId, relativePath: result.relativePath, sourcePath: result.sourcePath, offset: result.offset, nextOffset: result.nextOffset, eof: result.eof, bytes: result.bytes, totalBytes: result.totalBytes, sha256: result.sha256 } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `sniff_read_analyzer_artifact failed: ${message}` }], details: { ok: false, error: message }, isError: true };
+      }
+    },
+  });
+}
+
+export default function sniffInstallTool(pi: ExtensionAPI): void {
   const z = pi.zod;
   pi.registerTool({
     name: "sniff_install_tools",
@@ -42,7 +68,7 @@ function publicPreflight(value: SniffToolResult | null): SniffToolResult | null 
     },
   });
 
-  pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string; readonly preflight: SniffToolResult | null; readonly acceptedExitCodes?: number[]; readonly outcome?: SniffAnalyzerOutcome; readonly observations?: readonly AnalyzerObservation[]; readonly capture?: AnalyzerCapture }>({
+  pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string; readonly preflight: SniffToolResult | null; readonly acceptedExitCodes?: number[]; readonly outcome?: SniffAnalyzerOutcome; readonly analyzerResultId?: string; readonly readCapability?: string; readonly descriptors?: readonly AnalyzerArtifactDescriptor[]; readonly descriptorCount?: number; readonly descriptorsTruncated?: boolean; readonly observationPreview?: AnalyzerObservationPreview; readonly observations?: readonly AnalyzerObservation[]; readonly capture?: AnalyzerCapture }>({
     name: "sniff_run_analyzer",
     label: "Sniff run analyzer",
     description: "Run one analyzer selected by a live sniff_intake capability. The host revalidates the materialized target and enforces the catalogued fixed recipe immediately before execution.",
@@ -55,11 +81,12 @@ function publicPreflight(value: SniffToolResult | null): SniffToolResult | null 
       try {
         const result = await runSniffAnalyzer({ ...params, signal });
         const text = result.report;
-        return { content: [{ type: "text", text }], details: { ok: result.ok, preflight: publicPreflight(result.preflight), acceptedExitCodes: result.acceptedExitCodes, outcome: result.outcome, observations: result.observations, capture: result.capture }, isError: !result.ok };
+        return { content: [{ type: "text", text }], details: { ok: result.ok, preflight: publicPreflight(result.preflight), acceptedExitCodes: result.acceptedExitCodes, outcome: result.outcome, analyzerResultId: result.analyzerResultId, readCapability: result.readCapability, descriptors: result.descriptors, descriptorCount: result.descriptorCount, descriptorsTruncated: result.descriptorsTruncated, observationPreview: result.observationPreview, observations: result.observations, capture: result.capture }, isError: !result.ok };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: `sniff_run_analyzer failed: ${message}` }], details: { ok: false, error: message, preflight: null }, isError: true };
       }
     },
   });
+  registerAnalyzerArtifactReader(pi);
 }

@@ -43,3 +43,4 @@ export * from "./report-schema.ts";
 export * from "./intake-use-case.ts";
 export * from "./report-use-case.ts";
 export * from "./report-artifact-registry.ts";
+export * from "./analyzer-artifact-registry.ts";

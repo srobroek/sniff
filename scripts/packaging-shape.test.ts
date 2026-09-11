@@ -78,6 +78,7 @@ const EXPECTED_TOOLS = [
 	"sniff_run_analyzer",
 	"sniff_report",
 	"sniff_read_report_artifact",
+	"sniff_read_analyzer_artifact",
 ] as const;
 
 function pluginEntry(catalog: JsonObject): JsonObject {
@@ -530,7 +531,7 @@ test("Harness bundles are one byte-identical portable payload", () => {
 	expect(text).not.toContain(repoRoot);
 });
 
-test("Copied Claude and nested Codex caches serve exactly five MCP tools", async () => {
+test("Copied Claude and nested Codex caches serve exactly seven MCP tools", async () => {
 	const cache = mkdtempSync(join(tmpdir(), "sniff-packaging-cache-"));
 	try {
 		const claudeRoot = join(cache, "claude");

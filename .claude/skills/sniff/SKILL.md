@@ -29,7 +29,7 @@ Read `./references/workflow.md` first. Follow these steps in order:
    - For trusted local work, read each governing configuration file.
    - For remote work, do not load executable configuration or install dependencies.
 4. Run detection.
-   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`.
+   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`. If its preview is truncated, page `sniff_read_analyzer_artifact` by `sourcePath` or through `index.json`.
    - Record unavailable analyzers as coverage gaps.
    - For large targets, propose an independent read-only scout plan by language and subtree.
    - Build each brief from `./references/scout-brief.md`.

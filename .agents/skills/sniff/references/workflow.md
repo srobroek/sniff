@@ -168,6 +168,8 @@
 - Include the exact issued run manifest under `extensions["sniff.intake"]` only when convenient; `sniff_report` authenticates the capability and manifest ID, injects the host-stored manifest when omitted, and rejects any supplied mismatch.
 - Pass the capability and manifest ID to `sniff_report`.
 - Use the returned opaque read capability, report ID, and descriptor `relativePath` with `sniff_read_report_artifact` to retrieve complete artifacts. Pass `nextOffset` for subsequent UTF-8-safe pages, each at most 64 KiB, until `eof`.
+- Treat `sniff_run_analyzer` observations as a bounded preview. When `observationPreview.truncated` is true, use its `readCapability` and `analyzerResultId` with `sniff_read_analyzer_artifact`.
+- Read `index.json` first, then page a descriptor `relativePath` through `nextOffset` until `eof`; use `sourcePath` for direct complete observations for one normalized source file.
 - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
 - Do not add root, paths, materialization, immutable ref, or head ref fields.
 - Let the tool validate the manifest and release the lease.

@@ -22,6 +22,7 @@ import {
 	TOOLS,
 	type ToolRec,
 } from "./catalog.ts";
+import { createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts, type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview } from "./analyzer-artifact-registry.ts";
 import { parseAnalyzerOutput, type AnalyzerCapture, type AnalyzerObservation } from "./analyzer-output.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable, type OpenGrepProvisionResult } from "./opengrep.ts";
 const PROBE_TIMEOUT_MS = 1_500;
@@ -554,8 +555,15 @@ export type SniffAnalyzerRunResult = {
 	preflight: SniffToolResult | null;
 	acceptedExitCodes?: number[];
 	outcome: SniffAnalyzerOutcome;
-	observations?: readonly AnalyzerObservation[];
-	capture?: AnalyzerCapture;
+  /** Transport-bounded deterministic preview of complete observations. */
+  observations?: readonly AnalyzerObservation[];
+  observationPreview?: AnalyzerObservationPreview;
+  analyzerResultId?: string;
+  readCapability?: string;
+  descriptors?: readonly AnalyzerArtifactDescriptor[];
+  descriptorCount?: number;
+  descriptorsTruncated?: boolean;
+  capture?: AnalyzerCapture;
 };
 
 function findTool(tool: string): { bundle: BundleName; rec: ToolRec } | null {
@@ -658,27 +666,35 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	const completed = !completionError && !execution.timedOut && !execution.error && execution.exitCode !== null;
 	const incomplete = parsed?.capture.incomplete ?? false;
 	const accepted = completed && !incomplete && acceptedExitCodes.includes(execution.exitCode as number);
-	const outcome: SniffAnalyzerOutcome = !completed
-		? "not-run"
-		: incomplete
-			? "incomplete-output"
-			: accepted
-				? execution.exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
-				: "rejected-exit";
-	return {
-		ok: accepted,
-		report: !completed
-			? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`
-			: incomplete
-				? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
-				: accepted
-					? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
-					: `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
-		preflight,
-		acceptedExitCodes,
-		outcome,
-...(parsed ? { observations: parsed.observations, capture: parsed.capture } : {}),
-	};
+  const outcome: SniffAnalyzerOutcome = !completed
+    ? "not-run"
+    : incomplete
+      ? "incomplete-output"
+      : accepted
+        ? execution.exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
+        : "rejected-exit";
+  const artifacts = accepted && parsed ? createAnalyzerArtifacts(authorization.recipe.id, parsed.observations) : undefined;
+  const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
+    const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
+  const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
+  return {
+    ok: accepted,
+    report: !completed
+      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`
+      : incomplete
+        ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
+        : accepted
+          ? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
+          : `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
+    preflight,
+    acceptedExitCodes,
+    outcome,
+    ...(descriptorProjection ? { descriptors: descriptorProjection.descriptors, descriptorCount: descriptorProjection.descriptorCount, descriptorsTruncated: descriptorProjection.descriptorsTruncated } : {}),
+    ...(projection ? { observations: projection.observations, observationPreview: projection.preview } : {}),
+    ...(artifacts ? { analyzerResultId: artifacts.analyzerResultId } : {}),
+    ...(readCapability ? { readCapability } : {}),
+    ...(parsed ? { capture: parsed.capture } : {}),
+  };
 }
 export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffInstallResult> {
 	if (opts.signal?.aborted) return { ok: false, report: "operation aborted", tools: [] };

@@ -7,7 +7,7 @@ export const OPENGREP_VERSION = "v1.30.0";
 export const OPENGREP_DOWNLOAD_TIMEOUT_MS = 120_000;
 export const OPENGREP_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 export const OPENGREP_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
-export const OPENGREP_MAX_OBSERVATIONS = 2_000;
+export const OPENGREP_MAX_OBSERVATIONS = 50_000;
 const OPENGREP_MAX_FIELD_BYTES = 8_192;
 
 export type OpenGrepAsset = { readonly key: string; readonly name: string; readonly sha256: string };
@@ -176,8 +176,11 @@ export function parseOpenGrepOutput(stdout: string, targetRoot: string, truncate
 	try {
 		const payload = JSON.parse(stdout) as { results?: unknown };
 		if (!Array.isArray(payload.results)) throw new Error("OpenGrep JSON has no results array");
+		if (payload.results.length > OPENGREP_MAX_OBSERVATIONS) {
+			return { observations: [], capture: { bytes, truncated: false, digest, incomplete: true, reason: `OpenGrep observations exceeded the bounded limit of ${OPENGREP_MAX_OBSERVATIONS.toLocaleString("en-US")}` } };
+		}
 		const observations: OpenGrepObservation[] = [];
-		const reasons: string[] = payload.results.length > OPENGREP_MAX_OBSERVATIONS ? [`OpenGrep observations exceeded the bounded limit of ${OPENGREP_MAX_OBSERVATIONS.toLocaleString("en-US")}`] : [];
+		const reasons: string[] = [];
 		for (const candidate of payload.results) {
 			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
 				addParseReason(reasons, "OpenGrep result entry was malformed");

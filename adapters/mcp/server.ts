@@ -14,6 +14,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types";
 import reportInputSchema from "../../skills/sniff/references/report-input.schema.json" with { type: "json" };
+import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.ts";
 import {
   cancelRunLease,
   decisionFrontier,
@@ -359,9 +360,10 @@ const outputSchemas = {
   intake: resultSchema({ interview: { type: "object" }, confirmation: { type: "object" }, confirmationRequired: { type: "boolean" }, lease: { type: "object" }, reportTarget: { type: "object" } }),
   cancel: resultSchema({ capability: stringSchema, manifestId: stringSchema, released: { type: "boolean" } }),
   install: resultSchema({ report: stringSchema, tools: { type: "array", items: { type: "object" } } }),
-  analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, acceptedExitCodes: { type: "array", items: { type: "integer" } }, observations: analyzerObservationSchema, capture: analyzerCaptureSchema }),
+  analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, acceptedExitCodes: { type: "array", items: { type: "integer" } }, analyzerResultId: stringSchema, readCapability: stringSchema, descriptors: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer", minimum: 0 }, descriptorsTruncated: { type: "boolean" }, observations: analyzerObservationSchema, observationPreview: { type: "object", required: ["total", "returned", "truncated"], properties: { total: { type: "integer", minimum: 0 }, returned: { type: "integer", minimum: 0 }, truncated: { type: "boolean" } }, additionalProperties: false }, capture: analyzerCaptureSchema }),
   report: resultSchema({ reportId: stringSchema, readCapability: stringSchema, summary: stringSchema, artifacts: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer" }, descriptorsTruncated: { type: "boolean" }, receipt: { type: "object" }, savedPaths: { type: "array", items: stringSchema } }),
   reportArtifact: resultSchema({ reportId: stringSchema, relativePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
+  analyzerArtifact: resultSchema({ analyzerResultId: stringSchema, relativePath: stringSchema, sourcePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
 } as const;
 
 const tools = [
@@ -439,6 +441,20 @@ const tools = [
       additionalProperties: false,
     },
     outputSchema: outputSchemas.reportArtifact,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "sniff_read_analyzer_artifact",
+    title: "Read Sniff analyzer artifact",
+    description: "Read one bounded UTF-8 page from complete analyzer observations using an opaque capability; provide relativePath or sourcePath.",
+    inputSchema: {
+      type: "object",
+      oneOf: [
+        { properties: { capability: stringSchema, analyzerResultId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } }, required: ["capability", "analyzerResultId", "relativePath"], additionalProperties: false },
+        { properties: { capability: stringSchema, analyzerResultId: stringSchema, sourcePath: stringSchema, offset: { type: "integer", minimum: 0 } }, required: ["capability", "analyzerResultId", "sourcePath"], additionalProperties: false },
+      ],
+    },
+    outputSchema: outputSchemas.analyzerArtifact,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ] as const;
@@ -804,7 +820,10 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
     const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
     const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, noMise: options.noMise ?? false, cwd: tmpdir(), tools: planTools };
     const request = { ...authorization, digest: digest(authorization) };
-    const accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ");
+    const accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ").catch((error) => {
+      if (isElicitationFailure(error)) throw confirmationRequiredError();
+      throw error;
+    });
     if (!accepted) throw new SniffMcpError("confirmation_required", "Sniff installation authorization was denied");
     assertNotAborted(signal);
     const installed = await runSniffInstall({ ...options, mode: "install", signal });
@@ -829,7 +848,13 @@ async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResp
     preflight: publicAnalyzerPreflight(result.preflight),
     ...(result.acceptedExitCodes ? { acceptedExitCodes: result.acceptedExitCodes } : {}),
     outcome: result.outcome,
+    ...(result.analyzerResultId ? { analyzerResultId: result.analyzerResultId } : {}),
+    ...(result.readCapability ? { readCapability: result.readCapability } : {}),
+    ...(result.descriptors ? { descriptors: result.descriptors } : {}),
+    ...(result.descriptorCount !== undefined ? { descriptorCount: result.descriptorCount } : {}),
+    ...(result.descriptorsTruncated !== undefined ? { descriptorsTruncated: result.descriptorsTruncated } : {}),
     ...(result.observations ? { observations: result.observations } : {}),
+    ...(result.observationPreview ? { observationPreview: result.observationPreview } : {}),
     ...(capture ? { capture } : {}),
     ...(error ? { error } : {}),
   };
@@ -867,8 +892,18 @@ function reportArtifact(args: JsonObject): ToolResponse {
   const reportId = requiredString(args.reportId, "reportId");
   const relativePath = requiredString(args.relativePath, "relativePath");
   const offset = args.offset;
-  if (offset !== undefined && (!Number.isSafeInteger(offset) || Number(offset) < 0)) throw new SniffMcpError("invalid_input", "Report artifact offset must be a non-negative integer");
   const result = readReportArtifact({ capability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
+}
+function analyzerArtifact(args: JsonObject): ToolResponse {
+  const capability = requiredString(args.capability, "capability");
+  const analyzerResultId = requiredString(args.analyzerResultId, "analyzerResultId");
+  const relativePath = args.relativePath === undefined ? undefined : requiredString(args.relativePath, "relativePath");
+  const sourcePath = args.sourcePath === undefined ? undefined : requiredString(args.sourcePath, "sourcePath");
+  if ((relativePath === undefined) === (sourcePath === undefined)) throw new SniffMcpError("invalid_input", "Provide exactly one analyzer artifact relativePath or sourcePath");
+  const offset = args.offset;
+  if (offset !== undefined && (!Number.isSafeInteger(offset) || Number(offset) < 0)) throw new SniffMcpError("invalid_input", "Analyzer artifact offset must be a non-negative integer");
+  const result = readAnalyzerArtifact({ capability, analyzerResultId, ...(relativePath === undefined ? { sourcePath } : { relativePath }), ...(offset === undefined ? {} : { offset: Number(offset) }) });
   return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
 }
 
@@ -886,6 +921,7 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
     }
     case "sniff_install_tools": return install(args, signal);
     case "sniff_run_analyzer": return analyzer(args, signal);
+    case "sniff_read_analyzer_artifact": return analyzerArtifact(args);
     case "sniff_report": return report(args, signal);
     case "sniff_read_report_artifact": return reportArtifact(args);
     default: throw new SniffMcpError("unknown_tool", "Unknown Sniff tool");

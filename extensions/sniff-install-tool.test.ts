@@ -14,7 +14,7 @@ import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } fro
 import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
 import { runSniffInstall } from "../src/core/install.ts";
-import { OPENGREP_MAX_OBSERVATIONS, parseOpenGrepOutput } from "../src/core/opengrep.ts";
+import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../src/core/opengrep.ts";
 import sniffInstallTool from "./sniff-install-tool.ts";
 
 const temps: string[] = [];
@@ -73,6 +73,8 @@ function fakeZod(enumCalls: string[][]): { zod: unknown } {
 	chain.object = self;
 	chain.array = self;
 	chain.number = self;
+	chain.int = self;
+	chain.nonnegative = self;
 	chain.boolean = self;
 	chain.enum = (values: string[]) => {
 		enumCalls.push(values);
@@ -128,13 +130,15 @@ describe("OpenGrep parser contract", () => {
 		expect(OPENGREP_FILE_EXTENSIONS).toEqual(expect.arrayContaining([".go", ".sh", ".bash", ".yaml", ".yml", ".json", ".toml", ".conf"]));
 	});
 
-	test("bounds findings and explains the incomplete capture", () => {
-		const root = tempDir("sniff-opengrep-bound-");
-		const results = Array.from({ length: OPENGREP_MAX_OBSERVATIONS + 1 }, (_, index) => ({ check_id: "rule-id", path: `src/file-${index}.go`, start: { line: 1, col: 1 }, extra: { message: "finding", severity: "INFO" } }));
-		const parsed = parseOpenGrepOutput(JSON.stringify({ results }), root);
-		expect(parsed.observations).toHaveLength(OPENGREP_MAX_OBSERVATIONS);
-		expect(parsed.capture.incomplete).toBe(true);
-		expect(parsed.capture.reason).toContain("2,000");
+
+	test("accepts more than 2,000 complete findings below the byte limit", () => {
+		const root = tempDir("sniff-opengrep-large-");
+		const results = Array.from({ length: 2_501 }, (_, index) => ({ check_id: "r", path: `src/${index}`, start: { line: 1, col: 1 }, extra: { message: "m", severity: "I" } }));
+		const stdout = JSON.stringify({ results });
+		expect(Buffer.byteLength(stdout)).toBeLessThan(OPENGREP_MAX_OUTPUT_BYTES);
+		const parsed = parseOpenGrepOutput(stdout, root);
+		expect(parsed.observations).toHaveLength(2_501);
+		expect(parsed.capture.incomplete).toBe(false);
 	});
 
 	test("fails closed on malformed OpenGrep result entries", () => {
