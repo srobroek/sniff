@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "sniff": {
-      "type": "stdio",
-      "command": "bun",
-      "args": ["run", "${CODEX_PLUGIN_ROOT}/adapters/mcp/server.ts"]
-    }
-  }
-}

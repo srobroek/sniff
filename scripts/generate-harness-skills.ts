@@ -24,10 +24,17 @@ type GenerateResult = {
 	changed: boolean;
 };
 
-const SOURCE_DIRECTORY = join("skills", "sniff");
-const TARGET_DIRECTORIES = [
-	join(".claude", "skills", "sniff"),
-	join(".agents", "skills", "sniff"),
+type Target = {
+	directory: string;
+	rewrite: boolean;
+};
+
+const SOURCE_DIRECTORY = join(".skill-source", "sniff");
+const TARGETS: Target[] = [
+	{ directory: join("skills", "sniff"), rewrite: false },
+	{ directory: join(".claude", "skills", "sniff"), rewrite: true },
+	{ directory: join(".agents", "skills", "sniff"), rewrite: true },
+	{ directory: join("dist", "codex", "skills", "sniff"), rewrite: true },
 ];
 const MARKDOWN_EXTENSIONS: Record<string, true> = { ".md": true, ".mdx": true };
 
@@ -62,6 +69,7 @@ function rewriteSkillText(contents: string): string {
 
 function collectFiles(
 	sourceRoot: string,
+	rewrite: boolean,
 	currentDirectory = sourceRoot,
 ): GeneratedFile[] {
 	const entries = readdirSync(currentDirectory, { withFileTypes: true }).sort(
@@ -72,7 +80,9 @@ function collectFiles(
 	for (const entry of entries) {
 		const absolutePath = join(currentDirectory, entry.name);
 		if (entry.isDirectory()) {
-			files.push(...collectFiles(sourceRoot, absolutePath));
+			files.push(
+				...collectFiles(sourceRoot, rewrite, absolutePath),
+			);
 			continue;
 		}
 		if (!entry.isFile()) {
@@ -85,7 +95,7 @@ function collectFiles(
 		const sourceBytes = readFileSync(absolutePath);
 		const extension = absolutePath.slice(absolutePath.lastIndexOf("."));
 		const contents =
-			MARKDOWN_EXTENSIONS[extension] === true
+			rewrite && MARKDOWN_EXTENSIONS[extension] === true
 				? Buffer.from(rewriteSkillText(sourceBytes.toString("utf8")), "utf8")
 				: sourceBytes;
 		files.push({ relativePath, contents });
@@ -166,24 +176,34 @@ export function generateHarnessSkills(
 		throw new Error(`Authored skill directory does not exist: ${sourceRoot}`);
 	}
 
-	const files = collectFiles(sourceRoot);
-	const targets = TARGET_DIRECTORIES.map((directory) =>
-		join(repoRoot, directory),
+	const targets = TARGETS.map((target) => ({
+		directory: join(repoRoot, target.directory),
+		files: collectFiles(sourceRoot, target.rewrite),
+	}));
+	const current = targets.every((target) =>
+		targetIsCurrent(target.directory, target.files),
 	);
-	const current = targets.every((target) => targetIsCurrent(target, files));
 	if (options.check) {
 		if (!current) {
 			throw new Error(
 				"Generated harness skill output is stale; run the generator without --check.",
 			);
 		}
-		return { files: files.length, targets, changed: false };
+		return {
+			files: targets[0]?.files.length ?? 0,
+			targets: targets.map((target) => target.directory),
+			changed: false,
+		};
 	}
 
 	for (const target of targets) {
-		writeTarget(target, files);
+		writeTarget(target.directory, target.files);
 	}
-	return { files: files.length, targets, changed: !current };
+	return {
+		files: targets[0]?.files.length ?? 0,
+		targets: targets.map((target) => target.directory),
+		changed: !current,
+	};
 }
 
 function runFromCli(): void {

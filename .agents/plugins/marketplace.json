@@ -10,7 +10,7 @@
       "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./dist/codex"
       },
       "policy": {
         "installation": "AVAILABLE",
