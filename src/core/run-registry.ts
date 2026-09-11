@@ -243,6 +243,15 @@ export function validateReportManifest(capability: string, manifestId: string, s
   if (serialized !== lease.canonicalManifest) throw new Error("sniff.intake manifest differs from the issued manifest");
   return lease.manifest;
 }
+export function validateReportCoverage(capability: string, manifestId: string, coverage: readonly { readonly tool: string; readonly status: string }[]): void {
+  const record = activeLease(capability, manifestId);
+  for (const entry of coverage) {
+    if (entry.status !== "ran") continue;
+    const selected = record.manifest.analyzers.filter((candidate) => candidate.disposition === "selected" && candidate.tool === entry.tool);
+    if (selected.length === 0) throw new Error(`Report coverage claims an unauthorized analyzer: ${entry.tool}`);
+    if (!selected.some((candidate) => record.reservations.get(candidate.name)?.state === "completed")) throw new Error(`Report coverage claims analyzer ${entry.tool} without a completed reservation`);
+  }
+}
 
 export function releaseRunLease(capability: string, manifestId: string): void {
   releaseRecord(activeLease(capability, manifestId), "released");

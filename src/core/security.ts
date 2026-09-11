@@ -27,6 +27,7 @@ export type SecurityRequest = {
 export type AnalyzerSelectionContext = {
   readonly trust?: TargetTrust;
   readonly target?: ResolvedTarget;
+  readonly scopeMode?: "quick" | "full" | "plan-only";
 };
 
 export class SecurityScopeError extends Error {
@@ -133,32 +134,28 @@ export function selectSecurityAnalyzers(request: SecurityRequest = {}, context: 
   for (const name of lightweight) {
     const absent = unavailable.has(name);
     const incompatible = scopeCompatibility(name, context.target);
+    const scopeBlocked = context.scopeMode === "plan-only" ? "Plan-only mode does not execute analyzers." : context.scopeMode === "quick" && name === "gitleaks:tracked-history" ? "Quick mode omits bounded-history coverage." : undefined;
     dispositions.push({
       name,
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "lightweight-static",
-      disposition: absent ? "unavailable" : incompatible ? "skipped" : "selected",
-      reason: absent ? "Analyzer is unavailable in the target environment." : incompatible ?? "Config-free offline static coverage is enabled.",
+      disposition: absent ? "unavailable" : scopeBlocked || incompatible ? "skipped" : "selected",
+      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ?? incompatible ?? "Config-free offline static coverage is enabled.",
     });
   }
   for (const name of deep) {
     const absent = unavailable.has(name);
     const remoteBlocked = trust === "untrusted-remote" && !SECURITY_ANALYZER_CATALOG[name].remoteSafe;
-    const selected = request.deepStatic === true && !absent && !remoteBlocked;
+    const scopeBlocked = context.scopeMode === "plan-only" ? "Plan-only mode does not execute analyzers." : undefined;
+    const selected = request.deepStatic === true && !absent && !remoteBlocked && !scopeBlocked;
     dispositions.push({
       name,
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "deep-static",
       disposition: absent ? "unavailable" : selected ? "selected" : "skipped",
-      reason: absent
-        ? "Analyzer is unavailable in the target environment."
-        : remoteBlocked
-          ? "Untrusted remote targets require a separate sandboxed code-execution grant."
-          : selected
-            ? "Explicit deep-static opt-in was recorded for a trusted target."
-            : "Deep static analysis requires explicit opt-in.",
+      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ? scopeBlocked : remoteBlocked ? "Untrusted remote targets require a separate sandboxed code-execution grant." : selected ? "Explicit deep-static opt-in was recorded for a trusted target." : "Deep static analysis requires explicit opt-in.",
     });
   }
   return dispositions.sort((left, right) => left.tier.localeCompare(right.tier) || left.name.localeCompare(right.name));

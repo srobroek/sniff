@@ -10,6 +10,10 @@ import {
 } from "./security.ts";
 import { type ResolvedTarget, type TargetRequest, validateRepository } from "./target.ts";
 
+export type ScopeMode = "quick" | "full" | "plan-only";
+export const SCOPE_MODES = ["quick", "full", "plan-only"] as const;
+export const DEFAULT_NONINTERACTIVE_SCOPE_MODE: ScopeMode = "full";
+
 export type IntakeIntent = "audit" | "review-change" | "release-risk" | "history" | "plan-only";
 
 export type IntakeBudget = {
@@ -22,21 +26,29 @@ export type IntakeAuthorization = {
   readonly granted: true;
   readonly actor?: string;
   readonly reason?: string;
+  readonly acceptedDigest?: string;
+};
+
+export type IntakeConfirmation = {
+  readonly confirmed: boolean;
+  readonly actor?: string;
+  readonly acceptedDigest?: string;
 };
 
 export type IntakeInput = {
   readonly target?: TargetRequest;
   readonly intent?: IntakeIntent;
+  readonly scopeMode?: ScopeMode;
   readonly objectives?: readonly string[];
   readonly exclusions?: readonly string[];
   readonly budget?: IntakeBudget;
   readonly security?: SecurityRequest;
   readonly interactive?: boolean;
   readonly authorization?: IntakeAuthorization;
-  readonly confirmation?: { readonly confirmed: boolean; readonly actor?: string };
+  readonly confirmation?: IntakeConfirmation;
 };
 
-export type IntakeQuestionId = "target" | "intent" | "objectives" | "budget";
+export type IntakeQuestionId = "target" | "intent" | "scopeMode" | "objectives" | "budget";
 
 export type IntakeQuestion = {
   readonly id: IntakeQuestionId;
@@ -48,6 +60,7 @@ export type IntakeQuestion = {
 export type IntakePlan = {
   readonly target: TargetRequest;
   readonly intent: IntakeIntent;
+  readonly scopeMode: ScopeMode;
   readonly objectives: readonly ObjectiveGroup[];
   readonly exclusions: readonly string[];
   readonly budget: IntakeBudget;
@@ -79,27 +92,28 @@ export type RunManifest = {
   readonly manifestId: string;
   readonly resolvedTarget: ResolvedTarget;
   readonly intent: IntakeIntent;
+  readonly scopeMode: ScopeMode;
   readonly objectives: readonly ObjectiveGroup[];
   readonly exclusions: readonly string[];
   readonly analyzers: readonly AnalyzerDisposition[];
   readonly budget: IntakeBudget;
   readonly defaults: readonly AppliedDefault[];
   readonly gaps: readonly IntakeGap[];
-  readonly authorization: { readonly required: boolean; readonly granted: boolean; readonly actor?: string; readonly reason?: string };
-  readonly confirmation: { readonly required: boolean; readonly confirmed: boolean; readonly actor?: string };
+  readonly authorization: { readonly required: boolean; readonly granted: boolean; readonly actor?: string; readonly reason?: string; readonly acceptedDigest?: string };
+  readonly confirmation: { readonly required: boolean; readonly confirmed: boolean; readonly actor?: string; readonly acceptedDigest?: string; readonly digest: string };
   readonly route: { readonly mode: "interactive" | "noninteractive"; readonly materialization: ResolvedTarget["materialization"]; readonly trust: TargetTrust; readonly provider?: string };
 };
 
 const QUESTION_ORDER: readonly IntakeQuestion[] = [
   { id: "target", impact: 100, prompt: "What should Sniff inspect?", reason: "A target is required before any other decision is meaningful." },
   { id: "intent", impact: 90, prompt: "What outcome should this Sniff run optimize for?", reason: "Intent changes the route, budget, and analyzer set." },
+  { id: "scopeMode", impact: 85, prompt: "Should Sniff run in quick, full, or plan-only mode?", reason: "Scope mode is an explicit intake decision and controls analyzer coverage." },
   { id: "objectives", impact: 80, prompt: "Which objective groups should be included?", reason: "Objective selection determines which analyzers are relevant." },
   { id: "budget", impact: 60, prompt: "What time or analyzer budget should Sniff use?", reason: "A budget bounds an otherwise open-ended audit." },
 ];
 
-
 function isCompleteInput(input: IntakeInput): boolean {
-  return input.target !== undefined && input.intent !== undefined && (input.objectives?.length ?? 0) > 0 && input.budget !== undefined;
+  return input.target !== undefined && input.intent !== undefined && input.scopeMode !== undefined && (input.objectives?.length ?? 0) > 0 && input.budget !== undefined;
 }
 
 export function decisionFrontier(input: IntakeInput): IntakeInterview {
@@ -110,6 +124,7 @@ export function decisionFrontier(input: IntakeInput): IntakeInterview {
   const question = QUESTION_ORDER.find((candidate) => {
     if (candidate.id === "target") return input.target === undefined;
     if (candidate.id === "intent") return input.intent === undefined;
+    if (candidate.id === "scopeMode") return input.scopeMode === undefined;
     if (candidate.id === "objectives") return (input.objectives?.length ?? 0) === 0;
     return input.budget === undefined;
   });
@@ -119,10 +134,11 @@ export function decisionFrontier(input: IntakeInput): IntakeInterview {
 export const getDecisionFrontier = decisionFrontier;
 
 function buildPlan(input: IntakeInput, objectives: readonly ObjectiveGroup[]): IntakePlan {
-  if (!input.target || !input.intent || !input.budget) throw new Error("Cannot build an intake plan from incomplete input");
+  if (!input.target || !input.intent || !input.scopeMode || !input.budget) throw new Error("Cannot build an intake plan from incomplete input");
   return {
     target: structuredClone(input.target),
     intent: input.intent,
+    scopeMode: input.scopeMode,
     objectives: [...objectives],
     exclusions: canonicalStrings(input.exclusions ?? []),
     budget: { ...input.budget },
@@ -185,6 +201,7 @@ function manifestId(content: Omit<RunManifest, "manifestId">): string {
 export type ManifestInput = {
   readonly target: ResolvedTarget;
   readonly intent: IntakeIntent;
+  readonly scopeMode?: ScopeMode;
   readonly objectives?: readonly string[];
   readonly exclusions?: readonly string[];
   readonly security?: SecurityRequest;
@@ -193,7 +210,7 @@ export type ManifestInput = {
   readonly defaults?: readonly AppliedDefault[];
   readonly gaps?: readonly IntakeGap[];
   readonly authorization?: IntakeAuthorization;
-  readonly confirmation?: { readonly confirmed: boolean; readonly actor?: string };
+  readonly confirmation?: IntakeConfirmation;
   readonly route?: { readonly mode?: "interactive" | "noninteractive"; readonly provider?: string };
 };
 
@@ -204,17 +221,52 @@ function cloneSorted<T>(values: readonly T[]): T[] {
 
 function validateBudget(budget: IntakeBudget): void {
   for (const [field, value] of Object.entries(budget)) {
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
-      throw new Error(`Intake budget ${field} must be a positive finite integer`);
-    }
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) throw new Error(`Intake budget ${field} must be a positive finite integer`);
   }
 }
 
-function buildManifest(input: ManifestInput, authorization?: { readonly actor?: string; readonly reason?: string }): RunManifest {
+export type CanonicalConfirmationRequest = {
+  readonly target: ResolvedTarget;
+  readonly files: readonly string[];
+  readonly intent: IntakeIntent;
+  readonly scopeMode: ScopeMode;
+  readonly objectives: readonly ObjectiveGroup[];
+  readonly exclusions: readonly string[];
+  readonly analyzers: readonly AnalyzerDisposition[];
+  readonly budget: IntakeBudget;
+  readonly trust: TargetTrust;
+  readonly materialization: ResolvedTarget["materialization"];
+  readonly digest: string;
+};
+
+function confirmationPlan(value: Pick<RunManifest, "resolvedTarget" | "intent" | "scopeMode" | "objectives" | "exclusions" | "analyzers" | "budget" | "route">): Omit<CanonicalConfirmationRequest, "digest" | "files"> & { readonly files: readonly string[] } {
+  const target = canonicalTarget(value.resolvedTarget);
+  return {
+    target,
+    files: [...target.files],
+    intent: value.intent,
+    scopeMode: value.scopeMode,
+    objectives: cloneSorted(value.objectives),
+    exclusions: canonicalStrings(value.exclusions),
+    analyzers: cloneSorted(value.analyzers),
+    budget: structuredClone(value.budget),
+    trust: value.route.trust,
+    materialization: value.route.materialization,
+  };
+}
+
+export function canonicalConfirmationRequest(manifest: RunManifest): CanonicalConfirmationRequest {
+  const plan = confirmationPlan(manifest);
+  const digest = `confirmation-${createHash("sha256").update(stableJson(plan)).digest("hex")}`;
+  return freezeDeep({ ...plan, digest });
+}
+
+function buildManifest(input: ManifestInput, authorization?: { readonly actor?: string; readonly reason?: string; readonly acceptedDigest?: string }, allowUnconfirmed = false): RunManifest {
   if (input.analyzers) throw new Error("Analyzer dispositions are derived from the trusted catalog and cannot be supplied by callers");
   if (input.authorization) throw new Error("Authorization requires a trusted confirmation boundary");
   validateBudget(input.budget ?? {});
   const mode = input.route?.mode ?? "interactive";
+  const scopeMode = input.scopeMode ?? DEFAULT_NONINTERACTIVE_SCOPE_MODE;
   const trust = targetTrust(input.target);
   const route = {
     mode,
@@ -222,49 +274,64 @@ function buildManifest(input: ManifestInput, authorization?: { readonly actor?: 
     trust,
     ...(input.route?.provider ? { provider: input.route.provider } : {}),
   } as RunManifest["route"];
-  const analyzers = selectSecurityAnalyzers(input.security, { trust, target: input.target });
+  const analyzers = selectSecurityAnalyzers(input.security, { trust, target: input.target, scopeMode });
   const content: Omit<RunManifest, "manifestId"> = {
     schemaVersion: "1.0.0",
     resolvedTarget: canonicalTarget(input.target),
     intent: input.intent,
+    scopeMode,
     objectives: [...selectObjectiveGroups(input.objectives).selected],
     exclusions: canonicalStrings([...(input.exclusions ?? []), ...securityExclusions()]),
     analyzers: cloneSorted(analyzers),
     budget: structuredClone(input.budget ?? {}),
     defaults: cloneSorted(input.defaults ?? []),
     gaps: cloneSorted(input.gaps ?? []),
-    authorization: { required: mode === "noninteractive", granted: mode === "noninteractive" && authorization !== undefined, actor: authorization?.actor, reason: authorization?.reason },
-    confirmation: { required: mode === "interactive", confirmed: input.confirmation?.confirmed === true, actor: input.confirmation?.actor },
+    authorization: { required: mode === "noninteractive", granted: mode === "noninteractive" && authorization !== undefined, actor: authorization?.actor, reason: authorization?.reason, acceptedDigest: authorization?.acceptedDigest },
+    confirmation: { required: mode === "interactive", confirmed: input.confirmation?.confirmed === true, actor: input.confirmation?.actor, acceptedDigest: input.confirmation?.acceptedDigest, digest: "" },
     route,
   };
-  if (mode === "noninteractive" && !authorization) throw new Error("Noninteractive intake requires a trusted confirmation receipt");
-  validateAnalyzerDispositions(content.analyzers, trust);
-  const manifest = freezeDeep({ ...content, manifestId: manifestId(content) });
-  return manifest;
+  const digest = `confirmation-${createHash("sha256").update(stableJson(confirmationPlan(content))).digest("hex")}`;
+  const finalizedContent: Omit<RunManifest, "manifestId"> = { ...content, confirmation: { ...content.confirmation, digest } };
+  if (mode === "noninteractive" && !authorization && !allowUnconfirmed) throw new Error("Noninteractive intake requires a trusted confirmation receipt");
+  if (mode === "interactive" && !finalizedContent.confirmation.confirmed && !allowUnconfirmed) throw new Error("Interactive intake requires a trusted confirmation receipt");
+  const acceptedDigest = mode === "noninteractive" ? authorization?.acceptedDigest : input.confirmation?.acceptedDigest;
+  if (!allowUnconfirmed && acceptedDigest !== undefined && acceptedDigest !== digest) throw new Error("Trusted confirmation digest does not match the resolved intake plan");
+  if (!allowUnconfirmed && ((mode === "noninteractive" && !acceptedDigest) || (mode === "interactive" && !finalizedContent.confirmation.confirmed))) throw new Error("Trusted confirmation digest is required");
+  validateAnalyzerDispositions(finalizedContent.analyzers, trust);
+  return freezeDeep({ ...finalizedContent, manifestId: manifestId(finalizedContent) });
 }
 
 export function createRunManifest(input: ManifestInput): RunManifest {
   if (input.route?.mode === "noninteractive") throw new Error("Noninteractive intake requires a trusted confirmation boundary");
-  return buildManifest({ ...input, route: { ...input.route, mode: "interactive" } });
+  const scopeMode = input.scopeMode ?? (input.intent === "plan-only" ? "plan-only" : "full");
+  const digestInput = { ...input, scopeMode };
+  const provisional = buildManifest({ ...digestInput, confirmation: { confirmed: true, acceptedDigest: undefined } }, undefined, true);
+  const digest = canonicalConfirmationRequest(provisional).digest;
+  return buildManifest({ ...digestInput, confirmation: { ...input.confirmation, confirmed: input.confirmation?.confirmed !== false, acceptedDigest: input.confirmation?.acceptedDigest ?? digest } }, undefined);
 }
 
 export type IntakeAuthority = {
-  authorize(plan: Readonly<{ target: ResolvedTarget; intent: IntakeIntent }>): Promise<false | { readonly actor?: string; readonly reason?: string }>;
+  authorize(plan: CanonicalConfirmationRequest): Promise<false | { readonly acceptedDigest?: string; readonly actor?: string; readonly reason?: string } | true>;
 };
 
 export async function buildNoninteractiveManifest(input: ManifestInput, authority?: IntakeAuthority): Promise<RunManifest> {
   if (input.authorization) throw new Error("Authorization requires a trusted confirmation boundary");
   if (!authority) throw new Error("Noninteractive intake requires a trusted confirmation boundary");
-  const authorization = await authority.authorize({ target: input.target, intent: input.intent });
-  if (!authorization) throw new Error("Noninteractive intake authorization was denied");
   const defaults: AppliedDefault[] = structuredClone([...(input.defaults ?? [])]);
+  if (!input.scopeMode) defaults.push({ field: "scopeMode", value: DEFAULT_NONINTERACTIVE_SCOPE_MODE, reason: "Noninteractive intake uses the deterministic full scope unless the caller explicitly selects another mode." });
   if (!input.objectives || input.objectives.length === 0) defaults.push({ field: "objectives", value: [...OBJECTIVE_GROUPS], reason: "All objective groups are selected when no interactive narrowing was supplied." });
   if (!input.exclusions) defaults.push({ field: "exclusions", value: [], reason: "No user exclusions were supplied; bounded security exclusions still apply." });
   if (!input.security) defaults.push({ field: "analyzers", value: "catalog defaults", reason: "The target trust tier selects the analyzer defaults." });
   if (!input.budget) defaults.push({ field: "budget", value: {}, reason: "No budget was supplied; analyzer availability remains the limiting bound." });
   const gaps: IntakeGap[] = structuredClone([...(input.gaps ?? [])]);
   if (!input.budget) gaps.push({ field: "budget", reason: "No explicit budget was provided in noninteractive mode.", impact: "medium" });
-  return buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, authorization);
+  const provisional = buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, {}, true);
+  const request = canonicalConfirmationRequest(provisional);
+  const result = await authority.authorize(request);
+  if (!result) throw new Error("Noninteractive intake authorization was denied");
+  const receipt = result === true ? { acceptedDigest: request.digest } : { ...result, acceptedDigest: result.acceptedDigest ?? request.digest };
+  if (receipt.acceptedDigest !== request.digest) throw new Error("Trusted confirmation digest does not match the resolved intake plan");
+  return buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, receipt);
 }
 
 export function validateRunManifest(manifest: RunManifest): void {
@@ -272,12 +339,11 @@ export function validateRunManifest(manifest: RunManifest): void {
   if (manifestId(content) !== suppliedId) throw new Error("Run manifest identity does not match its content");
   const requiredExclusions = securityExclusions();
   if (requiredExclusions.some((value) => !manifest.exclusions.includes(value))) throw new Error("Run manifest omits a mandatory security exclusion");
-  if (manifest.authorization.required !== (manifest.route.mode === "noninteractive") || (manifest.authorization.required && !manifest.authorization.granted)) {
-    throw new Error("Run manifest authorization is inconsistent with its route");
-  }
-  if (manifest.confirmation.required !== (manifest.route.mode === "interactive") || (manifest.confirmation.required && !manifest.confirmation.confirmed)) {
-    throw new Error("Run manifest confirmation is inconsistent with its route");
-  }
+  if (!SCOPE_MODES.includes(manifest.scopeMode)) throw new Error("Run manifest scope mode is invalid");
+  const request = canonicalConfirmationRequest(manifest);
+  if (manifest.confirmation.digest !== request.digest) throw new Error("Run manifest confirmation digest does not match its plan");
+  if (manifest.authorization.required !== (manifest.route.mode === "noninteractive") || (manifest.authorization.required && (!manifest.authorization.granted || manifest.authorization.acceptedDigest !== request.digest))) throw new Error("Run manifest authorization is inconsistent with its route");
+  if (manifest.confirmation.required !== (manifest.route.mode === "interactive") || (manifest.confirmation.required && (!manifest.confirmation.confirmed || (manifest.confirmation.acceptedDigest !== undefined && manifest.confirmation.acceptedDigest !== request.digest)))) throw new Error("Run manifest confirmation is inconsistent with its route");
   validateBudget(manifest.budget);
   validateAnalyzerDispositions(manifest.analyzers, manifest.route.trust);
 }

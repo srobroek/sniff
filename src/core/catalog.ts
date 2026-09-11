@@ -73,7 +73,7 @@ export const SNIFF_ANALYZER_RECIPES = {
 		id: "semgrep:hardcoded-values",
 		tool: "semgrep",
 		tier: "lightweight-static",
-		args: ["--config", `${import.meta.dir}/sniff-semgrep-hardcoded-values.yml`, "--json", "--disable-version-check", "--metrics=off"],
+	args: ["--config", `${import.meta.dir}/sniff-semgrep-hardcoded-values.yml`, "--json", "--disable-version-check", "--metrics=off"],
 		scope: "scoped-files",
 		acceptedExitCodes: [0],
 		remoteSafe: true,
