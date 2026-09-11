@@ -207,11 +207,12 @@ describe("structured Sniff reports", () => {
     expect(markdown).toContain("| DOWNGRADE | Impact lowered after call-site census. |");
   });
 
-  test("escapes analyzer-controlled Markdown contexts", () => {
+  test("escapes analyzer-controlled Markdown contexts and line endings", () => {
     const input = reportInput([finding({ title: "# Inject <script> | value" })]);
-    input.target.label = "# target <unsafe>";
+    input.target.label = "# target <unsafe>\r---\u2028next";
     const markdown = renderSniffMarkdown(buildSniffReport(input));
-    expect(markdown).toContain("\\# target \\<unsafe\\>");
+    expect(markdown).toContain("\\# target \\<unsafe\\> --- next");
+    expect(markdown).not.toMatch(/[\r\u2028\u2029]/);
     expect(markdown).toContain("\\# Inject \\<script\\> \\| value");
   });
 

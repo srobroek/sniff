@@ -213,7 +213,7 @@ const COST_WEIGHT: Record<Cost, number> = { S: 1, M: 2, L: 3 };
 function escapeMarkdown(value: string): string {
   return value
     .replaceAll("\\", "\\\\")
-    .replaceAll("\n", " ")
+    .replace(/\r\n?|[\n\u2028\u2029]/g, " ")
     .replace(/[<>`*_[\]#]/g, "\\$&")
     .replaceAll("|", "\\|");
 }
