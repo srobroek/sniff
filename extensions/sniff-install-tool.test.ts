@@ -31,30 +31,27 @@ function executable(path: string, body: string): void {
 	chmodSync(path, 0o755);
 }
 
-function commandResult(
-	argv: string[],
-	timeoutMs: number,
-	overrides: Partial<CommandResult> = {},
-): CommandResult {
+function commandResult(argv: string[], timeoutMs: number, overrides: Partial<CommandResult> = {}): CommandResult {
 	return {
 		argv,
 		exitCode: 0,
 		stdout: "",
 		stderr: "",
+		stdoutTruncated: false,
+		stderrTruncated: false,
+		outputLimitBytes: 1_048_576,
 		timedOut: false,
 		timeoutMs,
 		...overrides,
 	};
 }
 
-function fakeRuntime(
-	overrides: Partial<SniffInstallRuntime> = {},
-): SniffInstallRuntime {
+function fakeRuntime(overrides: Partial<SniffInstallRuntime> = {}): SniffInstallRuntime {
 	return {
 		resolveCommand: (bin) => `/fake/bin/${bin}`,
 		readLauncher: () => "",
-		run: (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
-		freshEnvironment: (_cwd, env, miseAware) => ({
+		run: async (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
+		freshEnvironment: async (_cwd, env, miseAware) => ({
 			env: { ...env, FRESH: "1" },
 			source: miseAware ? "mise" : "process",
 		}),
@@ -110,8 +107,8 @@ describe("sniff tool catalog", () => {
 });
 
 describe("runSniffInstall", () => {
-	test("list mode preserves bundle inventory", () => {
-		const result = runSniffInstall({ mode: "list" });
+	test("list mode preserves bundle inventory", async () => {
+		const result = await runSniffInstall({ mode: "list" });
 		expect(result.ok).toBe(true);
 		for (const bundle of [
 			"core",
@@ -135,11 +132,11 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("golangci-lint");
 	});
 
-	test("probe stays successful with missing and shimmed tools", () => {
+	test("probe stays successful with missing and shimmed tools", async () => {
 		const dir = tempDir("sniff-probe-");
 		const shimDir = join(dir, ".mise", "shims");
 		executable(join(shimDir, "semgrep"), 'exec mise x -- semgrep "$@"');
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "probe",
 			cwd: dir,
 			env: { PATH: shimDir },
@@ -155,11 +152,11 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("MISS scc");
 	});
 
-	test("probe preserves SHIM text for a broken PATH executable", () => {
+	test("probe preserves SHIM text for a broken PATH executable", async () => {
 		const dir = tempDir("sniff-probe-broken-");
 		const binDir = join(dir, "bin");
 		executable(join(binDir, "lizard"), "exit 19");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "probe",
 			cwd: dir,
 			env: { PATH: binDir },
@@ -171,8 +168,8 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("SHIM lizard");
 	});
 
-	test("preflight succeeds when every selected required tool is usable", () => {
-		const result = runSniffInstall({
+	test("preflight succeeds when every selected required tool is usable", async () => {
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["core"],
 			runtime: fakeRuntime(),
@@ -190,11 +187,11 @@ describe("runSniffInstall", () => {
 		).toBe(true);
 	});
 
-	test("preflight fails for a missing required tool", () => {
+	test("preflight fails for a missing required tool", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "semgrep" ? null : `/fake/bin/${bin}`),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["core"],
 			runtime,
@@ -205,11 +202,11 @@ describe("runSniffInstall", () => {
 		expect(missing?.remediation).toContain("pipx install semgrep");
 	});
 
-	test("PATH launcher shim is classified as shimmed", () => {
+	test("PATH launcher shim is classified as shimmed", async () => {
 		const dir = tempDir("sniff-shim-");
 		const shimDir = join(dir, ".mise", "shims");
 		executable(join(shimDir, "jscpd"), 'exec mise x -- jscpd "$@"');
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
@@ -222,13 +219,13 @@ describe("runSniffInstall", () => {
 		});
 	});
 
-	test("runnable launcher shim is still classified as shimmed", () => {
+	test("runnable launcher shim is still classified as shimmed", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => `/fake/.mise/shims/${bin}`,
 			readLauncher: () => '#!/bin/sh\nexec mise x -- "$0" "$@"',
-			run: (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
+			run: async (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["dup"],
 			runtime,
@@ -237,11 +234,11 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]).toMatchObject({ status: "shimmed", attempts: [] });
 	});
 
-	test("real executable failure is unrunnable rather than shimmed", () => {
+	test("real executable failure is unrunnable rather than shimmed", async () => {
 		const dir = tempDir("sniff-broken-");
 		const binDir = join(dir, "bin");
 		executable(join(binDir, "jscpd"), "exit 17");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
@@ -254,11 +251,11 @@ describe("runSniffInstall", () => {
 		});
 	});
 
-	test("real sleeping executable is classified as timed-out", () => {
+	test("real sleeping executable is classified as timed-out", async () => {
 		const dir = tempDir("sniff-sleep-");
 		const binDir = join(dir, "bin");
 		executable(join(binDir, "jscpd"), "sleep 5");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
@@ -271,9 +268,9 @@ describe("runSniffInstall", () => {
 		);
 	});
 
-	test("project-local-only tools require a project dependency", () => {
+	test("project-local-only tools require a project dependency", async () => {
 		const dir = tempDir("sniff-local-");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["js-ts"],
 			cwd: dir,
@@ -285,11 +282,11 @@ describe("runSniffInstall", () => {
 		).toBe(true);
 	});
 
-	test("project-local tools never fall back to a global executable", () => {
+	test("project-local tools never fall back to a global executable", async () => {
 		const dir = tempDir("sniff-local-global-");
 		const globalBin = join(dir, "global-bin");
 		executable(join(globalBin, "eslint"), "exit 0");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "diagnose",
 			bundles: ["js-ts"],
 			cwd: dir,
@@ -301,17 +298,17 @@ describe("runSniffInstall", () => {
 		});
 	});
 
-	test("installation timeout is structured as timed-out", () => {
+	test("installation timeout is structured as timed-out", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),
-			run: (argv, _cwd, _env, timeoutMs) =>
+			run: async (argv, _cwd, _env, timeoutMs) =>
 				commandResult(argv, timeoutMs, {
 					exitCode: null,
 					timedOut: true,
 					error: "operation timed out",
 				}),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			noMise: true,
@@ -322,16 +319,16 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.install?.timeoutMs).toBe(300_000);
 	});
 
-	test("supply-chain trust denial is policy-blocked", () => {
+	test("supply-chain trust denial is policy-blocked", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),
-			run: (argv, _cwd, _env, timeoutMs) =>
+			run: async (argv, _cwd, _env, timeoutMs) =>
 				commandResult(argv, timeoutMs, {
 					exitCode: 1,
 					stderr: "package trust policy denied downgrade",
 				}),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			noMise: true,
@@ -340,16 +337,16 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.status).toBe("policy-blocked");
 	});
 
-	test("invalid manager registry route is unavailable-route", () => {
+	test("invalid manager registry route is unavailable-route", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),
-			run: (argv, _cwd, _env, timeoutMs) =>
+			run: async (argv, _cwd, _env, timeoutMs) =>
 				commandResult(argv, timeoutMs, {
 					exitCode: 1,
 					stderr: "unknown registry backend for package",
 				}),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			runtime,
@@ -357,16 +354,16 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.status).toBe("unavailable-route");
 	});
 
-	test("generic nonzero installation is installation-failed", () => {
+	test("generic nonzero installation is installation-failed", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => (bin === "jscpd" ? null : `/fake/bin/${bin}`),
-			run: (argv, _cwd, _env, timeoutMs) =>
+			run: async (argv, _cwd, _env, timeoutMs) =>
 				commandResult(argv, timeoutMs, {
 					exitCode: 73,
 					stderr: "compiler exited unsuccessfully",
 				}),
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			runtime,
@@ -374,7 +371,7 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.status).toBe("installation-failed");
 	});
 
-	test("successful mise install is re-probed in a fresh environment", () => {
+	test("successful mise install is re-probed in a fresh environment", async () => {
 		const calls: string[][] = [];
 		const refreshes: boolean[] = [];
 		const runtime = fakeRuntime({
@@ -383,16 +380,16 @@ describe("runSniffInstall", () => {
 					return env.FRESH === "1" ? "/fresh/bin/jscpd" : null;
 				return `/fake/bin/${bin}`;
 			},
-			run: (argv, _cwd, _env, timeoutMs) => {
+			run: async (argv, _cwd, _env, timeoutMs) => {
 				calls.push(argv);
 				return commandResult(argv, timeoutMs);
 			},
-			freshEnvironment: (_cwd, env, miseAware) => {
+			freshEnvironment: async (_cwd, env, miseAware) => {
 				refreshes.push(miseAware);
 				return { env: { ...env, FRESH: "1" }, source: "mise" };
 			},
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			runtime,
@@ -411,7 +408,7 @@ describe("runSniffInstall", () => {
 		expect(refreshes).toEqual([true]);
 	});
 
-	test("install fails when a successful manager command leaves a shim", () => {
+	test("install fails when a successful manager command leaves a shim", async () => {
 		const runtime = fakeRuntime({
 			resolveCommand: (bin, _cwd, env) => {
 				if (bin === "jscpd")
@@ -419,7 +416,7 @@ describe("runSniffInstall", () => {
 				return `/fake/bin/${bin}`;
 			},
 			readLauncher: () => '#!/bin/sh\nexec mise x -- jscpd "$@"',
-			run: (argv, _cwd, env, timeoutMs) => {
+			run: async (argv, _cwd, env, timeoutMs) => {
 				if (argv[0] === "/fresh/.mise/shims/jscpd" && env.FRESH === "1") {
 					return commandResult(argv, timeoutMs, {
 						exitCode: 1,
@@ -429,7 +426,7 @@ describe("runSniffInstall", () => {
 				return commandResult(argv, timeoutMs);
 			},
 		});
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
 			runtime,
@@ -438,24 +435,22 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.status).toBe("shimmed");
 	});
 
-	test("install without bundles and unknown bundles fail", () => {
-		expect(runSniffInstall({ mode: "install" }).ok).toBe(false);
-		expect(
-			runSniffInstall({ mode: "install", bundles: ["nope"] }).report,
-		).toContain('unknown bundle "nope"');
+	test("install without bundles and unknown bundles fail", async () => {
+		const noBundle = await runSniffInstall({ mode: "install" });
+		expect(noBundle.ok).toBe(false);
+		const unknown = await runSniffInstall({ mode: "install", bundles: ["nope"] });
+		expect(unknown.report).toContain('unknown bundle "nope"');
 	});
 
-	test("prototype names are not bundle names", () => {
+	test("prototype names are not bundle names", async () => {
 		for (const bundle of ["constructor", "toString", "__proto__"]) {
-			expect(runSniffInstall({ mode: "install", bundles: [bundle] }).ok).toBe(
-				false,
-			);
+			expect((await runSniffInstall({ mode: "install", bundles: [bundle] })).ok).toBe(false);
 		}
 	});
 
-	test("dry-run install prints commands without requiring success", () => {
+	test("dry-run install prints commands without requiring success", async () => {
 		const dir = tempDir("sniff-dry-");
-		const result = runSniffInstall({
+		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["core"],
 			dryRun: true,
@@ -469,11 +464,11 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("(dry run — no changes will be made)");
 		expect(result.report).toContain("[core]");
 	});
-	test("rejects empty PATH entries instead of resolving a host executable", () => {
+	test("rejects empty PATH entries instead of resolving a host executable", async () => {
 		const dir = tempDir("sniff-empty-path-");
 		const binDir = join(dir, "bin");
 		executable(join(binDir, "semgrep"), "exit 0");
-		const result = runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}` } });
+		const result = await runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}` } });
 		expect(result.tools.find(({ tool }) => tool === "semgrep")?.status).toBe("missing");
 	});
 

@@ -83,13 +83,14 @@ function remoteCheckoutRunner(repository: string, head: string, base = sha("b"))
 describe("adaptive intake", () => {
   test("asks only the highest-impact unresolved question", () => {
     expect(decisionFrontier({}).questions.map(({ id }) => id)).toEqual(["target"]);
-    expect(decisionFrontier({ target: { kind: "working-tree", root: "." } }).questions.map(({ id }) => id)).toEqual(["intent"]);
+    expect(decisionFrontier({ target: { kind: "working-tree", root: "." }, intent: "audit", scopeMode: "full" }).questions.map(({ id }) => id)).toEqual(["objectives"]);
   });
 
   test("complete input is silent and produces one plan", () => {
     const interview = decisionFrontier({
       target: { kind: "working-tree", root: "." },
       intent: "audit",
+      scopeMode: "full",
       objectives: ["structure-and-maintainability"],
       budget: { maxMinutes: 5 },
     });
@@ -99,17 +100,17 @@ describe("adaptive intake", () => {
 
   test("noninteractive manifests require a trusted authority boundary", async () => {
     const resolved = await buildNoninteractiveManifest(
-      { target: target("/tmp"), intent: "audit" },
-      { authorize: async () => ({ actor: "test-authority", reason: "fixture" }) },
+      { target: target("/tmp"), intent: "audit", scopeMode: "full" },
+      { authorize: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority", reason: "fixture" }) },
     );
-    expect(resolved.authorization).toMatchObject({ granted: true, actor: "test-authority" });
+    expect(resolved.authorization).toMatchObject({ required: true, actor: "test-authority", acceptedDigest: resolved.confirmation.digest });
     expect(resolved.defaults.map(({ field }) => field).sort()).toEqual(["analyzers", "budget", "exclusions", "objectives"]);
     expect(resolved.gaps.map(({ field }) => field)).toEqual(["budget"]);
-    await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", authorization: { granted: true, actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
+    await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", scopeMode: "full", authorization: { acceptedDigest: "forged", actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
   });
 
   test("remote defaults use only runnable config-free recipes", () => {
-    const remote = selectSecurityAnalyzers({ deepStatic: true }, { trust: "untrusted-remote" });
+    const remote = selectSecurityAnalyzers({ deepStatic: true }, { trust: "untrusted-remote", scopeMode: "full" });
     expect(remote.filter(({ disposition }) => disposition === "selected").map(({ name }) => name)).toEqual(["gitleaks:tracked-history", "lizard:complexity", "semgrep:hardcoded-values"]);
     expect(remote.every(({ name, recipe }) => name === recipe)).toBe(true);
     expect(remote.every(({ tier }) => tier === "lightweight-static")).toBe(true);
@@ -126,14 +127,14 @@ describe("adaptive intake", () => {
     const left = createRunManifest({
       target: target("/tmp/a"),
       intent: "audit",
-      objectives: ["correctness-and-resilience", "bounded-security-smells"],
+      scopeMode: "full",
       exclusions: ["beta", "alpha"],
       defaults,
     });
     const right = createRunManifest({
-      target: target("/tmp/b"),
+      target: target("/tmp/a"),
       intent: "audit",
-      objectives: ["bounded-security-smells", "correctness-and-resilience"],
+      scopeMode: "full",
       exclusions: ["alpha", "beta"],
       defaults,
     });
@@ -419,11 +420,12 @@ describe("extension reachability", () => {
       input: {
         target: { kind: "files", root, paths: ["src/a.ts"] },
         intent: "audit",
+        scopeMode: "full",
         objectives: ["correctness-and-resilience"],
         budget: { maxMinutes: 5 },
       },
-    }, { confirmInteractive: async () => true });
-    expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, confirmation: { confirmed: true } });
+    }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, scopeMode: "full", confirmation: { required: true, actor: "test-user" } });
   });
 });
 

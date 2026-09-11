@@ -59,8 +59,8 @@ function reportInput(findings: FindingInput[] = [finding()]): ReportInput {
         dimension: "complexity",
         tool: "biome",
         analysisClass: "local",
-        status: "ran",
-        notes: "Used biome.json from the target repository.",
+        status: "skipped",
+        notes: "Used biome.json from the target repository; execution was not requested.",
         config: "biome.json",
       },
       {
@@ -82,16 +82,17 @@ function authorizedReport(input: ReportInput = reportInput()): Parameters<typeof
   temporaryDirectories.push(root);
   const files = Array.from({ length: input.target.filesAnalyzed }, (_, index) => `fixture-${index}.ts`);
   for (const file of files) writeFileSync(join(root, file), "export {};\n");
+  const findings = input.findings.map((item, index) => ({ ...item, location: { ...item.location, path: files[index % files.length] ?? "fixture-0.ts" } }));
   const manifest = createRunManifest({
     target: validateResolvedTarget({ kind: "pr", label: input.target.label, root, files, baseRef: input.target.baseRef, materialization: "in-place" }),
     intent: "audit",
-    confirmation: { confirmed: true },
+    scopeMode: input.target.scopeMode,
   });
   const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined });
   return {
     capability: lease.capability,
     manifestId: lease.manifestId,
-    report: { ...input, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
+    report: { ...input, findings, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
   };
 }
 
@@ -262,19 +263,17 @@ describe("structured Sniff reports", () => {
     );
     expect(readdirSync(directory)).toEqual([]);
   });
-  test("tool rendering remains ephemeral unless save is explicit", () => {
-    const rendered = runSniffReportTool(authorizedReport());
+  test("tool rendering remains ephemeral unless save is explicit", async () => {
+    const rendered = await runSniffReportTool(authorizedReport());
     expect(rendered.savedPaths).toEqual([]);
 
-    const directory = mkdtempSync(join(tmpdir(), "sniff-report-tool-"));
+    const directory = mkdtempSync(join(import.meta.dir, ".sniff-report-tool-"));
     temporaryDirectories.push(directory);
-    const saved = runSniffReportTool({ ...authorizedReport(), mode: "save", path: directory });
+    const saved = await runSniffReportTool({ ...authorizedReport(), mode: "save", path: directory, runtime: { authorizeSave: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority" }) } });
     expect(saved.savedPaths).toHaveLength(3);
   });
 
-  test("tool save mode rejects an absent output path", () => {
-    expect(() => runSniffReportTool({ ...authorizedReport(), mode: "save" })).toThrow(
-      "mode=save requires path",
-    );
+  test("tool save mode rejects an absent output path", async () => {
+    await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
   });
 });
