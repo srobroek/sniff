@@ -471,7 +471,6 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({ mode: "probe", cwd: dir, env: { PATH: `${binDir}${delimiter}` } });
 		expect(result.tools.find(({ tool }) => tool === "semgrep")?.status).toBe("missing");
 	});
-
 });
 
 

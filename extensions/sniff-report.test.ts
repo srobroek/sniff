@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createRunManifest } from "../src/core/intake.ts";
 import {
   buildSniffReport,
@@ -276,4 +276,43 @@ describe("structured Sniff reports", () => {
   test("tool save mode rejects an absent output path", async () => {
     await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
   });
+
+	test("does not create a requested destination before save approval", async () => {
+		const parent = mkdtempSync(join(import.meta.dir, ".sniff-report-save-parent-"));
+		temporaryDirectories.push(parent);
+		const directory = join(parent, "denied");
+		let requested = false;
+		await expect(
+			runSniffReportTool({
+				...authorizedReport(),
+				mode: "save",
+				path: directory,
+				runtime: {
+					authorizeSave: async (request) => {
+						requested = true;
+						expect(request.directory).toBe(resolve(directory));
+						expect(existsSync(directory)).toBe(false);
+						return false;
+					},
+				},
+			}),
+		).rejects.toThrow("denied or mismatched");
+		expect(requested).toBe(true);
+		expect(existsSync(directory)).toBe(false);
+	});
+
+	test("does not create a requested destination when the save digest mismatches", async () => {
+		const parent = mkdtempSync(join(import.meta.dir, ".sniff-report-save-parent-"));
+		temporaryDirectories.push(parent);
+		const directory = join(parent, "mismatched");
+		await expect(
+			runSniffReportTool({
+				...authorizedReport(),
+				mode: "save",
+				path: directory,
+				runtime: { authorizeSave: async () => ({ acceptedDigest: "not-the-request-digest" }) },
+			}),
+		).rejects.toThrow("denied or mismatched");
+		expect(existsSync(directory)).toBe(false);
+	});
 });

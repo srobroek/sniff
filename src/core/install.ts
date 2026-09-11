@@ -133,6 +133,9 @@ function terminateProcess(proc: { pid: number; kill(signal?: "SIGTERM" | "SIGKIL
 }
 
 async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult> {
+	if (signal?.aborted) {
+		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES, timedOut: false, error: "operation aborted", timeoutMs };
+	}
 	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
 	let timedOut = false;
 	let aborted = false;
