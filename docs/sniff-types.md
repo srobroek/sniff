@@ -1,6 +1,6 @@
 # Sniff types
 
-Sniff keeps intake and report axes separate. The current verified adapter is OMP. Claude Code and Codex adapters are not documented as supported adapters.
+Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same five tools.
 
 Use these values in structured intake. Natural-language requests describe interaction. They are not shell commands.
 
@@ -14,7 +14,7 @@ Use these values in structured intake. Natural-language requests describe intera
 - `history`: analyze a history target or window.
 - `plan-only`: request a planning outcome without applying a refactor.
 
-Intent chooses the intake outcome. It does not choose the target. It does not choose the objective group. It does not choose scope mode or analyzer tier.
+Intent chooses the intake outcome. It does not choose the target. It does not choose the objective group. It does not choose scope mode. It does not choose analyzer tier.
 
 ## Objective groups
 
@@ -27,7 +27,7 @@ Intent chooses the intake outcome. It does not choose the target. It does not ch
 - `tests-delivery-and-tooling`: test-gap and CI checks.
 - `bounded-security-smells`: bounded security checks.
 
-Without an objective choice, noninteractive intake selects all six groups. Sniff records unselected groups as skipped.
+Without an objective choice, authorized noninteractive intake selects all six groups. Sniff records unselected groups as skipped.
 
 ## Target kinds
 
@@ -57,7 +57,7 @@ Local paths stay inside the selected root. Remote targets use a temporary checko
 - `gitlab`: uses `glab` for GitLab requests.
 - `generic-git`: uses `git` for generic repository operations.
 
-Sniff uses provider credential stores. Repository URLs must not contain user information. They must not contain query values or fragments.
+Sniff uses provider credential stores. Repository URLs must not contain user information, query values, or fragments.
 
 ## History windows
 
@@ -80,32 +80,24 @@ The report target contract calls this axis `scopeMode`. It accepts three values:
 - `full`: run every skill step. Include the challenge pass.
 - `plan-only`: keep the proposed plan read-only. Never apply changes.
 
-`plan-only` appears in both `IntakeIntent` and `scopeMode`. Intent describes the requested outcome. Scope mode describes the run behavior.
+`plan-only` appears in both `IntakeIntent` and `scopeMode`. Intent describes the requested outcome. Scope mode describes run behavior.
 
 ## Security tiers and trust
 
 `SecurityAnalyzerTier` contains three values:
 
 - `project-native`: project-controlled analyzer execution.
-- `lightweight-static`: bounded static checks with a remote-safe config-free recipe.
+- `lightweight-static`: bounded static checks with a remote-safe, config-free recipe.
 - `deep-static`: deeper static analysis with explicit opt-in on a trusted local target.
 
 `TargetTrust` contains two values:
 
 - `trusted-local`: local targets can use host-owned recipes. Project-controlled execution still needs a sandbox grant without credentials or network access.
-- `untrusted-remote`: remote targets use config-free offline recipes. They use bundled rules and an isolated analyzer home. Sniff does not install target dependencies.
+- `untrusted-remote`: remote targets use config-free offline recipes, bundled rules, and an isolated analyzer home. Sniff does not install target dependencies.
 
-Remote targets select only recipes marked `remoteSafe`. They select only recipes marked `configFree`.
+Remote targets select only recipes marked `remoteSafe` and `configFree`.
 
-Sniff records each analyzer as selected skipped or unavailable.
-
-Sniff rejects these activities:
-
-- fuzzing
-- exploitation
-- DAST
-- live-secret validation
-- threat campaigns
+Sniff records each analyzer as selected, skipped, or unavailable. It rejects fuzzing and exploitation. It rejects DAST. It rejects live-secret validation. It rejects threat campaigns.
 
 ## Analyzer recipes
 
@@ -149,7 +141,7 @@ Installation approval stays separate from intake confirmation and analyzer execu
 
 `SniffReportMode` accepts two values:
 
-- `render`: return validated report content to the OMP session. Do not write files.
+- `render`: return validated report content to the host session. Do not write files.
 - `save`: need an explicit output directory. Write the report artifact set.
 
 Save mode writes:
@@ -158,7 +150,7 @@ Save mode writes:
 - `<report-id>.md`
 - `<report-id>.receipt.json`
 
-If any destination exists, Sniff refuses the complete save. The receipt records report ID schema version canonical JSON SHA-256 Markdown SHA-256 and finding count.
+If a destination exists, Sniff refuses the complete save. The receipt records the report ID. It records the schema version. It records the canonical JSON SHA-256. It records the Markdown SHA-256. It records the finding count.
 
 `CoverageStatus` contains four values:
 
@@ -167,12 +159,13 @@ If any destination exists, Sniff refuses the complete save. The receipt records 
 - `gap`: a required analyzer was unavailable.
 - `not-applicable`: the analyzer did not match the target.
 
-A stopped run needs `sniff_cancel` before reporting. The lease registry is single-process state.
+A stopped run needs `sniff_cancel` before reporting. The lease registry is single-process state. See [Getting started](getting-started.md) for adapter installation and [Capabilities](capabilities.md) for verified behavior and clean-room limits.
 
 ## Related guides
 
-- [Interviewing](interviewing.md)
 - [Getting started](getting-started.md)
+- [Interviewing](interviewing.md)
+- [Capabilities and evidence](capabilities.md)
 - [Workflow](workflow.md)
 - [Targets and providers](targets-and-providers.md)
 - [Security and trust](security-and-trust.md)

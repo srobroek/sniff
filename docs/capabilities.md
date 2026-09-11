@@ -1,80 +1,277 @@
 # Cross-harness capabilities
 
-## Scope and status
+Sniff ships one portable core with three adapters.
 
-This matrix covers the OMP adapter at commit `0653793f0b5360f5f24179ecd53a71e0619d9af9`. Claude Code and Codex have no supported adapter. Each adapter needs a clean-room probe from installation through report cleanup.
+- OMP loads extension entrypoints.
+- Claude Code loads the bundled MCP server from its plugin manifest.
+- Codex loads the bundled MCP server from its plugin manifest.
 
-The matrix keeps five axes separate:
+Every adapter exposes exactly five tools:
 
-- intent
-- objective group
-- target
-- scope mode
-- analyzer family and tier
+- `sniff_intake`
+- `sniff_install_tools`
+- `sniff_run_analyzer`
+- `sniff_report`
+- `sniff_cancel`
 
-The frontier asks four questions in order. A run stores scope. [Evidence: `extensions/sniff-intake.ts:13-19,39-60,93-116`, `extensions/sniff-tool-catalog.ts:46-57`, `docs/workflow.md:9-16,20-32`]
+The authored skill in `.skill-source/sniff/` generates native skill trees for each adapter.
 
-Status labels:
+## Status labels
 
-- `VERIFIED`: code and targeted evidence cover the behavior.
-- `DEGRADED`: the harness exposes part of the behavior. A boundary is caller-mediated or absent.
-- `IMPLEMENTABLE`: the contract identifies a harness-native replacement. No adapter ships it.
-- `BLOCKED`: no adapter or probe establishes the behavior.
-- `NOT APPLICABLE`: an OMP mechanism does not transfer as-is. A replacement still needs evidence.
+- `VERIFIED` marks source and focused-test evidence.
+- `NATIVE` marks a fresh harness installation or copied-cache probe.
+- `FOCUSED` marks a focused protocol test without a clean-room exercise.
+- `ENVIRONMENT-BLOCKED` marks an external model or registry condition.
+- `N/A` marks an adapter-specific mechanism outside the portable contract.
+
+The matrix columns are OMP, CC for Claude Code, and CX for Codex.
 
 ## Capability matrix
 
-| Capability | OMP | Claude Code | Codex |
-| --- | --- | --- | --- |
-| Skill discovery | `VERIFIED` [O1] | `BLOCKED` [P] | `BLOCKED` [P] |
-| `sniff_intake` | `VERIFIED` [O2] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| `sniff_install_tools` | `VERIFIED` [O3] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| `sniff_run_analyzer` | `VERIFIED` [O4] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| `sniff_report` | `VERIFIED` [O5] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| `sniff_cancel` | `VERIFIED` [O6] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Long-lived lease state | `VERIFIED` [O6] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Interactive confirmation | `VERIFIED` [O2] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Installation approval | `DEGRADED` [O3] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Analyzer execution | `VERIFIED` [O4] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Cancellation and expiry | `VERIFIED` [O6] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| TTSR analyzer redirect | `VERIFIED` [O7] | `NOT APPLICABLE` [P] | `NOT APPLICABLE` [P] |
-| Agents | `VERIFIED` [O8] | `BLOCKED` [P] | `BLOCKED` [P] |
-| MCP transport | `NOT APPLICABLE` [O1] | `IMPLEMENTABLE` [P] | `IMPLEMENTABLE` [P] |
-| Marketplace and install shape | `VERIFIED` [O9] | `BLOCKED` [P] | `BLOCKED` [P] |
-| Clean-room evidence | `VERIFIED` [T] | `BLOCKED` [P] | `BLOCKED` [P] |
+```text
+Capability | OMP | CC | CX
+Core and five tools | VERIFIED | VERIFIED | VERIFIED
+Skill discovery | NATIVE | NATIVE | NATIVE
+Generated skill | VERIFIED | VERIFIED | VERIFIED
+sniff_intake | NATIVE | NATIVE | NATIVE
+sniff_install_tools | NATIVE | NATIVE | NATIVE
+sniff_run_analyzer | FOCUSED | FOCUSED | FOCUSED
+sniff_report render and save | FOCUSED | FOCUSED | FOCUSED
+Approval and denial | NATIVE | NATIVE | NATIVE
+Cancellation and cleanup | NATIVE | FOCUSED | FOCUSED
+Expiry and replay rejection | FOCUSED | FOCUSED | FOCUSED
+Analyzer catalog | VERIFIED | VERIFIED | VERIFIED
+MCP transport | N/A | NATIVE | NATIVE
+OMP TTSR analyzer redirect | VERIFIED | N/A | N/A
+OMP agent definitions | VERIFIED | N/A | N/A
+```
 
-## Evidence keys
+`FOCUSED` records behavior covered by protocol tests.
 
-- `[O1]` Skill and registration: `skills/sniff/SKILL.md:1-3`, `package.json:12-17`, `extensions/sniff-intake-tool.ts:132-176`, `extensions/sniff-report-tool.ts:88-123`.
-- `[O2]` Intake: `extensions/sniff-intake.ts:93-116`, `extensions/sniff-intake-tool.ts:74-129`, `extensions/sniff-adaptive-intake.test.ts:398-428`.
-- `[O3]` Installation: `extensions/sniff-install-tool.ts:548-559,718-820,846-902`, `skills/sniff/SKILL.md:24-29,48`, `docs/getting-started.md:56-62`, `extensions/sniff-install-tool.test.ts:485-532`.
-- `[O4]` Analyzer: `extensions/sniff-tool-catalog.ts:46-94`, `extensions/sniff-run-registry.ts:106-151,197-230`, `extensions/sniff-install-tool.ts:621-716`, `extensions/sniff-runtime-boundaries.test.ts:285-302`.
-- `[O5]` Report: `extensions/sniff-report-tool.ts:67-85`, `docs/reports.md:28-44,58-70`, `extensions/sniff-report.test.ts:265-278`.
-- `[O6]` Lease: `extensions/sniff-run-registry.ts:9-10,55-85,186-194,244-255`, `docs/security-and-trust.md:57-59`, `extensions/sniff-runtime-boundaries.test.ts:162-181`.
-- `[O7]` TTSR: `rules/quality-sniff-analyzer-redirect.md:1-12`, `extensions/sniff-ttsr-rule.test.ts:23-71`.
-- `[O8]` Agents: `agents/bloodhound.md:1-12,21-34`, `agents/refactor-challenger.md:1-12,21-34`, `skills/sniff/SKILL.md:31-47`.
-- `[O9]` Install shape: `README.md:11-21`, `docs/getting-started.md:12-22`, `.omp-plugin/plugin.json:1-6`.
-- `[P]` Adapter status: `package.json:12-17` contains only OMP entrypoints. The inventory probe `git ls-files '*claude*' '*Claude*' '*codex*' '*Codex*' '*mcp*' '*MCP*'` returned no paths at this commit.
-- `[T]` Targeted evidence: `bun test extensions/sniff-adaptive-intake.test.ts extensions/sniff-install-tool.test.ts extensions/sniff-runtime-boundaries.test.ts extensions/sniff-report.test.ts extensions/sniff-ttsr-rule.test.ts`.
+The clean-room probes skipped packages.
 
-The installation registration has no confirmation callback. The skill and guide place approval in the caller workflow. That split makes the OMP cell `DEGRADED`. [Evidence: `[O3]`]
+The clean-room probes skipped report saving.
 
-After a terminal event, cleanup removes the target checkout and analyzer home. [Evidence: `[O6]`]
+## Evidence in the current tree
 
-An OMP TTSR rule does not transfer to another harness. An OMP agent definition does not establish a Claude Code or Codex agent. [Evidence: `[O7]`, `[O8]`]
+The portable core lives in `src/core/`.
 
-## Clean-room gate
+OMP registration lives in these files:
 
-Run these checks for each adapter:
+- `package.json`
+- `extensions/sniff-intake-tool.ts`
+- `extensions/sniff-install-tool.ts`
+- `extensions/sniff-report-tool.ts`
+- `extensions/sniff-intake-manifest.ts`
+- `extensions/sniff-target-checkout.ts`
 
-1. Discover the canonical skill after a fresh install.
-2. Invoke all five tools. Use one target and one report contract.
-3. Confirm intake and reject a denial.
-4. Probe tools and reject installation without approval.
-5. Run one selected analyzer through its fixed recipe.
-6. Render and save a report with receipt hashes.
-7. Cancel an unfinished run.
-8. Wait for expiry. Reject replay with an expired capability.
-9. Exercise the harness-native replacement for OMP TTSR or agents.
+MCP registration lives in these files:
 
-A harness-native replacement is not support. Claude Code and Codex remain unsupported until their clean-room probes pass. [Evidence: `[P]`, `README.md:5-10`, `docs/workflow.md:40-72`, `extensions/sniff-run-registry.ts:197-255`]
+- `adapters/mcp/server.ts`
+- `adapters/mcp/server.test.ts`
+- `.mcp.json`
+- `dist/claude/server.js`
+- `dist/codex/server.js`
+
+Plugin manifests live in these files:
+
+- `.omp-plugin/plugin.json`
+- `.claude-plugin/plugin.json`
+- `.agents/plugins/marketplace.json`
+
+Generated skill evidence uses these paths:
+
+- `.skill-source/sniff/`
+- `scripts/generate-harness-skills.ts`
+- `skills/sniff/`
+- `.claude/skills/sniff/`
+- `.agents/skills/sniff/`
+- `dist/codex/skills/sniff/`
+
+Bundle evidence uses `scripts/build-harness-bundles.ts` and `scripts/packaging-shape.test.ts`.
+
+Run the focused protocol suite with this command:
+
+```sh
+bun test extensions/sniff-adaptive-intake.test.ts extensions/sniff-install-tool.test.ts extensions/sniff-runtime-boundaries.test.ts extensions/sniff-report.test.ts extensions/sniff-ttsr-rule.test.ts adapters/mcp/server.test.ts scripts/generate-harness-skills.test.ts scripts/packaging-shape.test.ts
+```
+
+The suite covers these paths:
+
+- approval and denial
+- analyzer cancellation
+- report render and save validation
+- expiry and replay
+- MCP dispatch
+- generated skills
+- bundle shape
+
+The suite skips setup.
+
+The suite skips report saving in a clean-room harness.
+
+## Dated clean-room outcomes
+
+The native probes ran on 2026-09-11.
+
+Each probe used a copied local marketplace source or copied installed cache.
+
+Remote publication commands were not tested. The commands in [Getting started](getting-started.md) target the published GitHub repository. The probes used copied local marketplace sources.
+
+### OMP `omp/18.1.17`
+
+A local marketplace add passed.
+
+`omp plugin install sniff@sniff --scope=user` passed in an isolated profile.
+
+The installed cache directory matched the source package SHA-256 `e2a95981a2faf4931470dc2fc4f0d3c87a460b7a081ca5ca72af50654c100560`.
+
+Source-path search found no source checkout.
+
+Fresh Bun imports of cached extension modules registered exactly five tools.
+
+Cached `sniff_install_tools` list returned `ok=true` without mutation.
+
+A noninteractive `plan-only` intake issued a manifest and lease.
+
+`sniff_cancel` released that lease.
+
+The interactive intake ran without UI.
+
+It denied confirmation.
+
+It issued no lease.
+
+The fresh OMP model and skill probe was environment-blocked.
+
+Every `omp -p` attempt stopped at the authorization gateway with `authorization timeout`.
+
+The gateway reported `ready:false` and `reason:not_configured`.
+
+That condition blocks a model-response claim.
+
+It preserves installation evidence.
+
+It preserves registration evidence.
+
+It preserves list evidence.
+
+It preserves lease evidence.
+
+It preserves cancellation evidence.
+
+### Claude Code `2.1.268 (Claude Code)` and toolbox `2.1.268.779`
+
+Strict source-marketplace validation passed.
+
+A copied local marketplace add passed.
+
+`sniff@sniff --scope user --yes` installation passed.
+
+Installed-cache validation passed.
+
+Cache-only startup loaded the inline plugin.
+
+Cache-only startup loaded two `.claude/skills` files.
+
+Direct cached Bun `1.4.2` stdio initialize passed.
+
+The tool listing passed with exactly five names.
+
+The cached bundle SHA-256 was `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
+
+The source bundle had the same hash.
+
+Cached list and dry-run probe returned `ok=true`.
+
+Those operations stayed read-only.
+
+A complete no-capability intake returned `isError=true`.
+
+It returned `sniff_operation_failed`.
+
+It issued no lease.
+
+After a Bedrock third-party probe, the model response probe stopped.
+
+The process exited with `124`.
+
+The probe removed the copied marketplace source.
+
+A native installed-registry fresh load reported `marketplace-load-failed/cache-miss`.
+
+Cache-only `--plugin-dir` startup remained proven.
+
+The cache contained no source-branch path.
+
+Cache startup remains verified.
+
+Skill discovery remains verified.
+
+MCP registration remains verified.
+
+Tool listing remains verified.
+
+### Codex `0.154.0.446`
+
+A local marketplace add passed in an isolated `CODEX_HOME`.
+
+`codex plugin add sniff@sniff` passed.
+
+Cache startup read the plugin `mcp.json`.
+
+Cache startup launched `bun run ${PLUGIN_ROOT}/server.js`.
+
+The server initialized as `sniff` version `0.1.0`.
+
+The tool listing passed with exactly five names.
+
+Cached skill discovery loaded `skills/sniff/SKILL.md`.
+
+It did not fall back to `.agents/skills`.
+
+A fresh `codex exec` model probe called `sniff_install_tools` in `probe` mode.
+
+The probe returned `MCP_CALL=PASS`.
+
+Direct no-UI intake returned `confirmation_required`.
+
+It returned `isError=true`.
+
+It issued no lease.
+
+Source and cache server bundles matched SHA-256 `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
+
+The Codex clean-room removed its plugin and isolated directories.
+
+The CLI uses `codex plugin add`.
+
+The CLI does not provide `codex plugin install`.
+
+The clean-room skipped packages.
+
+It skipped analyzer execution.
+
+It skipped report artifact saving.
+
+The focused suite covers those paths at the protocol boundary.
+
+## Clean-room regression checklist
+
+The checklist columns are Check, Native, and Focused.
+
+```text
+Check | Native | Focused
+Fresh marketplace and cache startup | OMP, Claude Code, and Codex passed local copied-source startup on 2026-09-11 | Packaging tests validate manifests
+Generated skill discovery | Each adapter loaded its copied-cache skill path | Skill generator tests validate every output tree
+Five tool registration | Each adapter listed the exact five names | MCP tests validate list and dispatch
+Intake approval and denial | OMP denied no-UI interactive intake. Claude and Codex denied no-capability intake | Intake tests validate approval and lease invariants
+Read-only list and probe | OMP and Claude passed list and probe. Codex passed a model probe | Installer tests validate probe and authorization boundaries
+Analyzer installation and execution | The clean-room skipped this row | Focused tests validate fixed-recipe dispatch and cancellation
+Report render and save | The clean-room skipped this row | Report tests validate render, save, receipts, and terminal cleanup
+Cancel an unfinished run | OMP issued and canceled a noninteractive lease | Lifecycle tests validate cancellation and materialization cleanup
+Expiry and replay rejection | The clean-room skipped this row | Lifecycle tests validate expiry and replay rejection
+Cache and temporary-root cleanup | Each adapter removed its isolated probe roots | Cleanup assertions validate terminal release paths
+```
+
+A native pass proves the host installation and adapter boundary that it exercises. A focused pass proves the portable contract paths that the clean-room gate does not run.

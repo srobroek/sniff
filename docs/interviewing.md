@@ -1,96 +1,90 @@
-# Adaptive interviewing
+# Interviewing
 
-Sniff runs adaptive intake. Analyzer execution follows. The current verified adapter is OMP. Claude Code and Codex adapters are not documented as supported adapters.
+Sniff uses one harness-neutral interview contract. OMP presents the contract through its native extension UI. Claude Code and Codex present it through MCP elicitation.
 
-Requests describe a conversation. Natural-language text is not a deterministic shell command.
+The host confirms the plan. Sniff issues a run capability.
+
+Natural-language requests describe a conversation. They are not shell commands.
 
 ## Decision frontier
 
-Interactive intake checks four decisions:
+The core models five axes:
 
-- `target` has impact 100. Sniff needs a target before later choices.
-- `intent` has impact 90. Intent changes the route. It changes the budget and analyzer selection.
-- `objectives` has impact 80. Objective choice selects analyzers.
-- `budget` has impact 60. A budget bounds an otherwise open-ended audit.
+- `target` identifies the repository or file set.
+- `intent` identifies the desired outcome.
+- `objectives` identifies the objective groups.
+- `scopeMode` selects run behavior.
+- analyzer family and tier follow from the confirmed target.
 
-Sniff asks the first unresolved question. It waits. Then it asks another question.
-
-Exclusions shape the plan. Security preferences shape the plan. After intake, Sniff applies both. See [Sniff types](sniff-types.md) for accepted values.
+The first four choices form the adaptive frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next question. Analyzer selection follows the confirmed choices.
 
 ## Request patterns
 
-These patterns identify explicit choices and the next question. They describe interaction rather than natural-language parsing.
+These examples show the next decision:
 
-- `Inspect this repository.` Explicit choice: `target`. Next question: `intent`.
-- `Audit the uncommitted changes.` Explicit choices: `target` and `intent: audit`. Next question: `objectives`.
-- `Audit the uncommitted changes for structure and maintainability.` Explicit choices include `structure-and-maintainability`. Next question: `budget`.
-- `Audit the uncommitted changes for structure and maintainability with a five-minute budget.` The request names all four frontier decisions. Sniff asks no frontier question. It asks for final plan confirmation.
-- `Review the pull request for release risk with an analyzer limit of three.` The request names `intent: review-change`, `objectives: [change-and-release-risk]`, and `maxAnalyzers: 3`. Sniff asks no frontier question. It asks for final plan confirmation.
+- `Inspect this repository.` names `target`. Sniff asks for `intent`.
+- `Audit the uncommitted changes.` names `target` and `intent: audit`. Sniff asks for `objectives`.
+- `Audit the uncommitted changes for structure and maintainability.` names an objective group. Sniff asks for `scopeMode` or a budget limit.
+- `Audit the uncommitted changes for structure and maintainability in plan-only mode with a five-minute budget.` names the frontier choices. Sniff asks for final plan confirmation.
+- `Review pull request 42 for release risk with an analyzer limit of three.` names `intent: review-change`. It selects `change-and-release-risk`. It sets `maxAnalyzers: 3`. Sniff asks for final plan confirmation.
 
-When a request names a target but no intent, Sniff asks about the desired outcome.
+A complete request does not grant approval. Confirmation remains separate. Installation remains separate. Report saving remains separate. Refactoring remains separate.
 
-When a request names an intent but no objective group, Sniff asks which groups to include.
+## Confirm the plan
 
-When a request names objective groups but no budget, Sniff asks for a budget bound.
-
-A complete prompt produces no frontier question. It does not grant approval. Each later action needs separate approval.
-
-## Final plan confirmation
-
-After the frontier is complete, Sniff resolves the target and prepares one plan. Before confirmation, review these values:
+Before confirmation, review these values:
 
 - resolved target label
-- immutable commit or mutable working-tree state
+- immutable commit or working-tree state
 - exact file set and file count
 - intent and objective groups
-- exclusions
+- scope mode and exclusions
 - analyzer selections and skipped analyzers
 - time, analyzer, and file limits
 - defaults and coverage gaps
 - trust route and materialization mode
 
-Interactive intake needs confirmation through OMP. Sniff records the confirmation in the run manifest. It issues a capability for that manifest.
+The interactive host asks questions.
 
-Installation needs separate approval. Report saving needs separate approval. Refactoring needs separate approval.
+OMP uses its native confirmation UI.
 
 ## Interactive and noninteractive intake
 
-Interactive intake needs these values:
+The host can expose elicitation. Both adapters use it.
 
-- `target`
-- `intent`
-- one objective group
-- `budget`
+Authorized noninteractive intake supplies `target` and `intent` through host authorization. The trusted host records the authorization receipt. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking frontier questions.
 
-The OMP UI confirms the resolved plan. The interview exposes unresolved decisions.
+Without an objective choice, noninteractive intake selects all six groups.
 
-Authorized noninteractive intake needs `target` and `intent`. The trusted host records an authorization receipt. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking conversational questions.
+Without exclusions, it records an empty list.
 
-The boundary rejects input. Sniff derives choices from trust data. Missing authorization blocks the run.
+Security rules stay active.
 
-## Noninteractive defaults and gaps
+Without a budget, it records an empty budget object.
 
-Sniff records entries for fields omitted by an authorized noninteractive request:
+Sniff records a medium-impact gap.
 
-- `objectives`: all six groups. No gap applies.
-- `exclusions`: empty list. Security exclusions still apply. No gap applies.
-- `security`: analyzer defaults from the target trust tier. No gap applies.
-- `budget`: an empty budget object. Sniff records a medium-impact gap because no explicit budget was supplied.
+Each budget value must be a positive finite integer.
 
-Every supplied budget value must be a positive finite integer. Supported fields are `maxMinutes`, `maxAnalyzers`, and `maxFiles`.
+Supported fields are `maxMinutes`, `maxAnalyzers`, and `maxFiles`.
 
-## Cancellation
+## Approval boundaries
 
-A stopped run needs `sniff_cancel` before reporting.
+The five tools keep approvals separate:
 
-Cancellation closes the capability. It releases reservations. It removes the temporary checkout. It removes the analyzer home.
+1. `sniff_intake` needs plan confirmation before it issues a capability.
+2. `sniff_install_tools` needs installation approval before it installs bundles. Probe, diagnose, and list stay read-only.
+3. `sniff_run_analyzer` needs the live capability and a selected recipe. The host revalidates the target before execution.
+4. `sniff_report` renders a validated report or needs save approval before it writes artifacts.
+5. `sniff_cancel` closes an unfinished run and releases its materialization.
 
-A terminal report attempt closes the lease even when validation fails. An expiry timer cleans up an abandoned lease. The lease registry is single-process state.
 
 ## Related guides
 
 - [Getting started](getting-started.md)
-- [Workflow](workflow.md)
+- [Capabilities and clean-room evidence](capabilities.md)
 - [Sniff types](sniff-types.md)
+- [Workflow](workflow.md)
+- [Targets and providers](targets-and-providers.md)
 - [Security and trust](security-and-trust.md)
 - [Reports](reports.md)
