@@ -572,6 +572,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	if (!validExitContract(acceptedExitCodes)) {
 		abandon();
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
+  }
   const env = analyzerEnvironment(authorization.home);
   const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
