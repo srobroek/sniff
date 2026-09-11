@@ -6,5 +6,10 @@ dist/claude/*
 !dist/codex/
 dist/codex/*
 !dist/codex/server.js
+!dist/omp/
+dist/omp/*
+!dist/omp/sniff-install-tool.js
+!dist/omp/sniff-intake-tool.js
+!dist/omp/sniff-report-tool.js
 *.log
 .DS_Store

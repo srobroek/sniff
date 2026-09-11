@@ -6,10 +6,24 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 
-const ENTRYPOINT = join("adapters", "mcp", "server.ts");
-const OUTPUTS = [
+const MCP_ENTRYPOINT = join("adapters", "mcp", "server.ts");
+const MCP_OUTPUTS = [
 	join("dist", "claude", "server.js"),
 	join("dist", "codex", "server.js"),
+] as const;
+const OMP_BUNDLES = [
+	{
+		entrypoint: join("extensions", "sniff-install-tool.ts"),
+		output: join("dist", "omp", "sniff-install-tool.js"),
+	},
+	{
+		entrypoint: join("extensions", "sniff-intake-tool.ts"),
+		output: join("dist", "omp", "sniff-intake-tool.js"),
+	},
+	{
+		entrypoint: join("extensions", "sniff-report-tool.ts"),
+		output: join("dist", "omp", "sniff-report-tool.js"),
+	},
 ] as const;
 
 const BUILTIN_MODULES: Record<string, true> = {
@@ -77,6 +91,11 @@ type BuildResult = {
 	readonly changed: boolean;
 };
 
+type BundleOutput = {
+	readonly bundle: Uint8Array;
+	readonly paths: readonly string[];
+};
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	if (left.byteLength !== right.byteLength) return false;
 	for (let index = 0; index < left.byteLength; index += 1) {
@@ -104,9 +123,9 @@ function assertPortableBundle(bundle: Uint8Array, repoRoot: string): void {
 	}
 }
 
-async function buildBundle(repoRoot: string): Promise<Uint8Array> {
+async function buildBundle(repoRoot: string, entrypoint: string): Promise<Uint8Array> {
 	const result = await Bun.build({
-		entrypoints: [join(repoRoot, ENTRYPOINT)],
+		entrypoints: [join(repoRoot, entrypoint)],
 		target: "bun",
 		format: "esm",
 		sourcemap: "none",
@@ -135,10 +154,22 @@ export async function buildHarnessBundles(
 	options: BuildOptions = {},
 ): Promise<BuildResult> {
 	const repoRoot = resolve(options.repoRoot ?? join(import.meta.dir, ".."));
-	const bundle = await buildBundle(repoRoot);
-	const outputPaths = OUTPUTS.map((path) => join(repoRoot, path));
-	const current = outputPaths.every(
-		(path) => existsSync(path) && bytesEqual(new Uint8Array(readFileSync(path)), bundle),
+	const mcpBundle = await buildBundle(repoRoot, MCP_ENTRYPOINT);
+	const ompBundles: BundleOutput[] = [];
+	for (const target of OMP_BUNDLES) {
+		ompBundles.push({
+			bundle: await buildBundle(repoRoot, target.entrypoint),
+			paths: [join(repoRoot, target.output)],
+		});
+	}
+	const bundles: BundleOutput[] = [
+		{ bundle: mcpBundle, paths: MCP_OUTPUTS.map((path) => join(repoRoot, path)) },
+		...ompBundles,
+	];
+	const current = bundles.every(({ bundle, paths }) =>
+		paths.every(
+			(path) => existsSync(path) && bytesEqual(new Uint8Array(readFileSync(path)), bundle),
+		),
 	);
 	if (options.check) {
 		if (!current) {
@@ -146,13 +177,21 @@ export async function buildHarnessBundles(
 				"Harness bundles are stale or missing; run the bundle builder without --check.",
 			);
 		}
-		return { bytes: bundle.byteLength, changed: false };
+		return {
+			bytes: bundles.reduce((total, { bundle }) => total + bundle.byteLength, 0),
+			changed: false,
+		};
 	}
-	for (const path of outputPaths) {
-		mkdirSync(resolve(path, ".."), { recursive: true });
-		writeFileSync(path, bundle);
+	for (const { bundle, paths } of bundles) {
+		for (const path of paths) {
+			mkdirSync(resolve(path, ".."), { recursive: true });
+			writeFileSync(path, bundle);
+		}
 	}
-	return { bytes: bundle.byteLength, changed: !current };
+	return {
+		bytes: bundles.reduce((total, { bundle }) => total + bundle.byteLength, 0),
+		changed: !current,
+	};
 }
 
 async function runFromCli(): Promise<void> {
