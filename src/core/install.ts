@@ -8,6 +8,7 @@ import {
 	statSync,
 } from "node:fs";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { tmpdir } from "node:os";
 import {
 	type AnalyzerRunAuthorization,
 	abandonAnalyzerReservation,
@@ -21,10 +22,11 @@ import {
 	TOOLS,
 	type ToolRec,
 } from "./catalog.ts";
-
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
 const ENV_REFRESH_TIMEOUT_MS = 10_000;
+/** Maximum bytes retained from each subprocess output stream. */
+export const COMMAND_OUTPUT_LIMIT_BYTES = 1_048_576;
 
 export type SniffToolStatus =
 	| "usable"
@@ -42,16 +44,16 @@ export type CommandResult = {
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
+	stdoutTruncated: boolean;
+	stderrTruncated: boolean;
+	outputLimitBytes: number;
 	timedOut: boolean;
 	signalCode?: string;
 	error?: string;
 	timeoutMs: number;
 };
 
-export type ProbeAttempt = Pick<
-	CommandResult,
-	"argv" | "exitCode" | "stderr" | "timedOut" | "error" | "timeoutMs"
->;
+export type ProbeAttempt = Pick<CommandResult, "argv" | "exitCode" | "stderr" | "timedOut" | "error" | "timeoutMs">;
 
 export type SniffToolResult = {
 	bundle: BundleName;
@@ -66,85 +68,106 @@ export type SniffToolResult = {
 };
 
 type ProcessEnvironment = Record<string, string | undefined>;
-
-type FreshEnvironment = {
-	env: ProcessEnvironment;
-	source: "process" | "mise";
-	error?: string;
-};
+type FreshEnvironment = { env: ProcessEnvironment; source: "process" | "mise"; error?: string };
 
 export type SniffInstallRuntime = {
-	resolveCommand(
-		bin: string,
-		cwd: string,
-		env: ProcessEnvironment,
-	): string | null;
+	resolveCommand(bin: string, cwd: string, env: ProcessEnvironment): string | null;
 	readLauncher(path: string): string;
-	run(
-		argv: string[],
-		cwd: string,
-		env: ProcessEnvironment,
-		timeoutMs: number,
-	): CommandResult;
-	freshEnvironment(
-		cwd: string,
-		env: ProcessEnvironment,
-		miseAware: boolean,
-	): FreshEnvironment;
+	run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult>;
+	freshEnvironment(cwd: string, env: ProcessEnvironment, miseAware: boolean, signal?: AbortSignal): Promise<FreshEnvironment>;
+	/** Host-owned neutral cwd used for mutating installs, never the probe target. */
+	readonly neutralCwd?: string;
 };
-
 export type SniffInstallResult = {
 	ok: boolean;
 	report: string;
 	tools: SniffToolResult[];
 };
 
+
 function timeoutError(err: unknown): boolean {
 	const candidate = err as { code?: string; name?: string; message?: string };
-	return (
-		candidate?.code === "ETIMEDOUT" ||
-		candidate?.name === "TimeoutError" ||
-		/\b(?:timed?\s*out|timeout)\b/i.test(candidate?.message ?? "")
-	);
+	return candidate?.code === "ETIMEDOUT" || candidate?.name === "TimeoutError" || /\b(?:timed?\s*out|timeout)\b/i.test(candidate?.message ?? "");
 }
 
-function runCommand(
-	argv: string[],
-	cwd: string,
-	env: ProcessEnvironment,
-	timeoutMs: number,
-): CommandResult {
+async function readBounded(stream: ReadableStream<Uint8Array> | null): Promise<{ text: string; truncated: boolean }> {
+	if (!stream) return { text: "", truncated: false };
+	const reader = stream.getReader();
+	const chunks: Uint8Array[] = [];
+	let retained = 0;
+	let truncated = false;
 	try {
-		const proc = Bun.spawnSync(argv, {
-			cwd,
-			env,
-			stdout: "pipe",
-			stderr: "pipe",
-			stdin: new Uint8Array(),
-			timeout: timeoutMs,
-		});
-		return {
-			argv,
-			exitCode: proc.exitCode,
-			stdout: proc.stdout.toString(),
-			stderr: proc.stderr.toString(),
-			timedOut: proc.exitedDueToTimeout === true,
-			signalCode: proc.signalCode ?? undefined,
-			timeoutMs,
-		};
-	} catch (err) {
-		return {
-			argv,
-			exitCode: null,
-			stdout: "",
-			stderr: "",
-			timedOut: timeoutError(err),
-			error: err instanceof Error ? err.message : String(err),
-			timeoutMs,
-		};
+		for (;;) {
+			const next = await reader.read();
+			if (next.done) break;
+			const chunk = next.value;
+			if (retained < COMMAND_OUTPUT_LIMIT_BYTES) {
+				const end = Math.min(chunk.byteLength, COMMAND_OUTPUT_LIMIT_BYTES - retained);
+				if (end > 0) chunks.push(chunk.slice(0, end));
+				retained += end;
+			}
+			if (retained >= COMMAND_OUTPUT_LIMIT_BYTES && chunk.byteLength > 0) truncated = true;
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const output = new Uint8Array(retained);
+	let offset = 0;
+	for (const chunk of chunks) {
+		output.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return { text: Buffer.from(output).toString("utf8"), truncated };
+}
+
+function terminateProcess(proc: { pid: number; kill(signal?: "SIGTERM" | "SIGKILL"): void }, signal: "SIGTERM" | "SIGKILL"): void {
+	try {
+		process.kill(-proc.pid, signal);
+	} catch {
+		try {
+			proc.kill(signal);
+		} catch {
+			// The child may have exited between timeout/cancellation and cleanup.
+		}
 	}
 }
 
+async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal): Promise<CommandResult> {
+	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+	let timedOut = false;
+	let aborted = false;
+	let forceKill: ReturnType<typeof setTimeout> | undefined;
+	const stop = (reason: "timeout" | "abort") => {
+		if (reason === "timeout") timedOut = true;
+		if (reason === "abort") aborted = true;
+		terminateProcess(proc, "SIGTERM");
+		forceKill = setTimeout(() => terminateProcess(proc, "SIGKILL"), 100);
+	};
+	const timeout = setTimeout(() => stop("timeout"), timeoutMs);
+	const onAbort = () => stop("abort");
+	signal?.addEventListener("abort", onAbort, { once: true });
+	const [stdout, stderr, exitCode] = await Promise.all([
+		readBounded(proc.stdout as ReadableStream<Uint8Array>),
+		readBounded(proc.stderr as ReadableStream<Uint8Array>),
+		proc.exited,
+	]);
+	clearTimeout(timeout);
+	if (forceKill) clearTimeout(forceKill);
+	signal?.removeEventListener("abort", onAbort);
+	return {
+		argv,
+		exitCode,
+		stdout: stdout.text,
+		stderr: stderr.text,
+		stdoutTruncated: stdout.truncated,
+		stderrTruncated: stderr.truncated,
+		outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES,
+		timedOut,
+		error: aborted ? "operation aborted" : undefined,
+		signalCode: proc.signalCode ?? undefined,
+		timeoutMs,
+	};
+}
 function resolveCommand(
 	bin: string,
 	cwd: string,
@@ -185,31 +208,21 @@ const DEFAULT_RUNTIME: SniffInstallRuntime = {
 	resolveCommand,
 	readLauncher,
 	run: runCommand,
-	freshEnvironment(cwd, env, miseAware) {
+	neutralCwd: tmpdir(),
+	async freshEnvironment(cwd, env, miseAware, signal) {
 		if (!miseAware) return { env: { ...env }, source: "process" };
-		const result = runCommand(
-			["mise", "env", "--json"],
-			cwd,
-			env,
-			ENV_REFRESH_TIMEOUT_MS,
-		);
-		if (result.exitCode !== 0 || result.timedOut) {
+		const result = await runCommand(["mise", "env", "--json"], cwd, env, ENV_REFRESH_TIMEOUT_MS, signal);
+		if (result.exitCode !== 0 || result.timedOut || result.error) {
 			const reason = result.timedOut
 				? `mise env timed out after ${ENV_REFRESH_TIMEOUT_MS}ms`
-				: result.stderr.trim() ||
-					result.error ||
-					`mise env exited ${result.exitCode}`;
+				: result.stderr.trim() || result.error || `mise env exited ${result.exitCode}`;
 			return { env: { ...env }, source: "process", error: reason };
 		}
 		try {
 			const miseEnv = JSON.parse(result.stdout) as Record<string, string>;
 			return { env: { ...env, ...miseEnv }, source: "mise" };
 		} catch (err) {
-			return {
-				env: { ...env },
-				source: "process",
-				error: `mise env returned invalid JSON: ${err instanceof Error ? err.message : String(err)}`,
-			};
+			return { env: { ...env }, source: "process", error: `mise env returned invalid JSON: ${err instanceof Error ? err.message : String(err)}` };
 		}
 	},
 };
@@ -242,108 +255,44 @@ function isShimLauncher(path: string, launcher: string): boolean {
 	return /\bexec\s+(?:[^\s]+\/)?(?:mise|asdf|pyenv|rbenv)\b/i.test(launcher);
 }
 
-function inspectTool(
+async function inspectTool(
 	bundle: BundleName,
 	rec: ToolRec,
 	required: boolean,
 	cwd: string,
 	env: ProcessEnvironment,
 	runtime: SniffInstallRuntime,
-	validateResolvedPath?: (path: string) => string,
-): SniffToolResult {
+  validateResolvedPath?: (path: string) => string,
+  signal?: AbortSignal,
+): Promise<SniffToolResult> {
 	const effectiveEnv = projectEnvironment(rec, cwd, env);
-	const foundPath = runtime.resolveCommand(
-		rec.bin,
-		cwd,
-		resolutionEnvironment(rec, cwd, env),
-	);
+	const foundPath = runtime.resolveCommand(rec.bin, cwd, resolutionEnvironment(rec, cwd, env));
 	let resolvedPath = foundPath;
 	if (!resolvedPath) {
-		return {
-			bundle,
-			tool: rec.name,
-			bin: rec.bin,
-			required,
-			status: rec.key === "npm-local" ? "project-local-required" : "missing",
-			resolvedPath: null,
-			remediation: rec.hint,
-			attempts: [],
-		};
+		return { bundle, tool: rec.name, bin: rec.bin, required, status: rec.key === "npm-local" ? "project-local-required" : "missing", resolvedPath: null, remediation: rec.hint, attempts: [] };
 	}
 	if (validateResolvedPath) {
 		try {
 			resolvedPath = validateResolvedPath(resolvedPath);
 		} catch (error) {
-			return {
-				bundle,
-				tool: rec.name,
-				bin: rec.bin,
-				required,
-				status: "policy-blocked",
-				resolvedPath: null,
-				remediation: error instanceof Error ? error.message : String(error),
-				attempts: [],
-			};
+			return { bundle, tool: rec.name, bin: rec.bin, required, status: "policy-blocked", resolvedPath: null, remediation: error instanceof Error ? error.message : String(error), attempts: [] };
 		}
 	}
 	const launcher = runtime.readLauncher(resolvedPath);
 	if (isShimLauncher(resolvedPath, launcher)) {
-		return {
-			bundle,
-			tool: rec.name,
-			bin: rec.bin,
-			required,
-			status: "shimmed",
-			resolvedPath,
-			remediation: rec.hint,
-			attempts: [],
-		};
+		return { bundle, tool: rec.name, bin: rec.bin, required, status: "shimmed", resolvedPath, remediation: rec.hint, attempts: [] };
 	}
-
 	const attempts: ProbeAttempt[] = [];
 	const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
 	for (const args of probeArgs) {
-		const result = runtime.run(
-			[resolvedPath, ...args],
-			cwd,
-			effectiveEnv,
-			PROBE_TIMEOUT_MS,
-		);
-		attempts.push({
-			argv: result.argv,
-			exitCode: result.exitCode,
-			stderr: result.stderr,
-			timedOut: result.timedOut,
-			error: result.error,
-			timeoutMs: result.timeoutMs,
-		});
-		if (result.exitCode === 0 && !result.timedOut) {
-			return {
-				bundle,
-				tool: rec.name,
-				bin: rec.bin,
-				required,
-				status: "usable",
-				resolvedPath,
-				remediation: "",
-				attempts,
-			};
+    const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, PROBE_TIMEOUT_MS, signal);
+		attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
+		if (result.exitCode === 0 && !result.timedOut && !result.error) {
+			return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };
 		}
 	}
-
-	const status: SniffToolStatus = attempts.some((attempt) => attempt.timedOut)
-		? "timed-out"
-		: "unrunnable";
-	return {
-		bundle,
-		tool: rec.name,
-		bin: rec.bin,
-		required,
-		status,
-		resolvedPath,
-		remediation: rec.hint,
-		attempts,
-	};
+	const status: SniffToolStatus = attempts.some((attempt) => attempt.timedOut) ? "timed-out" : "unrunnable";
+	return { bundle, tool: rec.name, bin: rec.bin, required, status, resolvedPath, remediation: rec.hint, attempts };
 }
 
 function managerRoute(
@@ -445,74 +394,54 @@ function failedInstallResult(
 	return { ...initial, status, remediation, install };
 }
 
-function installOne(
+async function installOne(
 	bundle: BundleName,
 	rec: ToolRec,
-	cwd: string,
+	probeCwd: string,
+	installCwd: string,
 	preferMise: boolean,
 	dryRun: boolean,
 	env: ProcessEnvironment,
 	runtime: SniffInstallRuntime,
 	lines: string[],
-): SniffToolResult {
-	const initial = inspectTool(bundle, rec, true, cwd, env, runtime);
+	signal?: AbortSignal,
+): Promise<SniffToolResult> {
+	const initial = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
 	if (initial.status === "usable") {
 		lines.push(`  = ${rec.name} already installed (${initial.resolvedPath})`);
 		return initial;
 	}
 	if (rec.key === "npm-local") {
-		lines.push(
-			`  ! ${rec.name} is project-local — install inside the repo, not globally:`,
-		);
+		lines.push(`  ! ${rec.name} is project-local — install inside the repo, not globally:`);
 		lines.push(`      ${rec.hint}`);
 		return initial;
 	}
-
-	const manager = managerRoute(rec, preferMise, cwd, env, runtime);
+	const manager = managerRoute(rec, preferMise, installCwd, env, runtime);
 	const argv = installArgv(rec, manager);
 	if (!manager || !argv) {
-		lines.push(
-			`  ! ${rec.name}: no supported installation route — ${rec.hint}`,
-		);
+		lines.push(`  ! ${rec.name}: no supported installation route — ${rec.hint}`);
 		return failedInstallResult(initial, "unavailable-route");
 	}
 	lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
 	if (dryRun) return initial;
-
-	const install = runtime.run(argv, cwd, env, INSTALL_TIMEOUT_MS);
+	const install = await runtime.run(argv, installCwd, env, INSTALL_TIMEOUT_MS, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
-	if (install.exitCode !== 0 || install.timedOut) {
+	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	if (install.exitCode !== 0 || install.timedOut || install.error) {
 		const status = classifyInstallFailure(install);
-		lines.push(
-			`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`,
-		);
+		lines.push(`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
 		return failedInstallResult(initial, status, install);
 	}
-
-	const fresh = runtime.freshEnvironment(cwd, env, preferMise);
+	const fresh = await runtime.freshEnvironment(installCwd, env, preferMise, signal);
 	if (fresh.error) {
-		lines.push(
-			`      (unavailable-route — fresh environment failed: ${fresh.error})`,
-		);
-		return failedInstallResult(
-			initial,
-			"unavailable-route",
-			install,
-			`${fresh.error}; ${rec.hint}`,
-		);
+		lines.push(`      (unavailable-route — fresh environment failed: ${fresh.error})`);
+		return failedInstallResult(initial, "unavailable-route", install, `${fresh.error}; ${rec.hint}`);
 	}
-	const verified = inspectTool(bundle, rec, true, cwd, fresh.env, runtime);
+	const verified = await inspectTool(bundle, rec, true, probeCwd, fresh.env, runtime);
 	verified.install = install;
-	if (verified.status === "usable") {
-		lines.push(
-			`      verified usable in fresh ${fresh.source} environment (${verified.resolvedPath})`,
-		);
-	} else {
-		lines.push(
-			`      (${verified.status} after successful install; resolved=${verified.resolvedPath ?? "<unresolved>"})`,
-		);
-	}
+	if (verified.status === "usable") lines.push(`      verified usable in fresh ${fresh.source} environment (${verified.resolvedPath})`);
+	else lines.push(`      (${verified.status} after successful install; resolved=${verified.resolvedPath ?? "<unresolved>"})`);
 	return verified;
 }
 
@@ -554,6 +483,7 @@ export type SniffInstallOptions = {
 	cwd?: string;
 	env?: ProcessEnvironment;
 	runtime?: SniffInstallRuntime;
+	signal?: AbortSignal;
 };
 
 export type SniffAnalyzerRunOptions = {
@@ -561,6 +491,7 @@ export type SniffAnalyzerRunOptions = {
 	manifestId: string;
 	analyzer: string;
 	runtime?: SniffInstallRuntime;
+	signal?: AbortSignal;
 };
 
 export type SniffAnalyzerOutcome =
@@ -616,7 +547,7 @@ function validExitContract(codes: readonly number[]): boolean {
 	return codes.length > 0 && codes.includes(0) && new Set(codes).size === codes.length && codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 255);
 }
 
-export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRunResult {
+export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<SniffAnalyzerRunResult> {
 	let authorization: AnalyzerRunAuthorization;
 	try {
 		authorization = authorizeAnalyzerRun(opts.capability, opts.manifestId, opts.analyzer);
@@ -641,26 +572,11 @@ export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRu
 	if (!validExitContract(acceptedExitCodes)) {
 		abandon();
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
-	}
-	const env = analyzerEnvironment(authorization.home);
-	const preflight = inspectTool(
-		catalog.bundle,
-		catalog.rec,
-		true,
-		authorization.target.root,
-		env,
-		runtime,
-		(path) => hostAnalyzerExecutable(path, authorization.target.root),
-	);
+  const env = analyzerEnvironment(authorization.home);
+  const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
-		return {
-			ok: false,
-			report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`,
-			preflight,
-			acceptedExitCodes,
-			outcome: "not-run",
-		};
+		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
 	const executable = preflight.resolvedPath;
 	try {
@@ -670,25 +586,14 @@ export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRu
 		const message = error instanceof Error ? error.message : String(error);
 		return { ok: false, report: `sniff analyzer launch blocked: ${message}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
+	const argv = [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv];
+	const timeoutMs = Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs);
 	let execution: CommandResult;
 	let completionError: string | undefined;
 	try {
-		execution = runtime.run(
-			[executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv],
-			authorization.target.root,
-			env,
-			Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs),
-		);
+		execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal);
 	} catch (error) {
-		execution = {
-			argv: [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv],
-			exitCode: null,
-			stdout: "",
-			stderr: "",
-			timedOut: false,
-			error: error instanceof Error ? error.message : String(error),
-			timeoutMs: Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs),
-		};
+		execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
 	}
 	try {
 		completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
@@ -697,9 +602,7 @@ export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRu
 	}
 	const completed = !completionError && !execution.timedOut && !execution.error && execution.exitCode !== null;
 	const accepted = completed && acceptedExitCodes.includes(execution.exitCode as number);
-	const outcome: SniffAnalyzerOutcome = accepted
-		? execution.exitCode === 0 ? "completed" : "completed-with-findings"
-		: completed ? "rejected-exit" : "not-run";
+	const outcome: SniffAnalyzerOutcome = accepted ? execution.exitCode === 0 ? "completed" : "completed-with-findings" : completed ? "rejected-exit" : "not-run";
 	return {
 		ok: accepted,
 		report: accepted
@@ -713,107 +616,68 @@ export function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): SniffAnalyzerRu
 		execution,
 	};
 }
-export function runSniffInstall(opts: SniffInstallOptions): SniffInstallResult {
+export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffInstallResult> {
 	const mode: SniffInstallMode = opts.mode ?? "probe";
-	const cwd = opts.cwd ?? process.cwd();
+	const probeCwd = opts.cwd ?? process.cwd();
 	const env = { ...process.env, ...opts.env };
 	const runtime = opts.runtime ?? DEFAULT_RUNTIME;
-	const preferMise =
-		!opts.noMise && runtime.resolveCommand("mise", cwd, env) !== null;
+	const installCwd = runtime.neutralCwd ?? tmpdir();
+	const preferMise = !opts.noMise && runtime.resolveCommand("mise", installCwd, env) !== null;
 	const lines: string[] = [];
 	const tools: SniffToolResult[] = [];
-
 	if (mode === "probe") {
-		lines.push(
-			"sniff tool probe (all tools optional; missing ones are skipped, not fatal)",
-		);
+		lines.push("sniff tool probe (all tools optional; missing ones are skipped, not fatal)");
 		for (const bundle of BUNDLES) {
 			lines.push("", `[${bundle}]`);
-			const bundleResults = TOOLS[bundle].map((rec) =>
-				inspectTool(bundle, rec, false, cwd, env, runtime),
-			);
+			const bundleResults: SniffToolResult[] = [];
+			for (const rec of TOOLS[bundle]) bundleResults.push(await inspectTool(bundle, rec, false, probeCwd, env, runtime));
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
 			const counts = new Map<SniffToolStatus, number>();
-			for (const result of bundleResults)
-				counts.set(result.status, (counts.get(result.status) ?? 0) + 1);
-			lines.push(
-				`  (${[...counts].map(([status, count]) => `${count} ${status}`).join(", ")})`,
-			);
+			for (const result of bundleResults) counts.set(result.status, (counts.get(result.status) ?? 0) + 1);
+			lines.push(`  (${[...counts].map(([status, count]) => `${count} ${status}`).join(", ")})`);
 		}
-		lines.push(
-			"",
-			"Install a bundle with: sniff_install_tools mode=install bundles=[<bundle>]",
-		);
+		lines.push("", "Install a bundle with: sniff_install_tools mode=install bundles=[<bundle>]");
 		return { ok: true, report: lines.join("\n"), tools };
 	}
-
 	if (mode === "list") {
 		for (const bundle of BUNDLES) {
 			lines.push("", `[${bundle}]`);
 			for (const rec of TOOLS[bundle]) {
 				const hostPackages = "hostPackages" in rec ? rec.hostPackages : [];
-				const hosted = hostPackages.length
-					? ` [host packages: ${hostPackages.join(", ")}]`
-					: "";
+				const hosted = hostPackages.length ? ` [host packages: ${hostPackages.join(", ")}]` : "";
 				lines.push(`  ${rec.name.padEnd(18)} ${rec.hint}${hosted}`);
 			}
 		}
 		return { ok: true, report: lines.join("\n"), tools };
 	}
-
 	const selected = selectedBundles(opts, mode);
-	if (typeof selected === "string")
-		return { ok: false, report: selected, tools };
+	if (typeof selected === "string") return { ok: false, report: selected, tools };
 	if (mode === "diagnose") {
-		lines.push(
-			"sniff bundle diagnostics (inventory only; does not authorize analyzer execution)",
-		);
+		lines.push("sniff bundle diagnostics (inventory only; does not authorize analyzer execution)");
 		for (const bundle of selected) {
 			lines.push("", `[${bundle}]`);
 			for (const rec of TOOLS[bundle]) {
-				const result = inspectTool(bundle, rec, true, cwd, env, runtime);
+				const result = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
 				tools.push(result);
-				lines.push(
-					`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`,
-				);
+				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}
 		}
 		const failures = tools.filter((result) => result.status !== "usable");
-		lines.push(
-			"",
-			`diagnose: ${tools.length - failures.length} usable, ${failures.length} unavailable catalog entry/entries; use sniff_run_analyzer for authoritative per-run preflight`,
-		);
+		lines.push("", `diagnose: ${tools.length - failures.length} usable, ${failures.length} unavailable catalog entry/entries; use sniff_run_analyzer for authoritative per-run preflight`);
 		return { ok: failures.length === 0, report: lines.join("\n"), tools };
 	}
-
 	if (opts.dryRun) lines.push("(dry run — no changes will be made)");
 	for (const bundle of selected) {
 		lines.push("", `[${bundle}]`);
-		for (const rec of TOOLS[bundle]) {
-			tools.push(
-				installOne(
-					bundle,
-					rec,
-					cwd,
-					preferMise,
-					Boolean(opts.dryRun),
-					env,
-					runtime,
-					lines,
-				),
-			);
-		}
+		for (const rec of TOOLS[bundle]) tools.push(await installOne(bundle, rec, probeCwd, installCwd, preferMise, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
 	}
 	const failures = tools.filter((result) => result.status !== "usable");
 	if (opts.dryRun) {
 		lines.push("", "Dry run complete; no tool state changed.");
 		return { ok: true, report: lines.join("\n"), tools };
 	}
-	lines.push(
-		"",
-		`install: ${tools.length - failures.length} usable, ${failures.length} failure(s) after verification`,
-	);
+	lines.push("", `install: ${tools.length - failures.length} usable, ${failures.length} failure(s) after verification`);
 	return { ok: failures.length === 0, report: lines.join("\n"), tools };
 }
 

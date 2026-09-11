@@ -9,23 +9,20 @@ import {
 import { cancelRunLease } from "../src/core/run-registry.ts";
 
 function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): SniffIntakeRuntime {
-  return {
-    confirmInteractive: async ({ target, files }) => {
-      if (!ctx.hasUI) return false;
-      return ctx.ui.confirm("Confirm Sniff intake", `Inspect ${files} files from ${target}?`);
-    },
-    authority: {
-      authorize: async ({ target, intent }) => {
-        if (!ctx.hasUI) {
-          return hostAuthorized
-            ? { actor: "extension-host", reason: "The host executed the read-approved sniff_intake tool." }
-            : false;
-        }
-        const granted = await ctx.ui.confirm("Authorize noninteractive Sniff intake", `Authorize ${intent} for ${target.label}?`);
-        return granted ? { actor: "interactive-user", reason: "Confirmed through the OMP UI boundary." } : false;
-      },
-    },
-  };
+	return {
+		confirmInteractive: async (request) => {
+			if (!ctx.hasUI) return false;
+			const approved = await ctx.ui.confirm("Confirm Sniff intake", `Inspect ${request.files.length} files from ${request.target.label}?`);
+			return approved ? { acceptedDigest: request.digest, actor: "interactive-user" } : false;
+		},
+		authority: {
+			authorize: async (request) => {
+				if (!ctx.hasUI) return hostAuthorized ? { acceptedDigest: request.digest, actor: "extension-host", reason: "The host executed the read-approved sniff_intake tool." } : false;
+				const granted = await ctx.ui.confirm("Authorize noninteractive Sniff intake", `Authorize ${request.intent} for ${request.target.label}?`);
+				return granted ? { acceptedDigest: request.digest, actor: "interactive-user", reason: "Confirmed through the OMP UI boundary." } : false;
+			},
+		},
+	};
 }
 
 export default function sniffIntakeTool(pi: ExtensionAPI): void {

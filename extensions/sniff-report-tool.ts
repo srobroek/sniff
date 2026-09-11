@@ -20,7 +20,7 @@ export default function sniffReportTool(pi: ExtensionAPI): void {
     }) as unknown as TSchema,
     execute: async (_id, params: SniffReportToolOptions) => {
       try {
-        const result = runSniffReportTool(params);
+        const result = await runSniffReportTool(params);
         return {
           content: [{ type: "text", text: result.artifacts.markdown }],
           details: { ok: true, report: result.artifacts.report, receipt: result.artifacts.receipt, savedPaths: result.savedPaths },

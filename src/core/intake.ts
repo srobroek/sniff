@@ -23,16 +23,14 @@ export type IntakeBudget = {
 };
 
 export type IntakeAuthorization = {
-  readonly granted: true;
+  readonly acceptedDigest: string;
   readonly actor?: string;
   readonly reason?: string;
-  readonly acceptedDigest?: string;
 };
 
 export type IntakeConfirmation = {
-  readonly confirmed: boolean;
+  readonly acceptedDigest: string;
   readonly actor?: string;
-  readonly acceptedDigest?: string;
 };
 
 export type IntakeInput = {
@@ -99,8 +97,8 @@ export type RunManifest = {
   readonly budget: IntakeBudget;
   readonly defaults: readonly AppliedDefault[];
   readonly gaps: readonly IntakeGap[];
-  readonly authorization: { readonly required: boolean; readonly granted: boolean; readonly actor?: string; readonly reason?: string; readonly acceptedDigest?: string };
-  readonly confirmation: { readonly required: boolean; readonly confirmed: boolean; readonly actor?: string; readonly acceptedDigest?: string; readonly digest: string };
+  readonly authorization: { readonly required: boolean; readonly actor?: string; readonly reason?: string; readonly acceptedDigest?: string };
+  readonly confirmation: { readonly required: boolean; readonly actor?: string; readonly acceptedDigest?: string; readonly digest: string };
   readonly route: { readonly mode: "interactive" | "noninteractive"; readonly materialization: ResolvedTarget["materialization"]; readonly trust: TargetTrust; readonly provider?: string };
 };
 
@@ -261,7 +259,7 @@ export function canonicalConfirmationRequest(manifest: RunManifest): CanonicalCo
   return freezeDeep({ ...plan, digest });
 }
 
-function buildManifest(input: ManifestInput, authorization?: { readonly actor?: string; readonly reason?: string; readonly acceptedDigest?: string }, allowUnconfirmed = false): RunManifest {
+function buildManifest(input: ManifestInput, authorization?: IntakeAuthorization, allowUnconfirmed = false): RunManifest {
   if (input.analyzers) throw new Error("Analyzer dispositions are derived from the trusted catalog and cannot be supplied by callers");
   if (input.authorization) throw new Error("Authorization requires a trusted confirmation boundary");
   validateBudget(input.budget ?? {});
@@ -286,17 +284,16 @@ function buildManifest(input: ManifestInput, authorization?: { readonly actor?: 
     budget: structuredClone(input.budget ?? {}),
     defaults: cloneSorted(input.defaults ?? []),
     gaps: cloneSorted(input.gaps ?? []),
-    authorization: { required: mode === "noninteractive", granted: mode === "noninteractive" && authorization !== undefined, actor: authorization?.actor, reason: authorization?.reason, acceptedDigest: authorization?.acceptedDigest },
-    confirmation: { required: mode === "interactive", confirmed: input.confirmation?.confirmed === true, actor: input.confirmation?.actor, acceptedDigest: input.confirmation?.acceptedDigest, digest: "" },
+    authorization: { required: mode === "noninteractive", actor: authorization?.actor, reason: authorization?.reason, acceptedDigest: authorization?.acceptedDigest },
+    confirmation: { required: mode === "interactive", actor: input.confirmation?.actor, acceptedDigest: input.confirmation?.acceptedDigest, digest: "" },
     route,
   };
   const digest = `confirmation-${createHash("sha256").update(stableJson(confirmationPlan(content))).digest("hex")}`;
   const finalizedContent: Omit<RunManifest, "manifestId"> = { ...content, confirmation: { ...content.confirmation, digest } };
-  if (mode === "noninteractive" && !authorization && !allowUnconfirmed) throw new Error("Noninteractive intake requires a trusted confirmation receipt");
-  if (mode === "interactive" && !finalizedContent.confirmation.confirmed && !allowUnconfirmed) throw new Error("Interactive intake requires a trusted confirmation receipt");
+  if (!allowUnconfirmed && mode === "noninteractive" && !authorization) throw new Error("Noninteractive intake requires a trusted confirmation receipt");
+  if (!allowUnconfirmed && mode === "interactive" && !input.confirmation) throw new Error("Interactive intake requires a trusted confirmation receipt");
   const acceptedDigest = mode === "noninteractive" ? authorization?.acceptedDigest : input.confirmation?.acceptedDigest;
-  if (!allowUnconfirmed && acceptedDigest !== undefined && acceptedDigest !== digest) throw new Error("Trusted confirmation digest does not match the resolved intake plan");
-  if (!allowUnconfirmed && ((mode === "noninteractive" && !acceptedDigest) || (mode === "interactive" && !finalizedContent.confirmation.confirmed))) throw new Error("Trusted confirmation digest is required");
+  if (!allowUnconfirmed && acceptedDigest !== digest) throw new Error("Trusted confirmation digest does not match the resolved intake plan");
   validateAnalyzerDispositions(finalizedContent.analyzers, trust);
   return freezeDeep({ ...finalizedContent, manifestId: manifestId(finalizedContent) });
 }
@@ -305,13 +302,14 @@ export function createRunManifest(input: ManifestInput): RunManifest {
   if (input.route?.mode === "noninteractive") throw new Error("Noninteractive intake requires a trusted confirmation boundary");
   const scopeMode = input.scopeMode ?? (input.intent === "plan-only" ? "plan-only" : "full");
   const digestInput = { ...input, scopeMode };
-  const provisional = buildManifest({ ...digestInput, confirmation: { confirmed: true, acceptedDigest: undefined } }, undefined, true);
+  const provisional = buildManifest({ ...digestInput, confirmation: undefined }, undefined, true);
   const digest = canonicalConfirmationRequest(provisional).digest;
-  return buildManifest({ ...digestInput, confirmation: { ...input.confirmation, confirmed: input.confirmation?.confirmed !== false, acceptedDigest: input.confirmation?.acceptedDigest ?? digest } }, undefined);
+  const confirmation = input.confirmation ?? { acceptedDigest: digest };
+  return buildManifest({ ...digestInput, confirmation }, undefined);
 }
 
 export type IntakeAuthority = {
-  authorize(plan: CanonicalConfirmationRequest): Promise<false | { readonly acceptedDigest?: string; readonly actor?: string; readonly reason?: string } | true>;
+  authorize(plan: CanonicalConfirmationRequest): Promise<false | IntakeAuthorization>;
 };
 
 export async function buildNoninteractiveManifest(input: ManifestInput, authority?: IntakeAuthority): Promise<RunManifest> {
@@ -325,11 +323,10 @@ export async function buildNoninteractiveManifest(input: ManifestInput, authorit
   if (!input.budget) defaults.push({ field: "budget", value: {}, reason: "No budget was supplied; analyzer availability remains the limiting bound." });
   const gaps: IntakeGap[] = structuredClone([...(input.gaps ?? [])]);
   if (!input.budget) gaps.push({ field: "budget", reason: "No explicit budget was provided in noninteractive mode.", impact: "medium" });
-  const provisional = buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, {}, true);
+  const provisional = buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, undefined, true);
   const request = canonicalConfirmationRequest(provisional);
-  const result = await authority.authorize(request);
-  if (!result) throw new Error("Noninteractive intake authorization was denied");
-  const receipt = result === true ? { acceptedDigest: request.digest } : { ...result, acceptedDigest: result.acceptedDigest ?? request.digest };
+  const receipt = await authority.authorize(request);
+  if (!receipt) throw new Error("Noninteractive intake authorization was denied");
   if (receipt.acceptedDigest !== request.digest) throw new Error("Trusted confirmation digest does not match the resolved intake plan");
   return buildManifest({ ...input, defaults, gaps, route: { ...input.route, mode: "noninteractive" } }, receipt);
 }
@@ -342,12 +339,11 @@ export function validateRunManifest(manifest: RunManifest): void {
   if (!SCOPE_MODES.includes(manifest.scopeMode)) throw new Error("Run manifest scope mode is invalid");
   const request = canonicalConfirmationRequest(manifest);
   if (manifest.confirmation.digest !== request.digest) throw new Error("Run manifest confirmation digest does not match its plan");
-  if (manifest.authorization.required !== (manifest.route.mode === "noninteractive") || (manifest.authorization.required && (!manifest.authorization.granted || manifest.authorization.acceptedDigest !== request.digest))) throw new Error("Run manifest authorization is inconsistent with its route");
-  if (manifest.confirmation.required !== (manifest.route.mode === "interactive") || (manifest.confirmation.required && (!manifest.confirmation.confirmed || (manifest.confirmation.acceptedDigest !== undefined && manifest.confirmation.acceptedDigest !== request.digest)))) throw new Error("Run manifest confirmation is inconsistent with its route");
+  if (manifest.authorization.required !== (manifest.route.mode === "noninteractive") || (manifest.authorization.required && manifest.authorization.acceptedDigest !== request.digest)) throw new Error("Run manifest authorization is inconsistent with its route");
+  if (manifest.confirmation.required !== (manifest.route.mode === "interactive") || (manifest.confirmation.required && manifest.confirmation.acceptedDigest !== request.digest)) throw new Error("Run manifest confirmation is inconsistent with its route");
   validateBudget(manifest.budget);
   validateAnalyzerDispositions(manifest.analyzers, manifest.route.trust);
 }
-
 export function canonicalManifestJson(manifest: RunManifest): string {
   validateRunManifest(manifest);
   return stableJson(manifest);

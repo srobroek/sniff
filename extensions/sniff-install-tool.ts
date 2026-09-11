@@ -22,9 +22,9 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
       noMise: z.boolean().optional().describe("Ignore mise even if present"),
       path: z.string().optional().describe("Repo cwd for project-local tools and mise-local pins"),
     }) as unknown as TSchema,
-    execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; noMise?: boolean; path?: string }, _signal, _onUpdate, ctx) => {
+    execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; noMise?: boolean; path?: string }, signal, _onUpdate, ctx) => {
       try {
-        const result = runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd() });
+        const result = await runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd(), signal });
         return { content: [{ type: "text", text: result.report }], details: { ok: result.ok, tools: result.tools }, isError: !result.ok };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -42,10 +42,10 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
       manifestId: z.string().describe("Manifest ID returned by sniff_intake"),
       analyzer: z.string().describe("Selected analyzer recipe ID from the issued manifest"),
     }) as unknown as TSchema,
-    execute: async (_id, params: { capability: string; manifestId: string; analyzer: string }) => {
+    execute: async (_id, params: { capability: string; manifestId: string; analyzer: string }, signal) => {
       try {
-        const result = runSniffAnalyzer(params);
-        const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}\n\nstderr:\n${result.execution.stderr}` : result.report;
+        const result = await runSniffAnalyzer({ ...params, signal });
+        const text = result.execution ? `${result.report}\n\nstdout:\n${result.execution.stdout}${result.execution.stdoutTruncated ? "\n[stdout truncated]" : ""}\n\nstderr:\n${result.execution.stderr}${result.execution.stderrTruncated ? "\n[stderr truncated]" : ""}` : result.report;
         return { content: [{ type: "text", text }], details: { ok: result.ok, preflight: result.preflight, acceptedExitCodes: result.acceptedExitCodes, outcome: result.outcome }, isError: !result.ok };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
