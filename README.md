@@ -118,4 +118,4 @@ The check validates generated harness skills. It validates MCP bundles. It runs 
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+Apache-2.0.

@@ -116,7 +116,7 @@ The native probes ran on 2026-09-11.
 
 Each probe used a copied local marketplace source or copied installed cache.
 
-Remote publication commands were not tested. Validation used copied local marketplace sources. Public-main or release publication remains the delivery gate; the commands in [Getting started](getting-started.md) are prospective until that publication occurs.
+Remote publication commands were not tested. Local checks used copied marketplace sources. Publication to public main or a release remains the delivery gate, so commands in [Getting started](getting-started.md) are prospective until publication occurs.
 
 ### OMP `omp/18.1.17`
 
@@ -136,7 +136,7 @@ A noninteractive `plan-only` intake issued a manifest and lease.
 
 `sniff_cancel` released that lease.
 
-A no-UI interactive intake attempt was denied.
+OMP denied the no-UI interactive intake attempt.
 
 It issued no lease.
 
