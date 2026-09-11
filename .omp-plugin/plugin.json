@@ -1,0 +1,6 @@
+{
+  "name": "sniff",
+  "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
+  "version": "0.1.0",
+  "category": "development"
+}
