@@ -170,9 +170,10 @@ export function buildSniffReport(value: unknown): SniffReport {
   const findings = input.findings
     .map((finding) => ({ ...finding, location: { ...finding.location, path: normalizePath(finding.location.path) }, id: deterministicFindingId(finding) }))
     .sort((left, right) => compareText(left.id, right.id));
-  const coverage = [...input.coverage].sort((left, right) =>
-    compareText(`${left.dimension}\0${left.tool}\0${left.analysisClass}`, `${right.dimension}\0${right.tool}\0${right.analysisClass}`),
-  );
+  const coverage = [...input.coverage].sort((left, right) => {
+    const keyOrder = compareText(`${left.dimension}\0${left.tool}\0${left.analysisClass}`, `${right.dimension}\0${right.tool}\0${right.analysisClass}`);
+    return keyOrder === 0 ? compareText(stableJson(left), stableJson(right)) : keyOrder;
+  });
   const withoutId: Omit<SniffReport, "reportId"> = {
     schemaVersion: SNIFF_REPORT_SCHEMA_VERSION,
     generatedAt: input.generatedAt,
@@ -301,15 +302,16 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
 }
 
 export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
-  validateSniffReport(artifacts.report);
-  requireCondition(sha256(artifacts.json) === artifacts.receipt.reportSha256, "receipt does not match JSON artifact");
-  requireCondition(sha256(artifacts.markdown) === artifacts.receipt.markdownSha256, "receipt does not match Markdown artifact");
+  const canonical = createReportArtifacts(artifacts.report);
+  requireCondition(artifacts.json === canonical.json, "JSON artifact does not match report");
+  requireCondition(artifacts.markdown === canonical.markdown, "Markdown artifact does not match report");
+  requireCondition(stableJson(artifacts.receipt) === stableJson(canonical.receipt), "receipt does not match report artifacts");
   mkdirSync(directory, { recursive: true });
-  const base = artifacts.report.reportId;
+  const base = canonical.report.reportId;
   const files = [
-    [join(directory, `${base}.json`), artifacts.json],
-    [join(directory, `${base}.md`), artifacts.markdown],
-    [join(directory, `${base}.receipt.json`), canonicalJson(artifacts.receipt)],
+    [join(directory, `${base}.json`), canonical.json],
+    [join(directory, `${base}.md`), canonical.markdown],
+    [join(directory, `${base}.receipt.json`), canonicalJson(canonical.receipt)],
   ] as const;
   const collision = files.find(([path]) => existsSync(path));
   if (collision) throw new Error(`Sniff report artifact already exists: ${collision[0]}`);

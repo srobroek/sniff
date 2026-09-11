@@ -167,15 +167,26 @@ describe("structured Sniff reports", () => {
     expect(() => buildSniffReport(reportInput([finding({ smell: { name: "Long Method", url: "javascript:alert(1)" } })]))).toThrow(
       "pattern",
     );
+    const impossibleDate = reportInput();
+    impossibleDate.generatedAt = "2026-02-31T10:00:00Z";
+    expect(() => buildSniffReport(impossibleDate)).toThrow("format");
+    expect(() => buildSniffReport(reportInput([finding({ smell: { name: "Long Method", url: "https://refactoring.guru/foo)<script>" } })]))).toThrow(
+      "pattern",
+    );
   });
 
   test("canonicalizes equivalent object and collection order", () => {
     const firstInput = reportInput([finding(), finding({ stableKey: "review:second", location: { path: "src/second.ts", line: 3, anchor: "second" } })]);
     firstInput.extensions = { zeta: { second: 2, first: 1 }, alpha: true };
     firstInput.target.languages = ["TypeScript", "JavaScript"];
+    firstInput.coverage = [
+      { dimension: "complexity", tool: "biome", analysisClass: "local", status: "skipped", notes: "Unavailable." },
+      { dimension: "complexity", tool: "biome", analysisClass: "local", status: "ran", notes: "Completed." },
+    ];
     const secondInput = reportInput([...firstInput.findings].reverse());
     secondInput.extensions = { alpha: true, zeta: { first: 1, second: 2 } };
     secondInput.target.languages = ["JavaScript", "TypeScript"];
+    secondInput.coverage = [...firstInput.coverage].reverse();
 
     const first = createReportArtifacts(buildSniffReport(firstInput));
     const second = createReportArtifacts(buildSniffReport(secondInput));
@@ -218,6 +229,17 @@ describe("structured Sniff reports", () => {
     }
   });
 
+
+  test("refuses artifacts whose bytes or receipt drift from the report", () => {
+    const directory = mkdtempSync(join(tmpdir(), "sniff-report-mismatch-"));
+    temporaryDirectories.push(directory);
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    expect(() => saveReportArtifacts({ ...artifacts, json: "{}\n" }, directory)).toThrow("JSON artifact does not match");
+    expect(() => saveReportArtifacts({ ...artifacts, receipt: { ...artifacts.receipt, findingCount: 99 } }, directory)).toThrow(
+      "receipt does not match",
+    );
+    expect(readdirSync(directory)).toEqual([]);
+  });
   test("tool rendering remains ephemeral unless save is explicit", () => {
     const rendered = runSniffReportTool({ report: reportInput() });
     expect(rendered.savedPaths).toEqual([]);
