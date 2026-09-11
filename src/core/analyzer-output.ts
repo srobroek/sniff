@@ -101,10 +101,9 @@ function integer(value: unknown, label: string, state: ParseState, minimum = 0):
 	return number;
 }
 
-function lizardSeverity(ccn: number): string {
-	if (ccn >= 20) return "HIGH";
-	if (ccn >= 10) return "MEDIUM";
-	return "LOW";
+function lizardSeverity(ccn: number, length: number, params: number): string {
+	if (ccn > 20 || length > 100 || params > 10) return "HIGH";
+	return "MEDIUM";
 }
 
 function parseCsv(stdout: string): { rows: string[][]; malformed: boolean } {
@@ -219,13 +218,13 @@ const indexes = {
 			addReason(state, "Lizard finding path escaped the authorized target root");
 			continue;
 		}
-		if (ccn < 10) continue;
+		if (ccn <= 10 && length <= 50 && params <= 5) continue;
 		if (observations.length >= ANALYZER_MAX_OBSERVATIONS) {
 			addReason(state, `Lizard observations exceeded the bounded limit of ${ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US")}`);
 			break;
 		}
 		const message = `${functionName || "<anonymous>"}: cyclomatic complexity ${ccn} (NLOC ${nloc}, ${params} parameters, ${length} lines)`;
-		observations.push({ ruleId: recipeId, path, start: { line, column: 1 }, message, severity: lizardSeverity(ccn) });
+		observations.push({ ruleId: recipeId, path, start: { line, column: 1 }, message, severity: lizardSeverity(ccn, length, params) });
 	}
 	const reason = state.reasons.length ? state.reasons.join("; ") : undefined;
 	return { observations, capture: capture(stdout, false, Boolean(reason), reason) };

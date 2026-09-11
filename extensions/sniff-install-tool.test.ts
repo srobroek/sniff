@@ -152,16 +152,18 @@ describe("bounded analyzer output projections", () => {
 		writeFileSync(join(root, "src", "main.ts"), "function main() {}\n");
 		const parsed = parseLizardOutput([
 			"NLOC,CCN,token,PARAM,length,location,file,function,long_name",
-			`14,12,50,2,20,4-23,${join(root, "src", "main.ts")},main,main`,
-			`8,2,20,1,10,24-33,${join(root, "src", "main.ts")},helper,helper`,
+			`14,12,50,2,20,4-23,${join(root, "src", "main.ts")},complex,complex`,
+			`60,2,50,2,51,24-74,${join(root, "src", "main.ts")},long,long`,
+			`10,2,50,6,10,75-84,${join(root, "src", "main.ts")},wide,wide`,
+			`50,10,50,5,50,85-134,${join(root, "src", "main.ts")},boundary,boundary`,
 		].join("\n"), root);
-		expect(parsed.observations).toEqual([{
-			ruleId: "lizard:complexity",
-			path: "src/main.ts",
-			start: { line: 4, column: 1 },
-			message: "main: cyclomatic complexity 12 (NLOC 14, 2 parameters, 20 lines)",
-			severity: "MEDIUM",
-		}]);
+		expect(parsed.observations).toHaveLength(3);
+		expect(parsed.observations.map(({ message }) => message)).toEqual([
+			"complex: cyclomatic complexity 12 (NLOC 14, 2 parameters, 20 lines)",
+			"long: cyclomatic complexity 2 (NLOC 60, 2 parameters, 51 lines)",
+			"wide: cyclomatic complexity 2 (NLOC 10, 6 parameters, 10 lines)",
+		]);
+		expect(parsed.observations.map(({ severity }) => severity)).toEqual(["MEDIUM", "MEDIUM", "MEDIUM"]);
 		expect(parsed.capture.incomplete).toBe(false);
 		expect(parsed.capture.digest).toMatch(/^[a-f0-9]{64}$/);
 	});
@@ -194,7 +196,7 @@ describe("bounded analyzer output projections", () => {
 		expect(truncated.observations).toEqual([]);
 		expect(truncated.capture.truncated).toBe(true);
 		expect(truncated.capture.incomplete).toBe(true);
-		const rows = Array.from({ length: ANALYZER_MAX_OBSERVATIONS + 1 }, (_, index) => `1,10,1,0,1,${index + 1}-${index + 1},src/file-${index}.ts,fn${index},fn${index}`);
+		const rows = Array.from({ length: ANALYZER_MAX_OBSERVATIONS + 1 }, (_, index) => `1,11,1,0,1,${index + 1}-${index + 1},src/file-${index}.ts,fn${index},fn${index}`);
 		const bounded = parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...rows].join("\n"), root);
 		expect(bounded.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
 		expect(bounded.capture.incomplete).toBe(true);

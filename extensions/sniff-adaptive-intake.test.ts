@@ -56,6 +56,8 @@ function initializeRepository(): { root: string; git: (...args: string[]) => str
   git("init", "-q");
   git("config", "user.email", "sniff@example.invalid");
   git("config", "user.name", "Sniff Test");
+  git("config", "commit.gpgsign", "false");
+  git("config", "core.hooksPath", "/dev/null");
   return { root, git };
 }
 

@@ -107,7 +107,7 @@ Sniff records each analyzer as selected, skipped, or unavailable. It rejects fuz
 - `opengrep:hardcoded-values`: tool `opengrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
 - `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; local; reads target configuration.
 
-If a function has cyclomatic complexity of at least 10, Lizard emits an observation.
+When cyclomatic complexity exceeds 10, function length exceeds 50, or parameter count exceeds 5, Lizard emits an observation.
 
 The security catalog uses these three recipe IDs. Each recipe is default-enabled. A capability authorizes a selected recipe once for the confirmed target.
 

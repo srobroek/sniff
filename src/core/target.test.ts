@@ -23,6 +23,7 @@ function repository(): { readonly root: string; readonly git: (...args: string[]
   git("config", "user.email", "sniff@example.invalid");
   git("config", "user.name", "Sniff Test");
   git("config", "commit.gpgsign", "false");
+  git("config", "core.hooksPath", "/dev/null");
   return { root, git };
 }
 

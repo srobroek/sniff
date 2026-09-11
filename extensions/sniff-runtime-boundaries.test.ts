@@ -31,6 +31,8 @@ function repository(): { root: string; git: (...args: string[]) => string } {
   git("init", "-q");
   git("config", "user.email", "sniff@example.invalid");
   git("config", "user.name", "Sniff Test");
+  git("config", "commit.gpgsign", "false");
+  git("config", "core.hooksPath", "/dev/null");
   return { root, git };
 }
 
@@ -320,10 +322,24 @@ describe("adaptive runtime boundaries", () => {
     const executions = calls.filter(({ argv }) => !argv.includes("--version"));
     expect(executions).toHaveLength(2);
     expect(executions.find(({ argv }) => argv[0]?.endsWith("opengrep"))?.argv).toContain("-f");
-    expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.argv).toContain("--csv");
+    expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.argv.slice(1, 8)).toEqual(["--csv", "-C", "10", "-L", "50", "-a", "5"]);
     expect(executions.every(({ env }) => env.SNIFF_TEST_SECRET === undefined && env.HOME?.includes("sniff-run-home-"))).toBe(true);
     cancelRunLease(lease.capability, lease.manifestId);
+
     delete process.env.SNIFF_TEST_SECRET;
+  });
+  test("accepts Lizard's warning exit and projects every configured threshold", async () => {
+    const { lease, manifest } = localLease();
+    const calls: AnalyzerCall[] = [];
+    const runtime = analyzerRuntime(calls, {
+      run: async (argv, cwd, env, timeoutMs) => {
+        calls.push({ argv, cwd, env: { ...env }, timeoutMs });
+        const scan = argv[0]?.endsWith("lizard") && !argv.includes("--version");
+        return { argv, exitCode: scan ? 1 : 0, stdout: scan ? "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n60,2,1,0,51,1-51,a.ts,long,long\n" : "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
+      },
+    });
+    expect(await runSniffAnalyzer({ capability: lease.capability, manifestId: manifest.manifestId, analyzer: "lizard:complexity", runtime })).toMatchObject({ ok: true, outcome: "completed-with-findings" });
+    cancelRunLease(lease.capability, manifest.manifestId);
   });
 
   test("revalidates every canonical file immediately before analyzer execution", async () => {
