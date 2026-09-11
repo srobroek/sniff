@@ -383,8 +383,8 @@ function errorDetails(error: unknown): { code: string; message: string } {
   if (error instanceof SniffMcpError) return { code: error.code, message: error.message };
   if (error instanceof Error && error.name === "AbortError") return { code: "cancelled", message: "The MCP request was cancelled." };
   const message = error instanceof Error ? error.message : "Sniff operation failed";
-  if (/capability|manifest|lease|reservation|authorization|authorized/i.test(message)) return { code: "invalid_capability", message: "The capability or manifest is invalid, expired, or already finalized." };
-  if (/confirm|elicitation|denied/i.test(message)) return { code: "confirmation_required", message: "Trusted MCP confirmation was not accepted." };
+  if (/confirm|elicitation|denied|authorization/i.test(message)) return { code: "confirmation_required", message: "Trusted MCP confirmation was not accepted." };
+  if (/capability|manifest|lease|reservation/i.test(message)) return { code: "invalid_capability", message: "The capability or manifest is invalid, expired, or already finalized." };
   if (/input|target|budget|security|mode|bundles|report|path|schema/i.test(message)) return { code: "invalid_input", message: "The request does not satisfy the Sniff input contract." };
   return { code: "sniff_operation_failed", message: "Sniff could not complete the requested operation." };
 }
