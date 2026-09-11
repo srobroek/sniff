@@ -1,51 +1,65 @@
 # Workflow
 
-Sniff uses one authenticated run from intake through reporting. A capability binds each later tool call to the confirmed manifest.
+Sniff binds one run from intake through reporting. A capability and manifest ID authorize later tool calls. The current verified adapter is OMP.
 
-## 1. Resolve intake
+## 1. Interview the request
 
-Sniff resolves every target to a file set. Immutable Git targets also receive a commit identity and isolated checkout. Mutable local targets remain in place.
+Interactive intake checks the decision frontier in this order:
 
-The frontier checks decisions in this order:
+1. `target`
+2. `intent`
+3. `objectives`
+4. `budget`
 
-1. target
-2. intent
-3. objective groups
-4. budget
+Sniff asks the next question. A complete prompt is silent at the frontier. Silence does not replace confirmation.
 
-A complete request skips questions. An incomplete request receives only the first unresolved question.
-
-## 2. Confirm the manifest
-
-The manifest records these values:
+The plan keeps these axes separate:
 
 - target identity
-- intent
+- exact file set
+- intake intent
 - objective groups
 - exclusions
 - analyzer dispositions
 - budgets
 - defaults and gaps
 - trust route
-- confirmation receipt
 
-Sniff issues a capability for that exact manifest. It rejects changed manifests and replayed capabilities.
+See [Interviewing](interviewing.md) for request patterns. See [Sniff types](sniff-types.md) for exact values.
+
+## 2. Confirm the resolved plan
+
+Sniff resolves Git refs to immutable commits. Mutable local targets remain in place.
+
+Sniff displays the target label and file count. It displays checkout mode. It displays analyzer choices and skipped analyzers. It displays the budget. It displays defaults and gaps. It displays the trust route.
+
+Interactive runs need confirmation through OMP. Sniff issues a capability only for the confirmed manifest. It rejects changed manifests and replayed capabilities.
+
+Noninteractive runs need host authorization. They skip frontier questions.
+
+Sniff applies these rules:
+
+- Reject caller authorization.
+- Reject caller choices.
+- Record the receipt.
+- Record defaults.
+- Record gaps.
 
 ## 3. Detect the stack
 
-Sniff detects languages from the resolved files. It uses the language references that match the target.
+Sniff detects languages from resolved files. It loads the matching language references.
 
 Generated files and vendor files do not determine the stack. Before detection, Sniff removes them from the stack sample.
 
 ## 4. Probe analyzers
 
-Sniff probes the host analyzer executable. A probe checks availability and version behavior. It does not authorize a scan.
+Sniff probes analyzers. A probe checks availability and version. A probe does not authorize a scan.
 
-Before a broad interactive run, Sniff shows available tools. You approve installation separately from analysis.
+Before an interactive run, Sniff shows available tools by bundle. Installation needs separate approval. Bundles group catalog entries. Bundles do not authorize execution.
 
 ## 5. Run fixed recipes
 
-Each selected analyzer has a host-owned recipe. The capability limits the recipe to the confirmed target.
+Each selected analyzer has a fixed recipe. The capability limits the recipe to the target.
 
 Sniff enforces these limits:
 
@@ -59,18 +73,22 @@ After preflight, Sniff checks the target again. Sniff blocks a file outside the 
 
 ## 6. Read and challenge findings
 
-Static tools do not cover every structural smell. Sniff reads the remaining target and may divide large targets by language.
+Static tools do not cover every structural smell. Sniff reads the remaining target. It may divide large targets by language.
 
-In full mode, a separate challenge pass tests each finding for evidence and refactoring value. The pass can keep, downgrade, or drop a finding. Quick mode skips this pass.
+In `full` mode, a separate challenge pass tests each finding. The pass checks evidence and refactoring value. It can keep, downgrade, or drop a finding. `quick` mode skips the full sweep and challenge pass.
 
 ## 7. Report or apply
 
-Sniff authenticates the report against the intake manifest. Its target must match the confirmed target.
+Match the target kind. Match the target label. Match the base ref and file count.
 
-Render mode returns report content without writing files. Save mode needs an explicit path and writes a JSON report, Markdown report, and receipt.
+`render` mode returns validated report content without writing files. `save` mode needs an explicit output directory. It writes a JSON report, Markdown report, and receipt.
 
-Applying a refactor needs a separate approval. Plan-only mode never applies changes.
+Applying a refactor needs separate approval. `plan-only` mode never applies changes.
 
-## Cleanup
+## 8. Cancel and clean up
 
-A successful or failed report closes the capability and removes temporary materialization. Explicit cancellation performs the same cleanup. An expiry timer cleans abandoned runs.
+A run that stops before reporting needs `sniff_cancel`.
+
+Cancellation closes the capability. It releases analyzer reservations. It removes the temporary checkout. It removes the analyzer home.
+
+A successful or failed report closes the lease. It performs the same cleanup. An expiry timer cleans abandoned runs. The lease registry is single-process state.

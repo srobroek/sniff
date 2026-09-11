@@ -1,5 +1,7 @@
 # Getting started
 
+Sniff runs as an OMP extension. The current verified adapter is OMP. Claude Code and Codex adapters are not documented as supported adapters.
+
 ## Requirements
 
 Before you begin, install these commands:
@@ -7,7 +9,7 @@ Before you begin, install these commands:
 - `git`
 - `omp`
 
-Sniff runs inside OMP. Analyzer availability depends on the languages in your selected target.
+Analyzer availability depends on the languages in the selected target. Sniff never installs an analyzer without a separate approval.
 
 ## Link the plugin
 
@@ -21,56 +23,72 @@ omp plugin doctor
 
 After linking, start a new OMP session. Run the session from the repository that you want to inspect.
 
-## Make a complete request
+## Describe the intake
 
-A complete request names these decisions:
+Interactive intake has four frontier decisions:
 
-- target
-- intent
-- objective group
-- budget choice
+1. `target`
+2. `intent`
+3. `objectives`
+4. `budget`
 
-Interactive intake requires the budget choice. The time, file, and analyzer limits are optional. Every supplied limit must be a positive integer.
+Sniff orders questions by plan impact. Natural-language text does not follow a fixed script.
 
-Noninteractive intake can omit the budget. Its manifest records an empty default and a budget gap.
+When you know all four decisions, use a request that names them:
 
-Use this request for a first run:
+> Inspect the uncommitted changes for structure and correctness in plan-only mode with a five-minute budget.
 
-> Sniff the uncommitted changes in this repository. Audit structure and correctness in plan-only mode with a five-minute budget.
+The request sets `target`.
 
-A required decision triggers one question. Sniff chooses the question that changes the plan most.
+It sets `intent: audit`.
+
+It sets two objective groups.
+
+It sets `plan-only` scope mode.
+
+It sets `maxMinutes: 5`.
+
+Sniff asks no frontier question. Before analysis, Sniff asks you to confirm the resolved plan.
+
+Read [Interviewing](interviewing.md) for request patterns. Read it for defaults, gaps, and cancellation. Read [Sniff types](sniff-types.md) for the exact enums.
 
 ## Confirm the plan
 
-Before analysis, check these values:
+Before analysis, inspect these resolved values:
 
 - target label
 - immutable commit or working-tree state
 - exact file count
+- selected objective groups
 - selected analyzers
 - skipped analyzers and reasons
-- time and file budgets
+- time, analyzer, and file budgets
+- defaults, coverage gaps, and trust route
 
-Check that the target matches your request. Then confirm the plan.
+Check that the target matches your request. Then confirm the plan. Confirmation is separate from analyzer installation, report saving, and applying a refactor.
 
 ## Handle analyzer availability
 
-Before installation, ask Sniff to probe the catalog. The agent calls `sniff_install_tools mode=probe` and shows each bundle status.
+Before installation, ask Sniff to probe the catalog. The agent calls `sniff_install_tools` with `mode: "probe"` and shows each selected bundle status.
 
-Choose only the bundles that the target needs. After you approve installation, the agent can call `sniff_install_tools mode=install bundles=["core","js-ts"]`. Replace those names with the bundles from the probe.
+Choose only the bundles that the target needs. After you approve installation, the agent can call `sniff_install_tools` with `mode: "install"` and the bundle names returned by the probe.
 
-An unavailable analyzer becomes a coverage gap. Remote targets use config-free recipes. Sniff does not install their dependencies or run their executable configuration.
+Bundles group catalog entries for installation. They do not authorize a scan. Installation also does not authorize a later analyzer run.
+
+An unavailable analyzer becomes a coverage gap. Remote targets use config-free recipes. Sniff does not install target dependencies or run executable project configuration for a remote target.
 
 ## Finish the run
 
-Before report rendering, full mode challenges the initial findings. Quick mode skips that pass. Refuted full-mode findings remain visible as dropped or downgraded entries.
+Before report rendering, `full` mode challenges the initial findings. `quick` mode skips the full sweep and challenge pass. `plan-only` mode keeps every proposal read-only.
 
-The rendered report stays in the session. When you need files, ask Sniff to save the report. Give an explicit output directory with that request.
+Render mode keeps the validated report in the OMP session. Save mode needs an explicit output directory and writes JSON, Markdown, and receipt artifacts.
 
-A cancellation before reporting stops the run. It removes any temporary checkout and the isolated analyzer home.
+A cancellation before reporting stops the run. `sniff_cancel` releases the single-process lease and removes temporary checkout and analyzer-home materialization.
 
 ## Next guides
 
+- [Interviewing](interviewing.md)
+- [Sniff types](sniff-types.md)
 - [Workflow](workflow.md)
 - [Targets and providers](targets-and-providers.md)
 - [Security and trust](security-and-trust.md)
