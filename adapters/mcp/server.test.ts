@@ -131,7 +131,7 @@ function fakeToolchain(): { readonly root: string; readonly bin: string; readonl
   const root = mkdtempSync(join(tmpdir(), "sniff-mcp-tools-"));
   const bin = join(root, "bin");
   mkdirSync(bin);
-  return { root, bin, env: { PATH: `${bin}:${process.env.PATH ?? ""}` } };
+  return { root, bin, env: { HOME: root, SNIFF_TOOLKIT_CACHE_DIR: join(root, "toolkits"), PATH: `${bin}:${process.env.PATH ?? ""}` } };
 }
 
 async function waitForFile(path: string, timeoutMs = 3_000): Promise<void> {
@@ -608,22 +608,29 @@ printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,mai
     const approvedTools = fakeToolchain();
     const approvedMarker = join(approvedTools.root, "install-called");
     executable(join(approvedTools.bin, "jscpd"), "#!/bin/sh\nexit 17\n");
-    executable(join(approvedTools.bin, "npm"), `#!/bin/sh
-printf called > ${approvedMarker}
-cat > ${join(approvedTools.bin, "jscpd")} <<'SCRIPT'
+    executable(join(approvedTools.bin, "mise"), `#!/bin/sh
+case "$1" in
+  install)
+    printf called > ${approvedMarker}
+    cat > ${join(approvedTools.bin, "jscpd")} <<'SCRIPT'
 #!/bin/sh
 exit 0
 SCRIPT
-chmod +x ${join(approvedTools.bin, "jscpd")}
+    chmod +x ${join(approvedTools.bin, "jscpd")}
+    ;;
+  env)
+    printf '%s\\n' '{"PATH":"${approvedTools.bin}"}'
+    ;;
+esac
 exit 0
 `);
     const approved = startClient("accept", approvedTools.env);
     try {
       await approved.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "install-approval-test", version: "1" } });
-      const result = object((await approved.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"], noMise: true } })).result);
+      const result = object((await approved.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"] } })).result);
       const structured = object(result.structuredContent);
       expect(structured.ok).toBe(true);
-      expect(object((await approved.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "diagnose", bundles: ["dup"], noMise: true } })).result).structuredContent).toBeDefined();
+      expect(object((await approved.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "diagnose", bundles: ["dup"] } })).result).structuredContent).toBeDefined();
       expect(existsSync(approvedMarker)).toBe(true);
       expect(approved.elicitationParams).toHaveLength(1);
     } finally {
@@ -634,18 +641,18 @@ exit 0
 
     const deniedTools = fakeToolchain();
     const deniedMarker = join(deniedTools.root, "install-called");
-    executable(join(deniedTools.bin, "npm"), `#!/bin/sh
+    executable(join(deniedTools.bin, "mise"), `#!/bin/sh
 printf called > ${deniedMarker}
 exit 0
 `);
     const denied = startClient("decline", deniedTools.env);
     try {
       await denied.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "install-denial-test", version: "1" } });
-      const result = object((await denied.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"], noMise: true } })).result);
+      const result = object((await denied.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"] } })).result);
       expect(result.isError).toBe(true);
       expect(object(result.structuredContent).error).toMatchObject({ code: "confirmation_required" });
       expect(existsSync(deniedMarker)).toBe(false);
-      const forgedPath = object((await denied.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"], noMise: true, path: deniedTools.root } })).result);
+      const forgedPath = object((await denied.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["dup"], path: deniedTools.root } })).result);
       expect(forgedPath.isError).toBe(true);
       expect(object(forgedPath.structuredContent).error).toMatchObject({ code: "invalid_input" });
       expect(existsSync(deniedMarker)).toBe(false);

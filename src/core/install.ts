@@ -2,13 +2,19 @@ import {
 	accessSync,
 	closeSync,
 	constants,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
 	openSync,
 	readSync,
 	realpathSync,
+	renameSync,
+	rmSync,
 	statSync,
+	writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
 import { type AnalyzerCapture, type AnalyzerObservation, parseAnalyzerOutput } from "./analyzer-output.ts";
 import {
@@ -83,6 +89,8 @@ export type SniffInstallRuntime = {
 	provisionOpenGrep(options: { cacheDir?: string; signal?: AbortSignal }): Promise<OpenGrepProvisionResult>;
 	/** Host-owned neutral cwd used for mutating installs, never the probe target. */
 	readonly neutralCwd?: string;
+	/** Optional test seam for Sniff-owned toolkit storage. */
+	readonly toolkitCacheRoot?: string;
 };
 export type SniffInstallResult = {
 	ok: boolean;
@@ -325,74 +333,112 @@ async function inspectTool(
   return { bundle, tool: rec.name, bin: rec.bin, required, status, resolvedPath, remediation: rec.hint, attempts };
 }
 
-function managerRoute(
-	rec: ToolRec,
-	preferMise: boolean,
-	cwd: string,
-	env: ProcessEnvironment,
-	runtime: SniffInstallRuntime,
-): string {
-	if (rec.key === "npm-local") return "npm-local";
-	if (preferMise) {
-		if (rec.key === "cargo") return "mise-cargo";
-		if (rec.key === "npm") return "mise-npm";
-		if (rec.key === "pipx") return "mise-pipx";
-		if (rec.key === "go" || rec.key === "brew") return "mise-reg";
-	}
-	const available = (bin: string): boolean =>
-		runtime.resolveCommand(bin, cwd, env) !== null;
-	switch (rec.key) {
-		case "brew":
-			return available("brew") ? "brew" : "";
-		case "pipx":
-			if (available("pipx")) return "pipx";
-			if (available("uv")) return "uv-tool";
-			return "";
-		case "npm":
-			return available("npm") ? "npm" : "";
-		case "cargo":
-			return available("cargo") ? "cargo" : "";
-		case "go":
-			return available("go") ? "go" : "";
-		case "rustup":
-			return available("rustup") ? "rustup" : "";
-		default:
-			return "";
-	}
+function isMiseManaged(rec: ToolRec): boolean {
+	return rec.key === "brew" || rec.key === "pipx" || rec.key === "npm" || rec.key === "cargo" || rec.key === "go";
 }
 
-function installArgv(rec: ToolRec, manager: string): string[] | null {
+function miseToolSpec(rec: ToolRec): string | null {
 	const pkg = rec.pkg ?? rec.name;
-	const miseSpec = rec.miseSpec ?? rec.bin;
-	switch (manager) {
-		case "brew":
-			return ["brew", "install", pkg];
-		case "pipx":
-			return ["pipx", "install", pkg];
-		case "uv-tool":
-			return ["uv", "tool", "install", pkg];
-		case "npm":
-			return ["npm", "install", "-g", pkg];
+	switch (rec.key) {
 		case "cargo":
-			return ["cargo", "install", pkg];
-		case "go": {
-			let goPath = miseSpec.startsWith("go:") ? miseSpec.slice(3) : miseSpec;
-			if (!goPath.includes("@")) goPath = `${goPath}@latest`;
-			return ["go", "install", goPath];
-		}
-		case "rustup":
-			return ["rustup", "component", "add", "clippy"];
-		case "mise-cargo":
-			return ["mise", "use", `cargo:${pkg}`];
-		case "mise-npm":
-			return ["mise", "use", `npm:${pkg}`];
-		case "mise-pipx":
-			return ["mise", "use", `pipx:${pkg}`];
-		case "mise-reg":
-			return ["mise", "use", miseSpec];
+			return `cargo:${pkg}`;
+		case "npm":
+			return `npm:${pkg}`;
+		case "pipx":
+			return `pipx:${pkg}`;
+		case "go":
+		case "brew":
+			return rec.miseSpec ?? rec.bin;
 		default:
 			return null;
 	}
+}
+
+export function resolveSniffToolkitCacheRoot(env: Record<string, string | undefined> = process.env, runtime?: SniffInstallRuntime): string {
+	return runtime?.toolkitCacheRoot ?? env.SNIFF_TOOLKIT_CACHE_DIR ?? join(env.XDG_CACHE_HOME ?? join(env.HOME ?? homedir(), ".cache"), "sniff", "toolkits");
+}
+
+function toolkitDirectory(bundle: BundleName, env: ProcessEnvironment, runtime?: SniffInstallRuntime): string {
+	return join(resolveSniffToolkitCacheRoot(env, runtime), bundle);
+}
+
+function toolkitConfigPath(bundle: BundleName, env: ProcessEnvironment, runtime?: SniffInstallRuntime): string {
+	return join(toolkitDirectory(bundle, env, runtime), "mise.toml");
+}
+
+function isolatedMiseEnvironment(directory: string, env: ProcessEnvironment, miseHome?: string): ProcessEnvironment {
+	return {
+		...env,
+		...(miseHome ? { HOME: miseHome } : {}),
+		MISE_CONFIG_DIR: join(directory, ".mise-config"),
+		MISE_GLOBAL_CONFIG_FILE: join(directory, ".global-config-disabled.toml"),
+		MISE_SYSTEM_CONFIG_FILE: join(directory, ".system-config-disabled.toml"),
+		RUSTC_WRAPPER: "",
+		RUSTC_WORKSPACE_WRAPPER: "",
+		CARGO_BUILD_RUSTC_WRAPPER: "",
+		CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "",
+	};
+}
+
+export function renderMiseToolkit(bundle: BundleName): string {
+	const records = TOOLS[bundle];
+	const specs = records
+		.map(miseToolSpec)
+		.filter((spec): spec is string => spec !== null);
+	const runtimeEntries = [
+		...(records.some((rec) => rec.key === "npm") ? ['"node" = "lts"'] : []),
+		...(specs.some((spec) => spec.startsWith("go:")) ? ['"go" = "latest"'] : []),
+		...(records.some((rec) => rec.key === "cargo") ? ['"rust" = "stable"'] : []),
+	];
+	return ["# Generated by Sniff. Do not edit.", "[tools]", ...runtimeEntries, ...[...new Set(specs)].sort().map((spec) => `${JSON.stringify(spec)} = "latest"`), ""].join("\n");
+}
+
+function writeMiseToolkit(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime): string {
+	const directory = toolkitDirectory(bundle, env, runtime);
+	mkdirSync(directory, { recursive: true });
+	const temporaryDirectory = mkdtempSync(join(directory, ".write-"));
+	const temporaryPath = join(temporaryDirectory, "mise.toml");
+	const destination = toolkitConfigPath(bundle, env, runtime);
+	try {
+		writeFileSync(temporaryPath, renderMiseToolkit(bundle));
+		renameSync(temporaryPath, destination);
+	} finally {
+		rmSync(temporaryDirectory, { recursive: true, force: true });
+	}
+	return directory;
+}
+
+async function toolkitEnvironment(
+	bundle: BundleName,
+	env: ProcessEnvironment,
+	runtime: SniffInstallRuntime,
+	signal?: AbortSignal,
+	miseHome?: string,
+): Promise<FreshEnvironment> {
+	const directory = toolkitDirectory(bundle, env, runtime);
+	if (!existsSync(toolkitConfigPath(bundle, env, runtime))) return { env: { ...env }, source: "process" };
+	const miseEnvironment = isolatedMiseEnvironment(directory, env, miseHome);
+	if (!runtime.resolveCommand("mise", directory, miseEnvironment)) {
+		return { env: { ...env }, source: "process", error: `mise is required to load the Sniff toolkit at ${directory}` };
+	}
+	const fresh = await runtime.freshEnvironment(directory, miseEnvironment, true, signal);
+	if (fresh.error) return fresh;
+	const binDirectories = new Set<string>();
+	for (const rec of TOOLS[bundle]) {
+		if (!isMiseManaged(rec)) continue;
+		const which = await runtime.run(["mise", "which", rec.bin], directory, miseEnvironment, ENV_REFRESH_TIMEOUT_MS, signal);
+		const executable = which.stdout.trim();
+		if (which.exitCode === 0 && !which.timedOut && !which.error && isAbsolute(executable)) binDirectories.add(dirname(executable));
+	}
+	const refreshedEnvironment: ProcessEnvironment = { ...fresh.env, HOME: env.HOME, TMPDIR: env.TMPDIR };
+	return {
+		...fresh,
+		env: { ...refreshedEnvironment, PATH: [...binDirectories, refreshedEnvironment.PATH ?? ""].filter(Boolean).join(delimiter) },
+	};
+}
+
+function toolkitUnavailableResult(bundle: BundleName, rec: ToolRec, required: boolean, remediation: string): SniffToolResult {
+	return { bundle, tool: rec.name, bin: rec.bin, required, status: "unavailable-route", resolvedPath: null, remediation, attempts: [] };
 }
 
 function classifyInstallFailure(result: CommandResult): SniffToolStatus {
@@ -424,12 +470,11 @@ function failedInstallResult(
 	return { ...initial, status, remediation, install };
 }
 
-async function installOne(
+async function installUnmanagedTool(
 	bundle: BundleName,
 	rec: ToolRec,
 	probeCwd: string,
 	installCwd: string,
-	preferMise: boolean,
 	dryRun: boolean,
 	env: ProcessEnvironment,
 	runtime: SniffInstallRuntime,
@@ -463,9 +508,10 @@ async function installOne(
 			return failedInstallResult(initial, "installation-failed", undefined, message);
 		}
 	}
-	const manager = managerRoute(rec, preferMise, installCwd, env, runtime);
-	const argv = installArgv(rec, manager);
-	if (!manager || !argv) {
+	const argv = rec.key === "rustup" && runtime.resolveCommand("rustup", installCwd, env)
+		? ["rustup", "component", "add", "clippy"]
+		: null;
+	if (!argv) {
 		lines.push(`  ! ${rec.name}: no supported installation route — ${rec.hint}`);
 		return failedInstallResult(initial, "unavailable-route");
 	}
@@ -480,15 +526,62 @@ async function installOne(
 		lines.push(`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
 		return failedInstallResult(initial, status, install);
 	}
-	const fresh = await runtime.freshEnvironment(installCwd, env, preferMise, signal);
-	if (fresh.error) {
-		lines.push(`      (unavailable-route — fresh environment failed: ${fresh.error})`);
-		return failedInstallResult(initial, "unavailable-route", install, `${fresh.error}; ${rec.hint}`);
-	}
-	const verified = await inspectTool(bundle, rec, true, probeCwd, fresh.env, runtime);
+	const verified = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
 	verified.install = install;
-	if (verified.status === "usable") lines.push(`      verified usable in fresh ${fresh.source} environment (${verified.resolvedPath})`);
-	else lines.push(`      (${verified.status} after successful install; resolved=${verified.resolvedPath ?? "<unresolved>"})`);
+	return verified;
+}
+
+async function installMiseBundle(
+	bundle: BundleName,
+	records: ToolRec[],
+	probeCwd: string,
+	dryRun: boolean,
+	env: ProcessEnvironment,
+	runtime: SniffInstallRuntime,
+	lines: string[],
+	signal?: AbortSignal,
+): Promise<SniffToolResult[]> {
+	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
+	const initial: SniffToolResult[] = [];
+	for (const rec of records) {
+		initial.push(await inspectTool(bundle, rec, true, probeCwd, initialEnvironment.error ? env : initialEnvironment.env, runtime));
+	}
+	const directory = toolkitDirectory(bundle, env, runtime);
+	lines.push(`  + Sniff mise toolkit ${directory}`);
+	lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+	if (dryRun) return initial;
+	const miseEnvironment = isolatedMiseEnvironment(directory, env);
+	if (!runtime.resolveCommand("mise", directory, miseEnvironment)) {
+		const remediation = `mise is required to install the Sniff-managed ${bundle} toolkit`;
+		lines.push(`      (unavailable-route — ${remediation})`);
+		return initial.map((result) => failedInstallResult(result, "unavailable-route", undefined, remediation));
+	}
+	writeMiseToolkit(bundle, env, runtime);
+	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, INSTALL_TIMEOUT_MS, signal);
+	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
+	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
+	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
+		? classifyInstallFailure(install)
+		: undefined;
+	if (installStatus) lines.push(`      (${installStatus}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
+	const fresh = await toolkitEnvironment(bundle, env, runtime, signal);
+	if (fresh.error) {
+		const status = installStatus ?? "unavailable-route";
+		lines.push(`      (${status} — fresh mise environment failed: ${fresh.error})`);
+		return initial.map((result) => failedInstallResult(result, status, install, fresh.error));
+	}
+	const verified: SniffToolResult[] = [];
+	for (const rec of records) {
+		const inspected = await inspectTool(bundle, rec, true, probeCwd, fresh.env, runtime);
+		const result = inspected.status !== "usable" && installStatus
+			? failedInstallResult(inspected, installStatus, install)
+			: { ...inspected, install };
+		verified.push(result);
+		lines.push(result.status === "usable"
+			? `      verified ${rec.name} in fresh mise environment (${result.resolvedPath})`
+			: `      (${rec.name}: ${result.status} after toolkit install; resolved=${result.resolvedPath ?? "<unresolved>"})`);
+	}
 	return verified;
 }
 
@@ -529,7 +622,6 @@ export type SniffInstallOptions = {
 	bundles?: string[];
 	all?: boolean;
 	dryRun?: boolean;
-	noMise?: boolean;
 	cwd?: string;
 	env?: ProcessEnvironment;
 	runtime?: SniffInstallRuntime;
@@ -577,11 +669,12 @@ function findTool(tool: string): { bundle: BundleName; rec: ToolRec } | null {
 }
 
 
-function analyzerEnvironment(home: string): ProcessEnvironment {
+function analyzerEnvironment(home: string, runtime: SniffInstallRuntime): ProcessEnvironment {
 	const env: ProcessEnvironment = {
 		HOME: home,
 		TMPDIR: home,
 		NO_COLOR: "1",
+		SNIFF_TOOLKIT_CACHE_DIR: resolveSniffToolkitCacheRoot(process.env, runtime),
 	};
 	for (const name of ["PATH", "LANG", "LC_ALL", "TZ", "SNIFF_OPENGREP_CACHE_DIR"] as const) {
 		if (process.env[name] !== undefined) env[name] = process.env[name];
@@ -631,9 +724,19 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	if (!validExitContract(acceptedExitCodes)) {
 		abandon();
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
-  }
-  const env = analyzerEnvironment(authorization.home);
-  const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
+	}
+	const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
+	const managed = isMiseManaged(catalog.rec);
+	const toolkit = managed
+		? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
+		: { env: baseEnvironment, source: "process" as const };
+	if (toolkit.error) {
+		abandon();
+		const preflight = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
+		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
+	}
+	const env = toolkit.env;
+	const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
@@ -705,15 +808,19 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	const env = { ...process.env, ...opts.env };
 	const runtime = opts.runtime ?? DEFAULT_RUNTIME;
 	const installCwd = runtime.neutralCwd ?? tmpdir();
-	const preferMise = !opts.noMise && runtime.resolveCommand("mise", installCwd, env) !== null;
 	const lines: string[] = [];
 	const tools: SniffToolResult[] = [];
 	if (mode === "probe") {
 		lines.push("sniff tool probe (all tools optional; missing ones are skipped, not fatal)");
 		for (const bundle of BUNDLES) {
 			lines.push("", `[${bundle}]`);
+			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			const bundleResults: SniffToolResult[] = [];
-			for (const rec of TOOLS[bundle]) bundleResults.push(await inspectTool(bundle, rec, false, probeCwd, env, runtime));
+			for (const rec of TOOLS[bundle]) {
+				bundleResults.push(environment.error && isMiseManaged(rec)
+					? toolkitUnavailableResult(bundle, rec, false, environment.error)
+					: await inspectTool(bundle, rec, false, probeCwd, environment.error ? env : environment.env, runtime));
+			}
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
 			const counts = new Map<SniffToolStatus, number>();
@@ -740,8 +847,11 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 		lines.push("sniff bundle diagnostics (inventory only; does not authorize analyzer execution)");
 		for (const bundle of selected) {
 			lines.push("", `[${bundle}]`);
+			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			for (const rec of TOOLS[bundle]) {
-				const result = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+				const result = environment.error && isMiseManaged(rec)
+					? toolkitUnavailableResult(bundle, rec, true, environment.error)
+					: await inspectTool(bundle, rec, true, probeCwd, environment.error ? env : environment.env, runtime);
 				tools.push(result);
 				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}
@@ -753,7 +863,15 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	if (opts.dryRun) lines.push("(dry run — no changes will be made)");
 	for (const bundle of selected) {
 		lines.push("", `[${bundle}]`);
-		for (const rec of TOOLS[bundle]) tools.push(await installOne(bundle, rec, probeCwd, installCwd, preferMise, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
+		const managedRecords = TOOLS[bundle].filter(isMiseManaged);
+		const managedResults = managedRecords.length > 0
+			? await installMiseBundle(bundle, managedRecords, probeCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal)
+			: [];
+		const managedByTool = new Map(managedResults.map((result) => [result.tool, result]));
+		for (const rec of TOOLS[bundle]) {
+			const managed = managedByTool.get(rec.name);
+			tools.push(managed ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
+		}
 	}
 	const failures = tools.filter((result) => result.status !== "usable");
 	if (opts.dryRun) {

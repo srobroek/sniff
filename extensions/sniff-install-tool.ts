@@ -186,16 +186,15 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "sniff_install_tools",
     label: "Sniff install tools",
-    description: "Probe, diagnose, list, or install sniff analyzer catalog entries. Diagnose is inventory-only and never authorizes execution. Install re-probes in a fresh mise-aware environment. Never sudo or bypass trust policy. Default mode is probe.",
+    description: "Probe, diagnose, list, or install sniff analyzer catalog entries. Diagnose is inventory-only and never authorizes execution. Managed installs require mise and are re-probed from a Sniff-owned toolkit. Never sudo or bypass trust policy. Default mode is probe.",
     parameters: z.object({
       mode: z.enum(["probe", "diagnose", "list", "install"]).optional().describe("probe (default), inventory-only diagnose, list, or install"),
       bundles: z.array(z.string()).optional().describe("Required/install bundle names: core dup security rust go python js-ts shell sql css data api infra docs"),
       all: z.boolean().optional().describe("Select every bundle"),
       dryRun: z.boolean().optional().describe("Print install commands without running them"),
-      noMise: z.boolean().optional().describe("Ignore mise even if present"),
-      path: z.string().optional().describe("Repo cwd for project-local tools and mise-local pins"),
+      path: z.string().optional().describe("Repo cwd for project-local tools"),
     }) as unknown as TSchema,
-    execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; noMise?: boolean; path?: string }, signal, _onUpdate, ctx) => {
+    execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; path?: string }, signal, _onUpdate, ctx) => {
       try {
         const result = await runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd(), signal });
         return { content: [{ type: "text", text: result.report }], details: { ok: result.ok, tools: result.tools }, isError: !result.ok };

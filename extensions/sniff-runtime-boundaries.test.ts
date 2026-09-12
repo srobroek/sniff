@@ -81,6 +81,8 @@ type AnalyzerCall = { argv: string[]; cwd: string; env: Record<string, string | 
 function analyzerRuntime(calls: AnalyzerCall[], overrides: Partial<SniffInstallRuntime> = {}): SniffInstallRuntime {
   const host = mkdtempSync(join(tmpdir(), "sniff-host-bin-"));
   temporary.push(host);
+  const toolkitCacheRoot = mkdtempSync(join(tmpdir(), "sniff-toolkit-cache-"));
+  temporary.push(toolkitCacheRoot);
   const resolveHostCommand = (bin: string): string => {
     const path = join(host, bin);
     if (!existsSync(path)) {
@@ -90,6 +92,7 @@ function analyzerRuntime(calls: AnalyzerCall[], overrides: Partial<SniffInstallR
     return path;
   };
   return {
+    toolkitCacheRoot,
     resolveCommand: resolveHostCommand,
     resolveOpenGrep: () => resolveHostCommand("opengrep"),
     provisionOpenGrep: async () => { throw new Error("unexpected OpenGrep provisioning"); },
