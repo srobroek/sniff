@@ -32,10 +32,11 @@ Optional: jscpd
 Reason: jscpd adds TypeScript coverage not supplied by the Go duplicate checker.
 ```
 
-Sniff verifies each command through its catalog route. Managed toolkit entries
-use the bundle's mise environment. Before Sniff runs an analyzer, it verifies
-that the command can run. An unusable command blocks only that analyzer. The
-result records diagnostic details and a repair instruction.
+Sniff verifies each command through its catalog route. After the bundle
+configuration exists, managed toolkit entries use the bundle's mise environment.
+Before Sniff runs an analyzer, it verifies that the command can run. An unusable
+command blocks only that analyzer. The result records diagnostic details and a
+repair instruction.
 
 ## Bundles
 
