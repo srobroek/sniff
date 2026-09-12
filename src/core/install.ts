@@ -373,6 +373,8 @@ function isolatedMiseEnvironment(directory: string, env: ProcessEnvironment, mis
 		MISE_CONFIG_DIR: join(directory, ".mise-config"),
 		MISE_GLOBAL_CONFIG_FILE: join(directory, ".global-config-disabled.toml"),
 		MISE_SYSTEM_CONFIG_FILE: join(directory, ".system-config-disabled.toml"),
+		MISE_AUTO_INSTALL: "0",
+		MISE_CEILING_PATHS: dirname(directory),
 		RUSTC_WRAPPER: "",
 		RUSTC_WORKSPACE_WRAPPER: "",
 		CARGO_BUILD_RUSTC_WRAPPER: "",
@@ -676,7 +678,18 @@ function analyzerEnvironment(home: string, runtime: SniffInstallRuntime): Proces
 		NO_COLOR: "1",
 		SNIFF_TOOLKIT_CACHE_DIR: resolveSniffToolkitCacheRoot(process.env, runtime),
 	};
-	for (const name of ["PATH", "LANG", "LC_ALL", "TZ", "SNIFF_OPENGREP_CACHE_DIR"] as const) {
+	for (const name of [
+		"PATH",
+		"LANG",
+		"LC_ALL",
+		"TZ",
+		"SNIFF_OPENGREP_CACHE_DIR",
+		"MISE_DATA_DIR",
+		"MISE_INSTALLS_DIR",
+		"MISE_STATE_DIR",
+		"XDG_DATA_HOME",
+		"XDG_STATE_HOME",
+	] as const) {
 		if (process.env[name] !== undefined) env[name] = process.env[name];
 	}
 	return env;
@@ -817,9 +830,10 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			const bundleResults: SniffToolResult[] = [];
 			for (const rec of TOOLS[bundle]) {
-				bundleResults.push(environment.error && isMiseManaged(rec)
+				const managed = isMiseManaged(rec);
+				bundleResults.push(environment.error && managed
 					? toolkitUnavailableResult(bundle, rec, false, environment.error)
-					: await inspectTool(bundle, rec, false, probeCwd, environment.error ? env : environment.env, runtime));
+					: await inspectTool(bundle, rec, false, probeCwd, managed ? environment.env : env, runtime));
 			}
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
@@ -849,9 +863,10 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			for (const rec of TOOLS[bundle]) {
-				const result = environment.error && isMiseManaged(rec)
+				const managed = isMiseManaged(rec);
+				const result = environment.error && managed
 					? toolkitUnavailableResult(bundle, rec, true, environment.error)
-					: await inspectTool(bundle, rec, true, probeCwd, environment.error ? env : environment.env, runtime);
+					: await inspectTool(bundle, rec, true, probeCwd, managed ? environment.env : env, runtime);
 				tools.push(result);
 				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}

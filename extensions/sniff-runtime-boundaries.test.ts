@@ -314,22 +314,32 @@ describe("adaptive runtime boundaries", () => {
 
   test("runs every selectable disposition through fixed recipes with a scrubbed environment", async () => {
     process.env.SNIFF_TEST_SECRET = "must-not-leak";
+    const miseData = mkdtempSync(join(tmpdir(), "sniff-mise-data-"));
+    temporary.push(miseData);
+    process.env.MISE_DATA_DIR = miseData;
     const { manifest, lease } = localLease({ remote: true });
     const calls: AnalyzerCall[] = [];
     const runtime = analyzerRuntime(calls);
+    const coreToolkit = join(runtime.toolkitCacheRoot ?? "", "core");
+    mkdirSync(coreToolkit, { recursive: true });
+    writeFileSync(join(coreToolkit, "mise.toml"), '[tools]\n"pipx:lizard" = "latest"\n');
     const selected = manifest.analyzers.filter(({ disposition }) => disposition === "selected");
     expect(selected.map(({ name }) => name)).toEqual(["lizard:complexity", "opengrep:hardcoded-values"]);
     for (const analyzer of selected) {
       expect((await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: analyzer.name, runtime })).ok).toBe(true);
     }
-    const executions = calls.filter(({ argv }) => !argv.includes("--version"));
+    const executions = calls.filter(({ argv }) => argv[0] !== "mise" && !argv.includes("--version"));
     expect(executions).toHaveLength(2);
     expect(executions.find(({ argv }) => argv[0]?.endsWith("opengrep"))?.argv).toContain("-f");
     expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.argv.slice(1, 8)).toEqual(["--csv", "-C", "10", "-L", "50", "-a", "5"]);
     expect(executions.every(({ env }) => env.SNIFF_TEST_SECRET === undefined && env.HOME?.includes("sniff-run-home-"))).toBe(true);
+    const miseWhich = calls.find(({ argv }) => argv.join(" ") === "mise which lizard");
+    expect(miseWhich?.env).toMatchObject({ MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: runtime.toolkitCacheRoot, MISE_DATA_DIR: miseData });
+    expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.env.MISE_DATA_DIR).toBe(miseData);
     cancelRunLease(lease.capability, lease.manifestId);
 
     delete process.env.SNIFF_TEST_SECRET;
+    delete process.env.MISE_DATA_DIR;
   });
   test("accepts Lizard's warning exit and projects every configured threshold", async () => {
     const { lease, manifest } = localLease();

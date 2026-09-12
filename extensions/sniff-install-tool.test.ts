@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../src/core/analyzer-artifact-registry.ts";
 import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } from "../src/core/analyzer-output.ts";
 import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
@@ -625,6 +625,8 @@ describe("runSniffInstall", () => {
 			MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config"),
 			MISE_GLOBAL_CONFIG_FILE: join(toolkitDirectory, ".global-config-disabled.toml"),
 			MISE_SYSTEM_CONFIG_FILE: join(toolkitDirectory, ".system-config-disabled.toml"),
+			MISE_AUTO_INSTALL: "0",
+			MISE_CEILING_PATHS: dirname(toolkitDirectory),
 		} });
 		expect(readFileSync(join(toolkitDirectory, "mise.toml"), "utf8")).toBe(renderMiseToolkit("dup"));
 		expect(readdirSync(target)).toEqual(["marker"]);
@@ -633,8 +635,22 @@ describe("runSniffInstall", () => {
 		expect(diagnosed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
 		expect(refreshes).toHaveLength(2);
 		for (const refresh of refreshes) {
-			expect(refresh).toMatchObject({ cwd: toolkitDirectory, env: { MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config") } });
+			expect(refresh).toMatchObject({ cwd: toolkitDirectory, env: { MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: dirname(toolkitDirectory), MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config") } });
 		}
+	});
+
+	test("does not borrow a managed toolkit runtime for unmanaged analyzers", async () => {
+		const runtime = fakeRuntime({
+			resolveCommand: (bin, _cwd, env) => bin === "go"
+				? env.TOOLKIT === "1" ? "/toolkit/bin/go" : null
+				: `/fake/bin/${bin}`,
+			freshEnvironment: async (_cwd, env) => ({ env: { ...env, TOOLKIT: "1" }, source: "mise" }),
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "go");
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, "mise.toml"), '[tools]\n"go:example.invalid/tool" = "latest"\n');
+		const result = await runSniffInstall({ mode: "diagnose", bundles: ["go"], runtime });
+		expect(result.tools.find(({ tool }) => tool === "go-vet")).toMatchObject({ status: "missing", resolvedPath: null });
 	});
 
 	test("managed installation requires mise without package-manager fallback", async () => {
