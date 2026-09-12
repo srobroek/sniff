@@ -1,6 +1,6 @@
 # Getting started
 
-Sniff uses one portable core. OMP loads a native extension. Claude Code and Codex load MCP adapters. Every adapter exposes the same six tools.
+Sniff uses one portable core. OMP loads a native extension. Claude Code and Codex load MCP adapters. Every adapter exposes exactly seven tools.
 
 ## Requirements
 
@@ -39,21 +39,23 @@ After installation, start a new session. Run it from the repository that you wan
 
 ## Describe the intake
 
-Sniff adapts its interview across five axes:
+Sniff adapts its interview across five frontier axes:
 
 - `target` identifies the repository or file set.
 - `intent` identifies the desired outcome.
-- `objectives` identifies the objective groups.
 - `scopeMode` selects `quick`, `full`, or `plan-only` behavior.
-- analyzer family and tier follow from the target, objectives, trust route, and availability.
+- `objectives` identifies the objective groups.
+- `budget` sets time, analyzer, and file limits.
 
-The first four axes form the decision frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next unresolved question.
+Analyzer family and tier follow from the target, objectives, trust route, and availability.
+
+The five frontier axes form the decision frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next unresolved question.
 
 For example:
 
 > Inspect the uncommitted changes for structure and correctness in plan-only mode with a five-minute budget.
 
-Sniff resolves the target. Sniff resolves the intent. Sniff resolves objective groups. Sniff resolves scope mode. Sniff records the budget. Sniff shows the plan for confirmation.
+Sniff resolves the target. Sniff resolves the intent. Sniff resolves scope mode. Sniff resolves objective groups. Sniff records the budget. Sniff shows the plan for confirmation.
 
 Read [Interviewing](interviewing.md) for request patterns and noninteractive defaults. Read [Sniff types](sniff-types.md) for exact values.
 
@@ -61,18 +63,21 @@ Read [Interviewing](interviewing.md) for request patterns and noninteractive def
 
 Plan confirmation issues a capability bound to the manifest. Installation needs separate approval. Analyzer execution uses the live capability. Report saving needs separate approval. Refactoring needs separate approval.
 
-The six tools follow this sequence:
+The seven tools follow this sequence:
 
 1. `sniff_intake` resolves the frontier and obtains host approval or denial.
 2. `sniff_install_tools` checks analyzer bundles and installs approved bundles.
 3. `sniff_run_analyzer` revalidates the target and runs one selected recipe.
-4. `sniff_report` validates and renders a report or saves its artifact set.
-5. `sniff_read_report_artifact` pages a complete descriptor artifact with the opaque read capability returned by `sniff_report`.
-6. `sniff_cancel` closes an unfinished run and removes temporary materialization.
+4. Use `sniff_read_analyzer_artifact` to page analyzer observations with the capability from `sniff_run_analyzer`.
+5. `sniff_report` validates and renders a report or saves its artifact set.
+6. `sniff_read_report_artifact` pages a complete report artifact with the opaque read capability returned by `sniff_report`.
+7. `sniff_cancel` closes an unfinished run and removes temporary materialization.
 
-Each UTF-8-safe read page is at most 64 KiB. Continue with `nextOffset` until `eof`; each response also includes `totalBytes` and a SHA-256 digest. The read capability remains usable in-process until bounded registry eviction. Saving to a repository still needs separate approval.
+Pass each reader's `nextOffset` as the next `offset` until `eof`. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Registry expiry or eviction ends a read capability. Saving to a repository still needs separate approval.
 
 Before installation, Sniff needs explicit approval. Remote targets use config-free, remote-safe recipes. Remote targets do not load project executable configuration.
+
+After explicit approval, `sniff_install_tools` provisions pinned OpenGrep v1.30.0 for the selected `core` bundle. Before caching the asset, Sniff verifies its SHA-256 digest. Provisioning and version probing use a host-owned neutral directory. They do not execute target code. A later `sniff_run_analyzer` call runs the fixed, config-free recipe against authorized files.
 
 `quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 

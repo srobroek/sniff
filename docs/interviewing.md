@@ -8,25 +8,26 @@ Natural-language requests describe a conversation. They are not shell commands.
 
 ## Decision frontier
 
-The core models five axes:
+The core models five frontier axes:
 
 - `target` identifies the repository or file set.
 - `intent` identifies the desired outcome.
-- `objectives` identifies the objective groups.
 - `scopeMode` selects run behavior.
-- analyzer family and tier follow from the confirmed target.
+- `objectives` identifies the objective groups.
+- `budget` sets time, analyzer, and file limits.
 
-The first four choices form the adaptive frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next question. Analyzer selection follows the confirmed choices.
+Analyzer family and tier follow from the confirmed target, objectives, trust route, and availability.
+
+The five choices form the adaptive frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next question. Analyzer selection follows the confirmed choices.
 
 ## Request patterns
 
 These examples show the next decision:
 
 - `Inspect this repository.` names `target`. Sniff asks for `intent`.
-- `Audit the uncommitted changes.` names `target` and `intent: audit`. Sniff asks for `objectives`.
-- `Audit the uncommitted changes for structure and maintainability.` names an objective group. Sniff asks for `scopeMode` or a budget limit.
+- `Audit the uncommitted changes.` names `target` and `intent: audit`. Sniff asks for `scopeMode`.
+- `Audit the uncommitted changes for structure and maintainability.` names an objective group. Sniff asks for `scopeMode`.
 - `Audit the uncommitted changes for structure and maintainability in plan-only mode with a five-minute budget.` names the frontier choices. Sniff asks for final plan confirmation.
-- `Review pull request 42 for release risk with an analyzer limit of three.` names `intent: review-change`. It selects `change-and-release-risk`. It sets `maxAnalyzers: 3`. Sniff asks for final plan confirmation.
 
 A complete request does not grant approval. Confirmation remains separate. Installation remains separate. Report saving remains separate. Refactoring remains separate.
 
@@ -70,14 +71,15 @@ Supported fields are `maxMinutes`, `maxAnalyzers`, and `maxFiles`.
 
 ## Approval boundaries
 
-The six tools keep approvals separate:
+The seven tools keep approvals separate:
 
 1. `sniff_intake` needs plan confirmation before it issues a capability.
 2. `sniff_install_tools` needs installation approval before it installs bundles. Probe, diagnose, and list stay read-only.
-3. `sniff_run_analyzer` needs the live capability and a selected recipe. The host revalidates the target before execution.
-4. `sniff_report` renders a validated report or needs save approval before it writes artifacts.
-5. `sniff_read_report_artifact` reads a descriptor artifact with the opaque read capability returned by `sniff_report`; it does not grant repository write access.
-6. `sniff_cancel` closes an unfinished run and releases its materialization.
+3. `sniff_run_analyzer` accepts only the issued capability and selected recipe. Before execution, the host revalidates the target.
+4. `sniff_read_analyzer_artifact` reads complete analyzer observations with the opaque capability returned by `sniff_run_analyzer`. It does not grant repository write access. Continue with `nextOffset` until `eof`.
+5. `sniff_report` renders a validated report or needs save approval before it writes artifacts.
+6. `sniff_read_report_artifact` reads a descriptor artifact with the opaque read capability returned by `sniff_report`. Continue with `nextOffset` until `eof`. It does not grant repository write access.
+7. `sniff_cancel` closes an unfinished run and releases its materialization.
 
 
 ## Related guides

@@ -4,6 +4,7 @@ Sniff uses a decision frontier. A complete request yields no question. An incomp
 
 - target
 - intent
+- scopeMode
 - objectives
 - exclusions
 - analyzers
@@ -15,8 +16,9 @@ Sniff uses a decision frontier. A complete request yields no question. An incomp
 
 1. target
 2. intent
-3. objective groups
-4. budget
+3. scopeMode
+4. objectives
+5. budget
 
 ## Interactive runs
 
@@ -40,7 +42,8 @@ Sniff uses a decision frontier. A complete request yields no question. An incomp
 - Bind it to the canonical target and selected recipes.
 - Bind it to the confirmation receipt.
 - Copy the returned `reportTarget` into `report.target`, then add `languages`. Pass capability and manifest ID to `sniff_report`. The host authenticates that pair and injects the exact stored manifest when `extensions["sniff.intake"]` is omitted; if supplied, the extension must be byte-for-byte equivalent to the issued manifest.
-- Use the opaque read capability returned by `sniff_report` with `reportId` and a descriptor `relativePath` when reading complete report artifacts. Pass `nextOffset` to continue paging; each page is UTF-8-safe and at most 64 KiB.
+- Use the opaque read capability returned by `sniff_run_analyzer` with `analyzerResultId` and a descriptor `relativePath` or `sourcePath` when reading complete analyzer artifacts. Pass `nextOffset` to continue paging until `eof`; each page is UTF-8-safe and at most 64 KiB.
+- Use the opaque read capability returned by `sniff_report` with `reportId` and a descriptor `relativePath` when reading complete report artifacts. Pass `nextOffset` to continue paging until `eof`; each page is UTF-8-safe and at most 64 KiB.
 - Enforce `maxAnalyzers`, `maxMinutes`, and `maxFiles` before launch and after completion.
 - Release a reservation when preflight fails before launch. Never replay a launched recipe.
 - Let the unref'd lease timer remove abandoned checkouts and isolated analyzer homes at expiry.

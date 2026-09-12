@@ -16,26 +16,27 @@ The source skill generates native skill trees. It lives in `.skill-source/sniff/
 
 Claude Code and Codex load the bundled MCP server through plugin manifests.
 
-All adapters expose six tools:
+All adapters expose exactly seven tools:
 
 - `sniff_intake`
 - `sniff_install_tools`
 - `sniff_run_analyzer`
 - `sniff_report`
 - `sniff_read_report_artifact`
+- `sniff_read_analyzer_artifact`
 - `sniff_cancel`
 
 The authored skill in `.skill-source/sniff/` generates native skill trees for OMP, Claude Code, and Codex.
 
-The interview models five axes:
+The interview uses five frontier axes:
 
 - `target`
 - `intent`
-- `objectives`
 - `scopeMode`
-- analyzer family and tier
+- `objectives`
+- `budget`
 
-The first four axes form the adaptive frontier. Analyzer selection uses the confirmed target and objectives.
+Analyzer family and tier follow from the confirmed target, objectives, trust route, and availability.
 
 ## Install
 
@@ -80,18 +81,21 @@ A confirmed run follows this flow:
 2. Detect languages.
 3. Select analyzer recipes.
 4. Probe analyzer availability.
-5. Ask before installing a missing bundle.
+5. Approve installation.
 6. Run approved analyzers.
-7. Challenge findings in `full` mode.
-8. Render a validated report.
-9. Page complete report artifacts with `sniff_read_report_artifact` when needed.
-10. Ask before saving report files.
+7. If the preview omits observations, page them with `sniff_read_analyzer_artifact`.
+8. Challenge findings in `full` mode.
+9. Render a validated report.
+10. Use `sniff_read_report_artifact` to page complete findings.
+11. Before saving report files, get approval.
 
 Each approval has a separate boundary. A denied intake issues no lease. Installation approval does not authorize analysis. Save approval does not authorize a refactor. Use `sniff_cancel` to stop an unfinished run. Expiry and terminal report events also release the host-owned materialization.
 
-After `sniff_report`, call `sniff_read_report_artifact`. Pass its read capability and report ID. Pass the descriptor path. Continue with `nextOffset` until `eof`.
+If observations are absent from the preview, call `sniff_read_analyzer_artifact`. Pass `readCapability`, `analyzerResultId`, and one `relativePath` or `sourcePath`. Continue from `nextOffset` until `eof`.
 
-Each UTF-8-safe page is at most 64 KiB. The response includes `totalBytes` and a SHA-256 digest. The read capability remains usable in-process until bounded registry eviction. Saving to a repository still needs separate approval.
+After `sniff_report`, call `sniff_read_report_artifact`. Pass its `readCapability`, `reportId`, and descriptor `relativePath`. Continue with the returned `nextOffset` until `eof`.
+
+Registry expiry or eviction ends a read capability. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Saving to a repository still needs separate approval.
 
 `quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 

@@ -1,6 +1,14 @@
 # Sniff types
 
-Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same six tools.
+Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same seven tools:
+
+- `sniff_intake`
+- `sniff_install_tools`
+- `sniff_run_analyzer`
+- `sniff_report`
+- `sniff_read_analyzer_artifact`
+- `sniff_read_report_artifact`
+- `sniff_cancel`
 
 Use these values in structured intake. Natural-language requests describe interaction. They are not shell commands.
 
@@ -105,9 +113,11 @@ Sniff records each analyzer as selected, skipped, or unavailable. It rejects fuz
 
 - `lizard:complexity`: tool `lizard`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
 - `opengrep:hardcoded-values`: tool `opengrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
-- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; local; reads target configuration.
+- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; the recipe runs locally and reads target configuration.
 
 When cyclomatic complexity exceeds 10, function length exceeds 50, or parameter count exceeds 5, Lizard emits an observation.
+
+The `opengrep` recipe uses pinned OpenGrep v1.30.0. With explicit `sniff_install_tools` approval, Sniff downloads the platform asset and verifies its SHA-256 digest before caching it. Provisioning and probing use a host-owned neutral directory. They do not execute target code. A later analyzer run uses the fixed, config-free recipe against authorized files.
 
 The security catalog uses these three recipe IDs. Each recipe is default-enabled. A capability authorizes a selected recipe once for the confirmed target.
 
@@ -146,17 +156,27 @@ Installation approval stays separate from intake confirmation and analyzer execu
 - `render`: return validated report content to the host session. Do not write files.
 - `save`: need an explicit output directory. Write the report artifact set.
 
-Save mode writes:
+Save mode writes one report directory:
 
-- `<report-id>.json`
-- `<report-id>.md`
-- `<report-id>.receipt.json`
+```text
+<report-id>/
+├── index.json
+├── report.json
+├── summary.md
+├── manifest.json
+├── coverage.json
+├── receipt.json
+└── files/
+    └── <12-hex>-<safe-basename>.json
+```
 
 If a destination exists, Sniff refuses the complete save. The receipt records the report ID. It records the schema version. It records the canonical JSON SHA-256. It records the Markdown SHA-256. It records the finding count.
 
-After `sniff_report` returns render descriptors, call `sniff_read_report_artifact`. Pass its `readCapability` and `reportId`. Pass a descriptor `relativePath`. Continue with `nextOffset` until `eof`.
+After `sniff_run_analyzer` returns a truncated preview or complete observations are required, call `sniff_read_analyzer_artifact` with its `readCapability`, `analyzerResultId`, and either a descriptor `relativePath` or `sourcePath`. Continue with `nextOffset` until `eof`.
 
-Each UTF-8-safe page is at most 64 KiB. The response includes `totalBytes` and a SHA-256 digest. The capability remains usable in-process until registry eviction. Repository saves still need separate approval.
+After `sniff_report` returns render descriptors, call `sniff_read_report_artifact`. Pass its `readCapability`, `reportId`, and a descriptor `relativePath`. Continue with `nextOffset` until `eof`.
+
+Registry expiry or eviction ends a read capability. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Repository saves still need separate approval.
 
 `CoverageStatus` contains four values:
 

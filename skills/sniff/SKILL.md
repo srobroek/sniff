@@ -13,6 +13,7 @@ Read `skill://sniff/references/workflow.md` first. Follow these steps in order:
 
 1. Adaptive intake.
    - Read `skill://sniff/references/intake.md` and `skill://sniff/references/targeting.md`.
+   - Resolve the decision frontier in this order: `target`, `intent`, `scopeMode`, `objectives`, `budget`.
    - Call `sniff_intake`.
    - Ask only the highest-impact unresolved question.
    - Confirm one resolved plan.
@@ -29,17 +30,13 @@ Read `skill://sniff/references/workflow.md` first. Follow these steps in order:
    - For trusted local work, read each governing configuration file.
    - For remote work, do not load executable configuration or install dependencies.
 4. Run detection.
-   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`. If its preview is truncated, page `sniff_read_analyzer_artifact` by `sourcePath` or through `index.json`.
+   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`. If its preview is truncated or complete observations are needed, page `sniff_read_analyzer_artifact` with `analyzerResultId` and either `relativePath` or `sourcePath`; continue with `nextOffset` until `eof`.
    - Record unavailable analyzers as coverage gaps.
-   - For large targets, propose a `bloodhound` plan by language and subtree.
-   - Build each brief from `skill://sniff/references/scout-brief.md`.
-   - Include the matching `skill://sniff/references/languages/<lang>.md` path.
+   - For large targets, propose a `bloodhound` plan by language and subtree. Build each brief from `skill://sniff/references/scout-brief.md` and include the matching `skill://sniff/references/languages/<lang>.md` path.
 5. Map findings.
-   - Use `skill://sniff/references/refactoring-catalog.md`.
-   - Attach the complete catalog entry.
+   - Use `skill://sniff/references/refactoring-catalog.md` and attach the complete catalog entry.
 6. Challenge findings.
-   - Build the `refactor-challenger` brief from `skill://sniff/references/adversarial-brief.md`.
-   - Drop or downgrade refuted findings.
+   - Build the `refactor-challenger` brief from `skill://sniff/references/adversarial-brief.md` and drop or downgrade refuted findings.
 7. Report or apply.
    - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
    - Pass the capability and manifest ID to `sniff_report`; omit `extensions["sniff.intake"]` so the host injects the authenticated manifest.

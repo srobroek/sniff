@@ -130,7 +130,7 @@ A local marketplace add passed.
 `omp plugin install sniff@sniff --scope=user` passed in an isolated profile.
 
 The installed cache directory matched the source package SHA-256 `e2a95981a2faf4931470dc2fc4f0d3c87a460b7a081ca5ca72af50654c100560`.
-Fresh Bun imports registered exactly five cached extension tools in the 2026-09-11 run. That run predates `sniff_read_report_artifact` and does not verify the six-tool contract.
+The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
 Source-path search found no source checkout.
 
 Cached `sniff_install_tools` list returned `ok=true` without mutation.
@@ -174,7 +174,7 @@ Installed-cache validation passed.
 Cache-only startup loaded the inline plugin.
 
 Cache-only startup loaded two `.claude/skills` files.
-The tool listing passed with exactly five names in the 2026-09-11 run; that run predates `sniff_read_report_artifact` and does not verify the current six-tool contract.
+The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
 Direct cached Bun `1.4.2` stdio initialize passed.
 
 The cached bundle SHA-256 was `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
@@ -209,7 +209,7 @@ Skill discovery remains verified.
 
 MCP registration remains verified.
 
-The pre-reader tool listing remains verified for that clean-room run; the current six-tool listing is not rerun.
+The clean-room run covered the pre-reader listing only. The current seven-tool contract is NOT-RERUN.
 
 ### Codex `0.154.0.446`
 
@@ -220,7 +220,7 @@ A local marketplace add passed in an isolated `CODEX_HOME`.
 Cache startup read the plugin `mcp.json`.
 
 Cache startup launched `bun run ${PLUGIN_ROOT}/server.js`.
-The tool listing passed with exactly five names in the 2026-09-11 run; that run predates `sniff_read_report_artifact` and does not verify the current six-tool contract.
+The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
 The server initialized as `sniff` version `0.1.0`.
 
 Cached skill discovery loaded `skills/sniff/SKILL.md`.
@@ -258,7 +258,7 @@ The focused suite covers those paths at the protocol boundary.
 The checklist columns are Check, Native, and Focused.
 
 ```text
-Six tool registration | The current six-tool contract is not rerun in the clean-room evidence | Focused tests validate list and dispatch
+Seven tool registration | The current seven-tool contract is NOT-RERUN in the clean-room evidence | Focused tests validate list and dispatch
 Fresh marketplace and cache startup | OMP, Claude Code, and Codex passed local copied-source startup on 2026-09-11 | Packaging tests validate manifests
 Generated skill discovery | Each adapter loaded its copied-cache skill path | Skill generator tests validate every output tree
 Intake approval and denial | OMP denied no-UI interactive intake. Claude and Codex denied no-capability intake | Intake tests validate approval and lease invariants

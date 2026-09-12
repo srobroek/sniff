@@ -2,7 +2,7 @@
 
 Sniff creates one canonical report from an authenticated intake lease.
 
-Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`. Do not add these fields:
+Build the report input from `reportTarget` returned by `sniff_intake`. Copy it into `report.target`. Add `languages`. Omit these fields:
 
 - `root`
 - `paths`
@@ -33,6 +33,7 @@ A successful save atomically installs this layout under the authorized parent:
 ```text
 <report-id>/
 ├── index.json
+├── report.json
 ├── summary.md
 ├── manifest.json
 ├── coverage.json
@@ -44,7 +45,8 @@ A successful save atomically installs this layout under the authorized parent:
 The files contain:
 
 - `index.json`: report metadata and census values, with each artifact's reference, byte count, and SHA-256 digest
-- `summary.md`: the bounded high-priority view
+- `report.json`: the canonical report JSON
+- `summary.md`: the complete Markdown report
 - `manifest.json`: the authenticated intake manifest
 - `coverage.json`: canonical analyzer coverage
 - each file record: one normalized source path and its sorted findings

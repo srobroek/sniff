@@ -8,10 +8,11 @@ Interactive intake checks the decision frontier in this order:
 
 1. `target`
 2. `intent`
-3. `objectives`
-4. `budget`
+3. `scopeMode`
+4. `objectives`
+5. `budget`
 
-Sniff asks the next question. A complete prompt is silent at the frontier. Silence does not replace confirmation.
+Sniff asks the next unresolved question. A complete prompt is silent at the frontier. Silence does not replace confirmation.
 
 The plan keeps these axes separate:
 
@@ -71,6 +72,8 @@ Sniff enforces these limits:
 
 After preflight, Sniff checks the target again. Sniff blocks a file outside the root.
 
+If observations are absent from the preview or the run needs full artifacts, use `sniff_read_analyzer_artifact`. Pass `nextOffset` until `eof`.
+
 ## 6. Read and challenge findings
 
 Static tools do not cover every structural smell. Sniff reads the remaining target. It may divide large targets by language.
@@ -81,7 +84,15 @@ In `full` mode, a separate challenge pass tests each finding. The pass checks ev
 
 Match the target kind. Match the target label. Match the base ref and file count.
 
-`render` mode returns validated report content without writing files. `save` mode needs an explicit output directory. It writes a JSON report, Markdown report, and receipt.
+`render` mode returns validated report content without writing files. `save` mode needs an explicit output directory. It writes these files under a report directory:
+
+- `index.json`
+- `report.json`
+- `summary.md`
+- `manifest.json`
+- `coverage.json`
+- `receipt.json`
+- per-file artifacts under `files/`
 
 Applying a refactor needs separate approval. `plan-only` mode never applies changes.
 
@@ -91,4 +102,4 @@ A run that stops before reporting needs `sniff_cancel`.
 
 Cancellation closes the capability. It releases analyzer reservations. It removes the temporary checkout. It removes the analyzer home.
 
-A successful or failed report closes the lease. It performs the same cleanup. An expiry timer cleans abandoned runs. The lease registry is single-process state.
+A successful report closes the lease. A failed report keeps the lease active for a corrected retry. Cancellation performs the same cleanup as successful reporting. An expiry timer cleans abandoned runs. The lease registry is single-process state.
