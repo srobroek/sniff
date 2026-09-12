@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sniff",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
   "author": {
     "name": "srobroek"
@@ -14,7 +14,9 @@
         "longDescription": "A read-only-first code-smell audit workflow with adaptive intake, analyzer preflight, challenge review, and validated reports.",
         "developerName": "srobroek",
         "category": "Productivity",
-        "capabilities": ["Interactive"],
+        "capabilities": [
+          "Interactive"
+        ],
         "defaultPrompt": [
           "Audit this repository for code smells and produce a reviewed plan."
         ]
