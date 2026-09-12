@@ -53,12 +53,14 @@ Mise manages these catalog routes:
 - `cargo`
 - `go`
 
-During a non-dry-run installation of a bundle with managed entries, Sniff
-writes one `mise.toml` for that bundle. Set `SNIFF_TOOLKIT_CACHE_DIR` to change
-location. When the bundle configuration exists, managed entries use its
-environment for command checks. If mise cannot load that configuration, Sniff
-returns `unavailable-route`. Resolved tool directories precede shim directories
-in `PATH`. This order stops stale shims from winning command lookup.
+If installation is not a dry run and the bundle contains managed entries, Sniff
+resolves the mise executable. After resolution, Sniff writes the bundle's
+`mise.toml`. Set `SNIFF_TOOLKIT_CACHE_DIR` to change the cache location. Before
+the configuration exists, managed command checks use the process environment,
+and afterward they use the bundle environment. If mise cannot load an existing
+configuration, Sniff returns `unavailable-route`. Resolved tool directories
+precede shim directories in `PATH` to stop stale shims from winning command
+lookup.
 
 OpenGrep uses its verified download route. Project-local npm tools use the target
 repository. Rustup components use rustup.
