@@ -2,9 +2,8 @@
 
 Sniff ships one portable core with three adapters.
 
-- OMP loads extension entrypoints.
-- Claude Code loads the bundled MCP server from its plugin manifest.
-- Codex loads the bundled MCP server from its plugin manifest.
+- The native adapter loads extension entrypoints.
+- The Claude Code and Codex adapters load the bundled MCP server from their plugin manifests.
 
 Every adapter exposes exactly seven tools:
 
@@ -18,50 +17,31 @@ Every adapter exposes exactly seven tools:
 
 The authored skill in `.skill-source/sniff/` generates native skill trees for each adapter.
 
-## Status labels
-
-- `VERIFIED` marks source and focused-test evidence.
-- `NATIVE` marks a fresh harness installation or copied-cache probe.
-- `FOCUSED` marks a focused protocol test without a clean-room exercise.
-- `ENVIRONMENT-BLOCKED` marks an external model or registry condition.
-- `NOT-RERUN` marks a capability whose prior clean-room evidence predates the current contract and has not been rerun.
-- `N/A` marks an adapter-specific mechanism outside the portable contract.
-
-The matrix columns are OMP, CC for Claude Code, and CX for Codex.
-
 ## Capability matrix
 
+The matrix records the exact-head lifecycle run completed on 2026-09-12.
+
 ```text
-Capability | OMP | CC | CX
-Core and seven tools | NOT-RERUN | NOT-RERUN | NOT-RERUN
-Skill discovery | NATIVE | NATIVE | NATIVE
-Generated skill | VERIFIED | VERIFIED | VERIFIED
-sniff_intake | NATIVE | NATIVE | NATIVE
-sniff_install_tools | NATIVE | NATIVE | NATIVE
-sniff_run_analyzer | FOCUSED | FOCUSED | FOCUSED
-sniff_report render and save | FOCUSED | FOCUSED | FOCUSED
-sniff_read_report_artifact | NOT-RERUN | NOT-RERUN | NOT-RERUN
-sniff_read_analyzer_artifact | FOCUSED | FOCUSED | FOCUSED
-Approval and denial | NATIVE | NATIVE | NATIVE
-Cancellation and cleanup | NATIVE | FOCUSED | FOCUSED
-Expiry and replay rejection | FOCUSED | FOCUSED | FOCUSED
-Analyzer catalog | VERIFIED | VERIFIED | VERIFIED
-MCP transport | N/A | NATIVE | NATIVE
-OMP TTSR analyzer redirect | VERIFIED | N/A | N/A
-OMP agent definitions | VERIFIED | N/A | N/A
+Capability | OMP | Claude Code | Codex
+Core and seven tools | VERIFIED | VERIFIED | VERIFIED
+Skill discovery | VERIFIED | VERIFIED | VERIFIED
+Install list, probe, diagnose, and approval boundary | VERIFIED | VERIFIED | VERIFIED
+Adaptive intake and target authentication | VERIFIED | VERIFIED | VERIFIED
+OpenGrep execution | VERIFIED | VERIFIED | VERIFIED
+Analyzer artifact paging | VERIFIED | VERIFIED | VERIFIED
+Report validation and artifact paging | VERIFIED | VERIFIED | VERIFIED
+Capability replay rejection | VERIFIED | VERIFIED | VERIFIED
+Cancellation and cleanup | VERIFIED | VERIFIED | VERIFIED
+Target cleanliness | VERIFIED | VERIFIED | VERIFIED
 ```
 
-`FOCUSED` records behavior covered by protocol tests.
-
-The clean-room probes skipped packages.
-
-The clean-room probes skipped report saving.
+The native adapter uses extension tools. Claude Code and Codex use MCP transport. Adapter-specific transport does not change the portable contract.
 
 ## Evidence in the current tree
 
 The portable core lives in `src/core/`.
 
-OMP registration lives in these files:
+These files register the native adapter:
 
 - `package.json`
 - `extensions/sniff-intake-tool.ts`
@@ -111,163 +91,45 @@ The suite covers these paths:
 - generated skills
 - bundle shape
 
-The suite skips setup.
 
-The suite skips report saving in a clean-room harness.
+## Cross-harness verification
 
-## Dated clean-room outcomes
+The final matrix ran from commit `12e10cab52444dff2963043e0e5ad719dcd868ef` on 2026-09-12.
 
-The native probes ran on 2026-09-11.
+It exercised three adapters against these repositories:
 
-Each probe used a copied local marketplace source or copied installed cache.
+- KiroCrew with a Python fixture
+- chezmoi with a shell fixture
+- platevault with a TypeScript fixture
 
-Remote publication commands were not tested. Local checks used copied marketplace sources. Publication to public main or a release remains the delivery gate, so commands in [Getting started](getting-started.md) are prospective until publication occurs.
+All nine adapter-target runs passed. Each run:
 
-### OMP `omp/18.1.17`
+- exposed exactly seven Sniff tools
+- selected only `opengrep:hardcoded-values`
+- found the three planted observations
+- paged analyzer artifacts until EOF
+- rendered a validated report and paged it to EOF
+- rejected capability replay
+- canceled a second active lease
+- left the target repository unchanged
 
-A local marketplace add passed.
+The native adapter bundle had SHA-256 `789d1ca8b1a748794b8de97c8bac53a8071d9ea41783bdbb6ae2ee965f186261`.
 
-`omp plugin install sniff@sniff --scope=user` passed in an isolated profile.
+The MCP server bundle had SHA-256 `10b6904427c9be31a52ea1e4790c81634ed94650bd151750ca104aa504d6bc86`.
 
-The installed cache directory matched the source package SHA-256 `e2a95981a2faf4931470dc2fc4f0d3c87a460b7a081ca5ca72af50654c100560`.
-The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
-Source-path search found no source checkout.
+The external matrix directory holds the evidence because it contains temporary target paths and session records.
 
-Cached `sniff_install_tools` list returned `ok=true` without mutation.
+## Regression checklist
 
-A noninteractive `plan-only` intake issued a manifest and lease.
+Before publishing an adapter or portable-core change, run `bun run check`. It validates the generated assets and complete test suite.
 
-`sniff_cancel` released that lease.
+If a change affects any following surface, repeat the cross-harness lifecycle matrix:
 
-OMP denied the no-UI interactive intake attempt.
+- public tool schemas
+- capability or lease behavior
+- target authentication
+- analyzer dispatch or artifact paging
+- report validation or persistence
+- adapter packaging
 
-It issued no lease.
-
-The fresh OMP model and skill probe was environment-blocked.
-
-Every `omp -p` attempt stopped at the authorization gateway with `authorization timeout`.
-
-The gateway reported `ready:false` and `reason:not_configured`.
-
-That condition blocks a model-response claim.
-
-It preserves installation evidence.
-
-It preserves registration evidence.
-
-It preserves list evidence.
-
-It preserves lease evidence.
-
-It preserves cancellation evidence.
-
-### Claude Code `2.1.268 (Claude Code)` and toolbox `2.1.268.779`
-
-Strict source-marketplace validation passed.
-
-A copied local marketplace add passed.
-
-`sniff@sniff --scope user --yes` installation passed.
-
-Installed-cache validation passed.
-
-Cache-only startup loaded the inline plugin.
-
-Cache-only startup loaded two `.claude/skills` files.
-The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
-Direct cached Bun `1.4.2` stdio initialize passed.
-
-The cached bundle SHA-256 was `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
-
-The source bundle had the same hash.
-
-Cached list and dry-run probe returned `ok=true`.
-
-Those operations stayed read-only.
-
-A complete no-capability intake returned `isError=true`.
-
-It returned `sniff_operation_failed`.
-
-It issued no lease.
-
-After a Bedrock third-party probe, the model response probe stopped.
-
-The process exited with `124`.
-
-The probe removed the copied marketplace source.
-
-A native installed-registry fresh load reported `marketplace-load-failed/cache-miss`.
-
-Cache-only `--plugin-dir` startup remained proven.
-
-The cache contained no source-branch path.
-
-Cache startup remains verified.
-
-Skill discovery remains verified.
-
-MCP registration remains verified.
-
-The clean-room run covered the pre-reader listing only. The current seven-tool contract is NOT-RERUN.
-
-### Codex `0.154.0.446`
-
-A local marketplace add passed in an isolated `CODEX_HOME`.
-
-`codex plugin add sniff@sniff` passed.
-
-Cache startup read the plugin `mcp.json`.
-
-Cache startup launched `bun run ${PLUGIN_ROOT}/server.js`.
-The 2026-09-11 clean-room tool listing used a pre-reader bundle. It predates both artifact readers, so the current seven-tool contract is NOT-RERUN.
-The server initialized as `sniff` version `0.1.0`.
-
-Cached skill discovery loaded `skills/sniff/SKILL.md`.
-
-It did not fall back to `.agents/skills`.
-
-A fresh `codex exec` model probe called `sniff_install_tools` in `probe` mode.
-
-The probe returned `MCP_CALL=PASS`.
-
-Direct no-UI intake returned `confirmation_required`.
-
-It returned `isError=true`.
-
-It issued no lease.
-
-Source and cache server bundles matched SHA-256 `835cb534f92df897f0fff3dc4d952bbbef6f866260162f3e4a71a3eccef652e2`.
-
-The Codex clean-room removed its plugin and isolated directories.
-
-The CLI uses `codex plugin add`.
-
-The CLI does not provide `codex plugin install`.
-
-The clean-room skipped packages.
-
-It skipped analyzer execution.
-
-It skipped report artifact saving.
-
-The focused suite covers those paths at the protocol boundary.
-
-## Clean-room regression checklist
-
-The checklist columns are Check, Native, and Focused.
-
-```text
-Seven tool registration | The current seven-tool contract is NOT-RERUN in the clean-room evidence | Focused tests validate list and dispatch
-Fresh marketplace and cache startup | OMP, Claude Code, and Codex passed local copied-source startup on 2026-09-11 | Packaging tests validate manifests
-Generated skill discovery | Each adapter loaded its copied-cache skill path | Skill generator tests validate every output tree
-Intake approval and denial | OMP denied no-UI interactive intake. Claude and Codex denied no-capability intake | Intake tests validate approval and lease invariants
-Read-only list and probe | OMP and Claude passed list and probe. Codex passed a model probe | Installer tests validate probe and authorization boundaries
-Analyzer installation and execution | The clean-room skipped this row | Focused tests validate fixed-recipe dispatch and cancellation
-Report render and save | The clean-room skipped this row | Report tests validate render, save, receipts, and terminal cleanup
-Cancel an unfinished run | OMP issued and canceled a noninteractive lease | Lifecycle tests validate cancellation and materialization cleanup
-Expiry and replay rejection | The clean-room skipped this row | Lifecycle tests validate expiry and replay rejection
-Cache and temporary-root cleanup | Each adapter removed its isolated probe roots | Cleanup assertions validate terminal release paths
-```
-
-A native pass proves the host installation and adapter boundary that it exercises. A focused pass proves the portable contract paths that the clean-room gate does not run.
+A focused protocol test does not replace a harness lifecycle run for these surfaces.

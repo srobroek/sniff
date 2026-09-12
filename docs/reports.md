@@ -14,7 +14,12 @@ Build the report input from `reportTarget` returned by `sniff_intake`. Copy it i
 
 Render mode returns a bounded Markdown summary and virtual artifact descriptors. It does not write files. The summary shows the highest-priority findings and links each shown source file to its per-file artifact. The complete findings remain available through the virtual descriptors.
 
-The OMP and MCP adapters return only the summary, bounded descriptors, census receipt, and saved-path metadata. They do not return the canonical report JSON or authenticated manifest.
+Every adapter returns bounded metadata instead of the canonical report JSON or authenticated manifest. The response contains:
+
+- the summary
+- artifact descriptors
+- the census receipt
+- saved-path metadata
 
 After rendering, call `sniff_read_report_artifact`. Pass the returned `readCapability` and `reportId`. Pass the descriptor `relativePath`. Continue with `nextOffset` until `eof`.
 

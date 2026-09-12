@@ -1,6 +1,6 @@
 # Getting started
 
-Sniff uses one portable core. OMP loads a native extension. Claude Code and Codex load MCP adapters. Every adapter exposes exactly seven tools.
+Sniff exposes one portable workflow through native and MCP adapters. Every adapter provides the same seven tools.
 
 ## Requirements
 
@@ -10,32 +10,30 @@ Install Bun for the bundled MCP server. Claude Code and Codex use Bun to run tha
 
 ## Install an adapter
 
-After the cross-harness branch or release reaches public main or a public release, run the GitHub marketplace commands for your harness.
+Use the marketplace commands for your harness.
 
 ### OMP
 
 ```sh
 omp plugin marketplace add https://github.com/srobroek/sniff.git
-omp plugin install sniff@srobroek/sniff --scope=user
+omp plugin install sniff@sniff --scope=user
 ```
 
 ### Claude Code
 
 ```sh
 claude plugin marketplace add https://github.com/srobroek/sniff.git
-claude plugin install sniff@srobroek/sniff --scope user --yes
+claude plugin install sniff@sniff --scope user --yes
 ```
 
 ### Codex
 
 ```sh
 codex plugin marketplace add https://github.com/srobroek/sniff.git
-codex plugin add sniff@srobroek/sniff
+codex plugin add sniff@sniff
 ```
 
-After the cross-harness branch or release reaches public main or a public release, run these commands. Validation on 2026-09-11 used copied local marketplace sources. The remaining delivery gate is publication to public main or a public release. Remote publication was not tested.
-
-After installation, start a new session. Run it from the repository that you want to inspect.
+After installation, start a new session in the repository that you want to inspect.
 
 ## Describe the intake
 
@@ -51,11 +49,14 @@ Analyzer family and tier follow from the target, objectives, trust route, and av
 
 The five frontier axes form the decision frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next unresolved question.
 
-For example:
+Example requests:
 
-> Inspect the uncommitted changes for structure and correctness in plan-only mode with a five-minute budget.
+- `Find code smells in the authentication package.`
+- `Audit my uncommitted changes for correctness and maintainability.`
+- `Review this pull request for structural risks.`
+- `Plan a safe refactor of the cache layer without applying changes.`
 
-Sniff resolves the target. Sniff resolves the intent. Sniff resolves scope mode. Sniff resolves objective groups. Sniff records the budget. Sniff shows the plan for confirmation.
+Requests can specify any frontier axis. Sniff resolves missing choices and shows the plan that needs confirmation.
 
 Read [Interviewing](interviewing.md) for request patterns and noninteractive defaults. Read [Sniff types](sniff-types.md) for exact values.
 

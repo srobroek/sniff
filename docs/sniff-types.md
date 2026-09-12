@@ -1,6 +1,6 @@
 # Sniff types
 
-Sniff keeps intake and report axes separate in one portable core. OMP exposes the core through native extension tools. Claude Code and Codex expose it through the bundled MCP server. All three adapters expose the same seven tools:
+Sniff keeps intake and report axes separate in one portable core. Native and MCP adapters expose the same seven tools:
 
 - `sniff_intake`
 - `sniff_install_tools`

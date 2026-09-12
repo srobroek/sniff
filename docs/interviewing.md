@@ -1,6 +1,6 @@
 # Interviewing
 
-Sniff uses one harness-neutral interview contract. OMP presents the contract through its native extension UI. Claude Code and Codex present it through MCP elicitation.
+Sniff uses one harness-neutral interview contract. Each adapter presents the same decisions through its host interface.
 
 The host confirms the plan. Sniff issues a run capability.
 
@@ -47,11 +47,9 @@ Before confirmation, review these values:
 
 The interactive host asks questions.
 
-OMP uses its native confirmation UI.
-
 ## Interactive and noninteractive intake
 
-The host can expose elicitation. Both adapters use it.
+Adapters with elicitation support use it for confirmation.
 
 Authorized noninteractive intake supplies `target` and `intent` through host authorization. The trusted host records the authorization receipt. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking frontier questions.
 

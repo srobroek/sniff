@@ -26,7 +26,7 @@ All adapters expose exactly seven tools:
 - `sniff_read_analyzer_artifact`
 - `sniff_cancel`
 
-The authored skill in `.skill-source/sniff/` generates native skill trees for OMP, Claude Code, and Codex.
+The authored skill generates native skill trees for every supported adapter.
 
 The interview uses five frontier axes:
 
@@ -44,36 +44,41 @@ Install Git.
 
 Install Bun for the bundled Claude Code and Codex MCP server. The clean-room probe used Bun `1.4.2`.
 
-After the cross-harness branch or release reaches public main or a public release, run the GitHub marketplace commands for your harness.
+Use the marketplace commands for your harness.
 
 ### OMP
 
 ```sh
 omp plugin marketplace add https://github.com/srobroek/sniff.git
-omp plugin install sniff@srobroek/sniff --scope=user
+omp plugin install sniff@sniff --scope=user
 ```
 
 ### Claude Code
 
 ```sh
 claude plugin marketplace add https://github.com/srobroek/sniff.git
-claude plugin install sniff@srobroek/sniff --scope user --yes
+claude plugin install sniff@sniff --scope user --yes
 ```
 
 ### Codex
 
 ```sh
 codex plugin marketplace add https://github.com/srobroek/sniff.git
-codex plugin add sniff@srobroek/sniff
+codex plugin add sniff@sniff
 ```
 
-After the cross-harness branch or release reaches public main or a public release, run these commands.
-
-Validation on 2026-09-11 used copied local marketplace sources. The remaining delivery gate is publication to public main or a public release. Remote publication was not tested.
 
 ## Use Sniff
 
 Describe the target and desired outcome in the host conversation. Sniff asks for the highest-impact unresolved choice. Sniff asks for the next choice. A complete request still needs plan confirmation.
+
+Example requests:
+
+- `Find code smells in src/auth and explain which ones are worth fixing.`
+- `Audit this branch for maintainability risks without changing code.`
+- `Review PR 42 for structural problems and risky refactoring opportunities.`
+- `Plan a refactor of the payment module, but do not apply it.`
+- `Check these files for hardcoded credentials and configuration values.`
 
 A confirmed run follows this flow:
 

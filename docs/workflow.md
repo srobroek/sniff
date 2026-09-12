@@ -1,6 +1,6 @@
 # Workflow
 
-Sniff binds one run from intake through reporting. A capability and manifest ID authorize later tool calls. The current verified adapter is OMP.
+Sniff binds one run from intake through reporting. A capability and manifest ID authorize later tool calls. Every adapter follows this workflow.
 
 ## 1. Interview the request
 
@@ -34,7 +34,7 @@ Sniff resolves Git refs to immutable commits. Mutable local targets remain in pl
 
 Sniff displays the target label and file count. It displays checkout mode. It displays analyzer choices and skipped analyzers. It displays the budget. It displays defaults and gaps. It displays the trust route.
 
-Interactive runs need confirmation through OMP. Sniff issues a capability only for the confirmed manifest. It rejects changed manifests and replayed capabilities.
+Interactive runs need confirmation through the host interface. Sniff issues a capability only for the confirmed manifest. It rejects changed manifests and replayed capabilities.
 
 Noninteractive runs need host authorization. They skip frontier questions.
 
@@ -102,4 +102,4 @@ A run that stops before reporting needs `sniff_cancel`.
 
 Cancellation closes the capability. It releases analyzer reservations. It removes the temporary checkout. It removes the analyzer home.
 
-A successful report closes the lease. A failed report keeps the lease active for a corrected retry. Cancellation performs the same cleanup as successful reporting. An expiry timer cleans abandoned runs. The lease registry is single-process state.
+A successful report closes the lease. A failed report keeps the lease active for another attempt. Cancellation performs the same cleanup as successful reporting. An expiry timer cleans abandoned runs. The lease registry is single-process state.
