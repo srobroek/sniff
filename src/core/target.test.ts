@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runArgv, type ArgvRunner, resolveTarget } from "./target.ts";
+import { type ArgvRunner, resolveTarget, runArgv } from "./target.ts";
 import { resolveTargetLease } from "./target-provider.ts";
 
 const temporary: string[] = [];

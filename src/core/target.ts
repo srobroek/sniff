@@ -255,7 +255,7 @@ async function immutableRef(runner: ArgvRunner, root: string, ref: string): Prom
   return value.toLowerCase();
 }
 
-function parseChanges(output: string): TargetChange[] {
+export function parseGitNameStatus(output: string): TargetChange[] {
   const changes: TargetChange[] = [];
   if (output.includes("\0")) {
     const fields = output.split("\0").filter(Boolean);
@@ -286,7 +286,7 @@ function parseChanges(output: string): TargetChange[] {
 
 async function changedEntries(runner: ArgvRunner, root: string, base: string, head: string): Promise<TargetChange[]> {
   const output = await execute(runner, ["git", "diff", "--name-status", "--find-renames", "-z", `${base}...${head}`], root);
-  return parseChanges(output.stdout);
+  return parseGitNameStatus(output.stdout);
 }
 
 function analyzableChangeFiles(changes: readonly TargetChange[]): string[] {

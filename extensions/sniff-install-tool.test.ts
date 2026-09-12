@@ -228,6 +228,26 @@ describe("probe timeouts", () => {
 		expect(calls.filter(({ bin }) => bin !== "opengrep").every(({ timeoutMs }) => timeoutMs === 1_500)).toBe(true);
 	});
 
+	test("runs Cargo version probes outside the target repository", async () => {
+		const target = tempDir("sniff-untrusted-cargo-config-");
+		const calls: Array<{ argv: string[]; cwd: string }> = [];
+		const result = await runSniffInstall({
+			mode: "diagnose",
+			bundles: ["rust"],
+			cwd: target,
+			runtime: fakeRuntime({
+				run: async (argv, cwd, _env, timeoutMs) => {
+					calls.push({ argv, cwd });
+					return commandResult(argv, timeoutMs);
+				},
+			}),
+		});
+		expect(result.ok).toBe(true);
+		const cargoProbes = calls.filter(({ argv }) => argv[0] === "/fake/bin/cargo");
+		expect(cargoProbes.length).toBeGreaterThan(0);
+		expect(cargoProbes.every(({ cwd }) => cwd !== target)).toBe(true);
+	});
+
 	test("does not oscillate status at the old timeout boundary", async () => {
 		const statuses: string[] = [];
 		const runtime = fakeRuntime({

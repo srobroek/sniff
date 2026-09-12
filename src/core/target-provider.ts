@@ -6,17 +6,18 @@ import {
   type ArgvRunner,
   type HistoryWindow,
   isImmutableRef,
+  parseGitNameStatus,
   type ResolvedTarget,
   redactTransportValues,
+  resolveTarget as resolveLocalTarget,
+  resolveTargetLease as resolveLocalTargetLease,
+  runArgv,
   type TargetChange,
   type TargetRequest,
   TargetResolutionError,
   validateGitOperand,
   validateRepository,
-  resolveTarget as resolveLocalTarget,
-  resolveTargetLease as resolveLocalTargetLease,
   withResolvedTarget as withLocalResolvedTarget,
-  runArgv,
 } from "./target.ts";
 
 export type ProviderName = "github" | "gitlab" | "generic-git";
@@ -392,31 +393,7 @@ function commitRows(result: ArgvResult): string[] {
 
 async function historyDiff(root: string, base: string, head: string, runner: ArgvRunner): Promise<TargetChange[]> {
   const result = await runGit(runner, root, ["diff", "--name-status", "--find-renames", "-z", `${base}...${head}`], "History diff failed");
-  const changes: TargetChange[] = [];
-  if (result.stdout.includes("\0")) {
-    const fields = result.stdout.split("\0").filter(Boolean);
-    for (let index = 0; index < fields.length;) {
-      const code = fields[index++] ?? "";
-      const status = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : code.startsWith("R") ? "renamed" : code.startsWith("M") ? "modified" : "unknown";
-      const first = fields[index++] ?? "";
-      const second = status === "renamed" ? fields[index++] : undefined;
-      const basePath = status === "added" ? undefined : first;
-      const headPath = status === "deleted" ? undefined : (second ?? first);
-      const path = headPath ?? basePath;
-      if (path) changes.push({ path, status, ...(basePath ? { basePath } : {}), ...(headPath ? { headPath } : {}) });
-    }
-  } else {
-    for (const line of result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean)) {
-      const fields = line.split("\t");
-      const code = fields.length > 1 ? fields[0] ?? "" : "";
-      const first = fields.length > 1 ? fields[1] ?? "" : line;
-      const status = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : code.startsWith("M") ? "modified" : "unknown";
-      const basePath = status === "added" ? undefined : first;
-      const headPath = status === "deleted" ? undefined : first;
-      changes.push({ path: first, status, ...(basePath ? { basePath } : {}), ...(headPath ? { headPath } : {}) });
-    }
-  }
-  return changes.sort((left, right) => left.path.localeCompare(right.path));
+  return parseGitNameStatus(result.stdout);
 }
 
 async function logRange(root: string, args: readonly string[], runner: ArgvRunner): Promise<string[]> {

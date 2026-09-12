@@ -1,10 +1,10 @@
 import { basename } from "node:path";
 import {
 	buildNoninteractiveManifest,
+	type CanonicalConfirmationRequest,
 	canonicalConfirmationRequest,
 	createRunManifest,
 	decisionFrontier,
-	type CanonicalConfirmationRequest,
 	type IntakeAuthority,
 	type IntakeInput,
 	type IntakeInterview,
@@ -12,8 +12,8 @@ import {
 	type ScopeMode,
 } from "./intake.ts";
 import { issueRunLease, type RunLeaseReceipt } from "./run-registry.ts";
-import { resolveTargetLease } from "./target-provider.ts";
 import { type ArgvRunner, runArgv } from "./target.ts";
+import { resolveTargetLease } from "./target-provider.ts";
 
 export type SniffIntakeToolOptions = { readonly input: IntakeInput };
 const REPORT_KIND_BY_TARGET = {

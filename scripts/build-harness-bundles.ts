@@ -136,7 +136,6 @@ async function buildBundle(repoRoot: string, entrypoint: string): Promise<Uint8A
 		splitting: false,
 		minify: true,
 		allowUnresolved: [],
-		write: false,
 	});
 	if (!result.success) {
 		const details = result.logs.map((log) => log.message).join("\n");

@@ -18,7 +18,7 @@ const generatedRoots = [
 	join(repoRoot, ".claude", "skills", "sniff"),
 	join(repoRoot, ".agents", "skills", "sniff"),
 	join(repoRoot, "dist", "codex", "skills", "sniff"),
-];
+] as const;
 
 function filesUnder(root: string): string[] {
 	const files: string[] = [];

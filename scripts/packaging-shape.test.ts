@@ -6,7 +6,6 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
-	realpathSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -548,7 +547,7 @@ test("Copied Claude and nested Codex caches serve exactly seven MCP tools", asyn
 		assertOpenGrepResource(claudeRoot, join("dist", "claude", OPENGREP_RULE_NAME));
 		const claudeTools = await listTools(String(claude.command), claudeArgs, claudeRoot);
 		expect(claudeTools).toHaveLength(EXPECTED_TOOLS.length);
-		expect(claudeTools.map((tool) => tool.name)).toEqual(EXPECTED_TOOLS);
+		expect(claudeTools.map((tool) => tool.name)).toEqual([...EXPECTED_TOOLS]);
 
 		const codexRoot = join(cache, "codex");
 		copyCodexPackage(codexRoot);
@@ -563,7 +562,7 @@ test("Copied Claude and nested Codex caches serve exactly seven MCP tools", asyn
 		assertOpenGrepResource(codexRoot, OPENGREP_RULE_NAME);
 		const codexTools = await listTools(String(codex.command), codexArgs, codexRoot);
 		expect(codexTools).toHaveLength(EXPECTED_TOOLS.length);
-		expect(codexTools.map((tool) => tool.name)).toEqual(EXPECTED_TOOLS);
+		expect(codexTools.map((tool) => tool.name)).toEqual([...EXPECTED_TOOLS]);
 	} finally {
 		rmSync(cache, { recursive: true, force: true });
 	}

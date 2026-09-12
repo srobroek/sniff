@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import type { ReportArtifacts, ReportArtifactDescriptor } from "./report.ts";
+import type { ReportArtifactDescriptor, ReportArtifacts } from "./report.ts";
 
 export const REPORT_ARTIFACT_CHUNK_BYTES = 64 * 1024;
 export const MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES = 32;
@@ -39,6 +39,7 @@ function canonicalReceiptJson(artifacts: ReportArtifacts): string {
 function contentsFor(artifacts: ReportArtifacts): Map<string, string> {
   const contents = new Map<string, string>([
     ["index.json", artifacts.indexJson],
+    ["report.json", artifacts.json],
     ["summary.md", artifacts.fullMarkdown],
     ["manifest.json", artifacts.manifestJson],
     ["coverage.json", artifacts.coverageJson],

@@ -7,8 +7,17 @@ import {
 	realpathSync,
 	statSync,
 } from "node:fs";
-import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
+import { type AnalyzerCapture, type AnalyzerObservation, parseAnalyzerOutput } from "./analyzer-output.ts";
+import {
+	BUNDLES,
+	type BundleName,
+	TOOLS,
+	type ToolRec,
+} from "./catalog.ts";
+import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
 import {
 	type AnalyzerRunAuthorization,
 	abandonAnalyzerReservation,
@@ -16,15 +25,7 @@ import {
 	completeAnalyzerReservation,
 	prepareAnalyzerSpawn,
 } from "./run-registry.ts";
-import {
-	BUNDLES,
-	type BundleName,
-	TOOLS,
-	type ToolRec,
-} from "./catalog.ts";
-import { createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts, type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview } from "./analyzer-artifact-registry.ts";
-import { parseAnalyzerOutput, type AnalyzerCapture, type AnalyzerObservation } from "./analyzer-output.ts";
-import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable, type OpenGrepProvisionResult } from "./opengrep.ts";
+
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
 const ENV_REFRESH_TIMEOUT_MS = 10_000;
@@ -312,8 +313,9 @@ async function inspectTool(
   const attempts: ProbeAttempt[] = [];
   const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
   const probeTimeoutMs = rec.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+  const executionCwd = rec.key === "npm-local" && allowAuthorizedProjectLocalProbe ? cwd : tmpdir();
   for (const args of probeArgs) {
-    const result = await runtime.run([resolvedPath, ...args], cwd, effectiveEnv, probeTimeoutMs, signal);
+    const result = await runtime.run([resolvedPath, ...args], executionCwd, effectiveEnv, probeTimeoutMs, signal);
     attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
     if (result.exitCode === 0 && !result.timedOut && !result.error) {
       return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };

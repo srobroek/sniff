@@ -398,9 +398,10 @@ describe("structured Sniff reports", () => {
     const directory = mkdtempSync(join(import.meta.dir, ".sniff-report-tool-"));
     temporaryDirectories.push(directory);
     const saved = await runSniffReportTool({ ...authorizedReport(), mode: "save", path: directory, runtime: { authorizeSave: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority" }) } });
-    expect(saved.savedPaths).toHaveLength(6);
+    expect(saved.savedPaths).toHaveLength(7);
     expect(saved.savedPaths.every((path) => path.startsWith(join(directory, saved.artifacts.report.reportId)))).toBe(true);
     expect(saved.publicArtifacts.descriptors.some((descriptor) => descriptor.savedPath !== undefined)).toBe(true);
+    expect(readFileSync(join(directory, saved.artifacts.report.reportId, "report.json"), "utf8")).toBe(saved.artifacts.json);
 
     const nestedParentRoot = mkdtempSync(join(tmpdir(), "sniff-report-parent-"));
     temporaryDirectories.push(nestedParentRoot);
@@ -497,7 +498,7 @@ describe("structured Sniff reports", () => {
     expect(Buffer.byteLength(JSON.stringify(projection.descriptors))).toBeLessThanOrEqual(MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES);
     expect(projection.descriptors.every((descriptor) => !Object.hasOwn(descriptor, "sourcePath"))).toBe(true);
     expect(projection.descriptors).toHaveLength(128);
-    expect(projection.descriptorCount).toBe(10_005);
+    expect(projection.descriptorCount).toBe(10_006);
     expect(projection.descriptorsTruncated).toBe(true);
     expect(artifacts.fileArtifacts).toHaveLength(10_000);
     expect(artifacts.fileArtifacts.reduce((total, file) => total + file.findings.length, 0)).toBe(10_000);

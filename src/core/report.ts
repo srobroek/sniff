@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, resolve, sep } from "node:path";
+import { type OpenedReportDirectory, openReportDirectory, saveReportEntriesAt } from "./report-native-persistence.ts";
 import { assertReportInput, assertSniffReportSchema } from "./report-schema.ts";
-import { openReportDirectory, saveReportEntriesAt, type OpenedReportDirectory } from "./report-native-persistence.ts";
 
 export const SNIFF_REPORT_SCHEMA_VERSION = "1.0.0" as const;
 export const MAX_REPORT_SUMMARY_BYTES = 60_000;
@@ -88,7 +88,7 @@ export interface ValidationReceipt {
   artifactCount: number;
 }
 
-export type ReportArtifactKind = "index" | "summary" | "manifest" | "coverage" | "receipt" | "file";
+export type ReportArtifactKind = "index" | "report" | "summary" | "manifest" | "coverage" | "receipt" | "file";
 
 export interface ReportArtifactDescriptor {
   kind: ReportArtifactKind;
@@ -117,6 +117,7 @@ export interface ReportArtifactIndex {
   headline: string;
   census: SniffReport["census"];
   references: {
+    report: string;
     summary: string;
     manifest: string;
     coverage: string;
@@ -282,7 +283,7 @@ function escapeMarkdown(value: string): string {
   return value
     .replaceAll("\\", "\\\\")
     .replace(/\r\n?|[\n\u2028\u2029]/g, " ")
-    .replace(/[<>`*_\[\]#]/g, "\\$&")
+    .replace(/[<>`*_[\]#]/g, "\\$&")
     .replaceAll("|", "\\|");
 }
 
@@ -445,6 +446,7 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
   const coverageJson = canonicalJson(report.coverage);
   const fileArtifacts = createFileArtifacts(report);
   const nonIndex: ReportArtifactDescriptor[] = [
+    { kind: "report", relativePath: "report.json", sha256: sha256(json), bytes: Buffer.byteLength(json) },
     { kind: "summary", relativePath: "summary.md", sha256: sha256(fullMarkdown), bytes: Buffer.byteLength(fullMarkdown) },
     { kind: "manifest", relativePath: "manifest.json", sha256: sha256(manifestJson), bytes: Buffer.byteLength(manifestJson) },
     { kind: "coverage", relativePath: "coverage.json", sha256: sha256(coverageJson), bytes: Buffer.byteLength(coverageJson) },
@@ -469,7 +471,7 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
     target: { kind: report.target.kind, label: report.target.label, scopeMode: report.target.scopeMode, filesAnalyzed: report.target.filesAnalyzed },
     headline: report.headline,
     census: report.census,
-    references: { summary: "summary.md", manifest: "manifest.json", coverage: "coverage.json", receipt: "receipt.json" },
+    references: { report: "report.json", summary: "summary.md", manifest: "manifest.json", coverage: "coverage.json", receipt: "receipt.json" },
     files: fileArtifacts.map(({ sourcePath, relativePath, sha256: fileSha256, bytes, findings }) => ({ sourcePath, relativePath, sha256: fileSha256, bytes, findingCount: findings.length })),
     artifacts: descriptorsWithoutIndex.map(({ kind, relativePath, sha256: artifactSha256, bytes }) => ({ kind, relativePath, sha256: artifactSha256, bytes })),
   };
@@ -525,6 +527,7 @@ export function canonicalizeTrustedTemporaryPrefix(directory: string): string {
 function saveEntries(artifacts: ReportArtifacts): readonly (readonly [string, string])[] {
   return [
     ["index.json", artifacts.indexJson],
+    ["report.json", artifacts.json],
     ["summary.md", artifacts.fullMarkdown],
     ["manifest.json", artifacts.manifestJson],
     ["coverage.json", artifacts.coverageJson],

@@ -1,20 +1,20 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
-import { canonicalReportTargetIdentity } from "./intake-use-case.ts";
 import type { RunManifest } from "./intake.ts";
+import { canonicalReportTargetIdentity } from "./intake-use-case.ts";
 import {
   buildSniffReport,
   canonicalizeTrustedTemporaryPrefix,
   createReportArtifacts,
-  projectReportArtifacts,
-  saveReportArtifactsAt,
   type PublicReportArtifacts,
+  projectReportArtifacts,
   type ReportArtifacts,
   type ReportInput,
   type ReportTarget,
+  saveReportArtifactsAt,
 } from "./report.ts";
-import { openReportDirectory, type OpenedReportDirectory } from "./report-native-persistence.ts";
 import { registerReportArtifacts } from "./report-artifact-registry.ts";
+import { type OpenedReportDirectory, openReportDirectory } from "./report-native-persistence.ts";
 import { finalizeRunLease, readRunManifest, validateReportCoverage, validateReportManifest } from "./run-registry.ts";
 
 export type SniffReportMode = "render" | "save";

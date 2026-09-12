@@ -1,6 +1,6 @@
+import { dlopen, FFIType, read } from "bun:ffi";
 import { closeSync, fchmodSync, writeSync } from "node:fs";
 import { parse, resolve, sep } from "node:path";
-import { dlopen, FFIType, read } from "bun:ffi";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
 
