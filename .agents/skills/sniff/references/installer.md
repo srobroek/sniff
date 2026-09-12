@@ -32,11 +32,10 @@ Optional: jscpd
 Reason: jscpd adds TypeScript coverage not supplied by the Go duplicate checker.
 ```
 
-Sniff uses mise to verify commands. If the isolated environment cannot run a
-command, the installer reports a failure.
-Before Sniff runs an analyzer, it verifies that the command can run. An unusable
-command blocks only that analyzer. The result records diagnostic details and a
-repair instruction.
+Sniff verifies each command through its catalog route. Managed toolkit entries
+use the bundle's mise environment. Before Sniff runs an analyzer, it verifies
+that the command can run. An unusable command blocks only that analyzer. The
+result records diagnostic details and a repair instruction.
 
 ## Bundles
 
@@ -54,14 +53,12 @@ Mise manages these catalog routes:
 - `cargo`
 - `go`
 
-Sniff writes one `mise.toml` for each bundle in its toolkit cache. Set
-`SNIFF_TOOLKIT_CACHE_DIR` to change the cache location.
-
-For each probe, Sniff loads the bundle configuration. Diagnose mode and analyzer
-preflight use the same environment. If mise is absent, installation returns
-`unavailable-route`.
-Resolved tool directories precede shim directories in `PATH`. This order stops
-stale shims from winning command lookup.
+During a non-dry-run installation of a bundle with managed entries, Sniff
+writes one `mise.toml` for that bundle. Set `SNIFF_TOOLKIT_CACHE_DIR` to change
+location. When the bundle configuration exists, managed entries use its
+environment for command checks. If mise cannot load that configuration, Sniff
+returns `unavailable-route`. Resolved tool directories precede shim directories
+in `PATH`. This order stops stale shims from winning command lookup.
 
 OpenGrep uses its verified download route. Project-local npm tools use the target
 repository. Rustup components use rustup.
