@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
+import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../src/core/analyzer-artifact-registry.ts";
 import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } from "../src/core/analyzer-output.ts";
 import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
@@ -676,7 +677,8 @@ describe("sniff tools integration", () => {
 				onUpdate: unknown,
 				context: { cwd: string },
 			) => Promise<{
-				details: { ok: boolean; tools: Array<Record<string, unknown>> };
+				content: Array<{ type: string; text: string }>;
+				details: { ok: boolean; tools: Array<Record<string, unknown>>; [key: string]: unknown };
 				isError?: boolean;
 			}>;
 		};
@@ -712,3 +714,66 @@ describe("sniff tools integration", () => {
 		expect(out.details.tools[0]).toHaveProperty("status");
 	});
 });
+
+
+	test("analyzer reader content carries IDs and paging metadata within the model bound", async () => {
+		type RegisteredTool = {
+			name: string;
+			description: string;
+			execute: (
+				id: string,
+				params: Record<string, unknown>,
+				signal: unknown,
+				onUpdate: unknown,
+				context: { cwd: string },
+			) => Promise<{
+				content: Array<{ type: string; text: string }>;
+				details: { ok: boolean; tools: Array<Record<string, unknown>>; [key: string]: unknown };
+				isError?: boolean;
+			}>;
+		};
+		clearAnalyzerArtifactRegistryForTests();
+		const artifacts = createAnalyzerArtifacts(
+			"opengrep:test",
+			Array.from({ length: 2_000 }, (_, index) => ({
+				ruleId: "rule",
+				path: "src/large.ts",
+				start: { line: index + 1, column: 1 },
+				message: `finding-${index}-${"x".repeat(96)}`,
+				severity: "WARNING",
+			})),
+			"analyzer-result-test",
+		);
+		const capability = registerAnalyzerArtifacts(artifacts);
+		const enumCalls: string[][] = [];
+		const captured = new Map<string, RegisteredTool>();
+		const fakePi = {
+			...fakeZod(enumCalls),
+			registerTool: (definition: RegisteredTool) => {
+				captured.set(definition.name, definition);
+			},
+			on: () => {},
+		};
+		sniffInstallTool(fakePi as never);
+		const reader = captured.get("sniff_read_analyzer_artifact");
+		if (!reader) throw new Error("sniff_read_analyzer_artifact was not registered");
+		const path = artifacts.descriptors.find((descriptor) => descriptor.kind === "source-file")?.relativePath;
+		if (!path) throw new Error("source artifact was not registered");
+		const first = await reader.execute("id", { capability, analyzerResultId: artifacts.analyzerResultId, relativePath: path }, undefined, undefined, { cwd: process.cwd() });
+		const firstText = first.content[0]?.text ?? "";
+		const firstPage = JSON.parse(firstText) as { analyzerResultId: string; relativePath: string; offset: number; nextOffset: number; eof: boolean; bytes: number; content: string };
+		expect(firstPage.analyzerResultId).toBe(artifacts.analyzerResultId);
+		expect(firstPage.relativePath).toBe(path);
+		expect(firstPage.offset).toBe(0);
+		expect(firstPage.nextOffset).toBeGreaterThan(firstPage.offset);
+		expect(firstPage.bytes).toBe(Buffer.byteLength(firstPage.content));
+		expect(Buffer.byteLength(firstText)).toBeLessThan(64 * 1024);
+
+		const second = await reader.execute("id", { capability, analyzerResultId: firstPage.analyzerResultId, relativePath: firstPage.relativePath, offset: firstPage.nextOffset }, undefined, undefined, { cwd: process.cwd() });
+		const secondPage = JSON.parse(second.content[0]?.text ?? "") as { analyzerResultId: string; offset: number; nextOffset: number; content: string };
+		expect(secondPage.analyzerResultId).toBe(firstPage.analyzerResultId);
+		expect(secondPage.offset).toBe(firstPage.nextOffset);
+		expect(secondPage.nextOffset).toBeGreaterThan(secondPage.offset);
+		clearAnalyzerArtifactRegistryForTests();
+
+	});

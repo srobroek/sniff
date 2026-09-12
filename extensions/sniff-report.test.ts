@@ -21,6 +21,7 @@ import { readReportArtifact, registerReportArtifacts } from "../src/core/report-
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
 import { issueRunLease } from "../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../src/core/target.ts";
+import sniffReportTool from "./sniff-report-tool.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -99,6 +100,38 @@ function authorizedReport(input: ReportInput = reportInput()): Parameters<typeof
     manifestId: lease.manifestId,
     report: { ...input, target: { ...canonicalReportTargetIdentity(manifest.resolvedTarget, manifest.scopeMode), languages: input.target.languages }, findings, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
   };
+}
+type RegisteredReportOutput = {
+  readonly content: readonly { readonly type: string; readonly text: string }[];
+  readonly details: Record<string, unknown>;
+  readonly isError?: boolean;
+};
+
+type RegisteredReportTool = {
+  readonly name: string;
+  readonly execute: (id: string, params: unknown, signal: unknown, onUpdate: unknown, context: unknown) => Promise<RegisteredReportOutput>;
+};
+
+function registeredReportTools(): Map<string, RegisteredReportTool> {
+  const schema = {
+    describe() { return this; },
+    optional() { return this; },
+    int() { return this; },
+    nonnegative() { return this; },
+  };
+  const captured = new Map<string, RegisteredReportTool>();
+  const pi = {
+    zod: { object: () => schema, string: () => schema, number: () => schema },
+    registerTool: (definition: RegisteredReportTool) => { captured.set(definition.name, definition); },
+  };
+  sniffReportTool(pi as never);
+  return captured;
+}
+
+function outputText(output: RegisteredReportOutput): string {
+  const [first] = output.content;
+  if (!first) throw new Error("report tool returned no text content");
+  return first.text;
 }
 
 describe("structured Sniff reports", () => {
@@ -268,6 +301,95 @@ describe("structured Sniff reports", () => {
     );
     expect(readdirSync(directory)).toEqual([]);
   });
+  test("chains model-visible report metadata into bounded artifact paging", async () => {
+    const findings = Array.from({ length: 2_000 }, (_, index) => finding({
+      stableKey: `test:model-visible-${index}`,
+      title: `Model-visible finding ${index}`,
+      location: { path: `src/model-visible-${index}.ts`, line: index + 1, anchor: `modelVisible${index}` },
+    }));
+    const tools = registeredReportTools();
+    const reportTool = tools.get("sniff_report");
+    const readerTool = tools.get("sniff_read_report_artifact");
+    if (!reportTool || !readerTool) throw new Error("report tools were not registered");
+
+    const rendered = await reportTool.execute("render", authorizedReport(reportInput(findings)), undefined, undefined, { hasUI: false });
+    expect(rendered.isError).toBeUndefined();
+    expect(Object.keys(rendered.details).sort()).toEqual([
+      "descriptorCount",
+      "descriptors",
+      "descriptorsTruncated",
+      "ok",
+      "readCapability",
+      "receipt",
+      "reportId",
+      "savedPaths",
+      "summary",
+    ]);
+    const renderedText = outputText(rendered);
+    expect(Buffer.byteLength(renderedText, "utf8")).toBeLessThanOrEqual(64 * 1024 - 1);
+    const separator = renderedText.indexOf("\n");
+    expect(separator).toBeGreaterThan(0);
+    const metadata = JSON.parse(renderedText.slice(0, separator)) as {
+      reportId: string;
+      readCapability: string;
+      descriptors: readonly { relativePath: string; bytes: number; sha256: string }[];
+    };
+    const markdown = renderedText.slice(separator + 1);
+    expect(markdown).toBe(rendered.details.summary as string);
+    expect(metadata.reportId).toBe(rendered.details.reportId as string);
+    expect(metadata.readCapability).toBe(rendered.details.readCapability as string);
+    expect(markdown).toContain("Model-visible finding");
+    expect(markdown).toContain("# Sniff Refactoring Plan");
+    expect(metadata.descriptors.length).toBeLessThanOrEqual(rendered.details.descriptorCount as number);
+
+    const descriptor = metadata.descriptors.find((item) => item.relativePath === "summary.md");
+    if (!descriptor) throw new Error("bounded report metadata omitted summary.md");
+    const rejected = await readerTool.execute("read", { capability: "wrong-capability", reportId: metadata.reportId, relativePath: descriptor.relativePath }, undefined, undefined, { hasUI: false });
+    expect(rejected.isError).toBe(true);
+    expect(outputText(rejected)).toBe("sniff_read_report_artifact failed: Unknown Sniff report artifact capability");
+    expect(rejected.details).toEqual({ ok: false, error: "Unknown Sniff report artifact capability" });
+
+    let offset = 0;
+    let assembled = "";
+    let eof = false;
+    for (let pageCount = 0; pageCount < 128; pageCount += 1) {
+      const pageOutput = await readerTool.execute("read", {
+        capability: metadata.readCapability,
+        reportId: metadata.reportId,
+        relativePath: descriptor.relativePath,
+        offset,
+      }, undefined, undefined, { hasUI: false });
+      expect(pageOutput.isError).toBeUndefined();
+      expect(Object.keys(pageOutput.details).sort()).toEqual(["bytes", "eof", "nextOffset", "offset", "ok", "relativePath", "reportId", "sha256", "totalBytes"]);
+      const pageText = outputText(pageOutput);
+      expect(Buffer.byteLength(pageText, "utf8")).toBeLessThanOrEqual(64 * 1024 - 1);
+      const page = JSON.parse(pageText) as {
+        relativePath: string;
+        offset: number;
+        nextOffset: number;
+        eof: boolean;
+        bytes: number;
+        content: string;
+      };
+      expect(Object.keys(page).sort()).toEqual(["bytes", "content", "eof", "nextOffset", "offset", "relativePath"]);
+      expect(page.relativePath).toBe(descriptor.relativePath);
+      expect(page.offset).toBe(offset);
+      expect(Buffer.byteLength(page.content, "utf8")).toBe(page.bytes);
+      expect(Buffer.from(page.content, "utf8").toString("utf8")).toBe(page.content);
+      assembled += page.content;
+      if (page.eof) {
+        eof = true;
+        expect(page.nextOffset).toBe(descriptor.bytes);
+        break;
+      }
+      expect(page.nextOffset).toBeGreaterThan(offset);
+      offset = page.nextOffset;
+    }
+    expect(eof).toBe(true);
+    expect(assembled).toContain("# Sniff Refactoring Plan");
+    expect(createHash("sha256").update(assembled).digest("hex")).toBe(descriptor.sha256);
+  });
+
   test("tool rendering remains ephemeral unless save is explicit", async () => {
     const rendered = await runSniffReportTool(authorizedReport());
     expect(rendered.savedPaths).toEqual([]);

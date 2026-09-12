@@ -17,6 +17,139 @@ function publicPreflight(value: SniffToolResult | null): SniffToolResult | null 
   safe.attempts = value.attempts.map(({ argv, exitCode, timedOut, error, timeoutMs }) => ({ argv, exitCode, stderr: "", timedOut, ...(error ? { error } : {}), timeoutMs }));
   return safe;
 }
+const MAX_MODEL_CONTENT_BYTES = 64 * 1024 - 1;
+
+type AnalyzerContentProjection = {
+  readonly ok: boolean;
+  readonly analyzer: string;
+  readonly outcome: SniffAnalyzerOutcome;
+  readonly capture?: AnalyzerCapture;
+  readonly observationPreview?: AnalyzerObservationPreview;
+  readonly analyzerResultId?: string;
+  readonly readCapability?: string;
+  readonly descriptors: readonly AnalyzerArtifactDescriptor[];
+  readonly descriptorCount?: number;
+  readonly descriptorsTruncated?: boolean;
+  readonly observations: readonly AnalyzerObservation[];
+};
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value));
+}
+
+function analyzerProjection(
+  analyzer: string,
+  result: {
+    ok: boolean;
+    outcome: SniffAnalyzerOutcome;
+    capture?: AnalyzerCapture;
+    observationPreview?: AnalyzerObservationPreview;
+    analyzerResultId?: string;
+    readCapability?: string;
+    descriptors?: readonly AnalyzerArtifactDescriptor[];
+    descriptorCount?: number;
+    descriptorsTruncated?: boolean;
+    observations?: readonly AnalyzerObservation[];
+  },
+): AnalyzerContentProjection {
+  const descriptors = [...(result.descriptors ?? [])];
+  const observations = [...(result.observations ?? [])];
+  const base = (selectedDescriptors: readonly AnalyzerArtifactDescriptor[], selectedObservations: readonly AnalyzerObservation[], descriptorTruncated: boolean): AnalyzerContentProjection => ({
+    ok: result.ok,
+    analyzer,
+    outcome: result.outcome,
+    ...(result.capture ? { capture: result.capture } : {}),
+    ...(result.observationPreview ? { observationPreview: { ...result.observationPreview, returned: selectedObservations.length, truncated: selectedObservations.length < result.observationPreview.total } } : {}),
+    ...(result.analyzerResultId ? { analyzerResultId: result.analyzerResultId } : {}),
+    ...(result.readCapability ? { readCapability: result.readCapability } : {}),
+    descriptors: selectedDescriptors,
+    ...(result.descriptorCount !== undefined ? { descriptorCount: result.descriptorCount } : {}),
+    ...(result.descriptorsTruncated || descriptorTruncated ? { descriptorsTruncated: true } : {}),
+    observations: selectedObservations,
+  });
+
+  let selectedDescriptors = descriptors;
+  let selectedObservations = observations;
+  let descriptorTruncated = false;
+  let projection = base(selectedDescriptors, selectedObservations, descriptorTruncated);
+  if (jsonBytes(projection) > MAX_MODEL_CONTENT_BYTES) {
+    selectedObservations = [];
+    projection = base(selectedDescriptors, selectedObservations, descriptorTruncated);
+    if (jsonBytes(projection) > MAX_MODEL_CONTENT_BYTES) {
+      let low = 0;
+      let high = selectedDescriptors.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        const candidate = base(selectedDescriptors.slice(0, middle), [], middle < selectedDescriptors.length);
+        if (jsonBytes(candidate) <= MAX_MODEL_CONTENT_BYTES) low = middle;
+        else high = middle - 1;
+      }
+      selectedDescriptors = selectedDescriptors.slice(0, low);
+      descriptorTruncated = selectedDescriptors.length < descriptors.length;
+      projection = base(selectedDescriptors, [], descriptorTruncated);
+    }
+    let low = 0;
+    let high = observations.length;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      const candidate = base(selectedDescriptors, observations.slice(0, middle), descriptorTruncated);
+      if (jsonBytes(candidate) <= MAX_MODEL_CONTENT_BYTES) low = middle;
+      else high = middle - 1;
+    }
+    selectedObservations = observations.slice(0, low);
+    projection = base(selectedDescriptors, selectedObservations, descriptorTruncated);
+  }
+  return projection;
+}
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, "utf8");
+  let end = Math.min(bytes.length, Math.max(0, maxBytes));
+  while (end > 0 && (bytes[end] ?? 0) >= 0x80 && (bytes[end] ?? 0) < 0xc0) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function analyzerArtifactEnvelope(result: {
+  readonly analyzerResultId: string;
+  readonly relativePath: string;
+  readonly sourcePath?: string;
+  readonly content: string;
+  readonly offset: number;
+  readonly nextOffset: number;
+  readonly eof: boolean;
+  readonly bytes: number;
+  readonly totalBytes: number;
+  readonly sha256: string;
+}): string {
+  const metadata = {
+    analyzerResultId: result.analyzerResultId,
+    relativePath: result.relativePath,
+    ...(result.sourcePath ? { sourcePath: result.sourcePath } : {}),
+    offset: result.offset,
+    nextOffset: result.nextOffset,
+    eof: result.eof,
+    bytes: result.bytes,
+    totalBytes: result.totalBytes,
+    sha256: result.sha256,
+  };
+  const encode = (content: string, consumed: number): string => JSON.stringify({ ...metadata, nextOffset: result.offset + consumed, eof: result.eof && consumed === result.bytes, bytes: consumed, content });
+  const originalBytes = Buffer.byteLength(result.content, "utf8");
+  const original = encode(result.content, originalBytes);
+  if (Buffer.byteLength(original) <= MAX_MODEL_CONTENT_BYTES) return original;
+  let low = 0;
+  let high = originalBytes;
+  let best = encode("", 0);
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const content = utf8Prefix(result.content, middle);
+    const candidate = encode(content, Buffer.byteLength(content, "utf8"));
+    if (Buffer.byteLength(candidate) <= MAX_MODEL_CONTENT_BYTES) {
+      best = candidate;
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  return best;
+}
 
 function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
   const z = pi.zod;
@@ -34,7 +167,7 @@ function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
     execute: async (_id, params: AnalyzerArtifactReadOptions) => {
       try {
         const result = readAnalyzerArtifact(params);
-        return { content: [{ type: "text", text: result.content }], details: { ok: true, analyzerResultId: result.analyzerResultId, relativePath: result.relativePath, sourcePath: result.sourcePath, offset: result.offset, nextOffset: result.nextOffset, eof: result.eof, bytes: result.bytes, totalBytes: result.totalBytes, sha256: result.sha256 } };
+        return { content: [{ type: "text", text: analyzerArtifactEnvelope(result) }], details: { ok: true, analyzerResultId: result.analyzerResultId, relativePath: result.relativePath, sourcePath: result.sourcePath, offset: result.offset, nextOffset: result.nextOffset, eof: result.eof, bytes: result.bytes, totalBytes: result.totalBytes, sha256: result.sha256 } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return { content: [{ type: "text", text: `sniff_read_analyzer_artifact failed: ${message}` }], details: { ok: false, error: message }, isError: true };
@@ -80,7 +213,9 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
     execute: async (_id, params: { capability: string; manifestId: string; analyzer: string }, signal) => {
       try {
         const result = await runSniffAnalyzer({ ...params, signal });
-        const text = result.report;
+        const text = result.ok
+          ? JSON.stringify(analyzerProjection(params.analyzer, result))
+          : result.report;
         return { content: [{ type: "text", text }], details: { ok: result.ok, preflight: publicPreflight(result.preflight), acceptedExitCodes: result.acceptedExitCodes, outcome: result.outcome, analyzerResultId: result.analyzerResultId, readCapability: result.readCapability, descriptors: result.descriptors, descriptorCount: result.descriptorCount, descriptorsTruncated: result.descriptorsTruncated, observationPreview: result.observationPreview, observations: result.observations, capture: result.capture }, isError: !result.ok };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
