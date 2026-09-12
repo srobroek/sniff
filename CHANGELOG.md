@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/srobroek/sniff/compare/sniff-v0.2.0...sniff-v0.2.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* provision analyzers through isolated mise toolkits ([#11](https://github.com/srobroek/sniff/issues/11)) ([cb88d84](https://github.com/srobroek/sniff/commit/cb88d844d64ae9a7f3bf3e236809830bd70683ab))
+
 ## [0.2.0](https://github.com/srobroek/sniff/compare/sniff-v0.1.0...sniff-v0.2.0) (2026-09-12)
 
 
