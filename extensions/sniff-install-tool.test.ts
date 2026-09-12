@@ -8,6 +8,7 @@ import {
 	readFileSync,
   realpathSync,
   rmSync,
+	symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -424,6 +425,22 @@ describe("runSniffInstall", () => {
 		});
 	});
 
+	test("preserves a Rustup proxy name when launching Cargo", async () => {
+		const dir = tempDir("sniff-rustup-proxy-");
+		const binDir = join(dir, "bin");
+		const rustup = join(binDir, "rustup");
+		executable(rustup, 'case "$0" in */cargo) [ "$1 $2" = "clippy --version" ];; *) exit 1;; esac');
+		const cargo = join(binDir, "cargo");
+		symlinkSync(rustup, cargo);
+		const result = await runSniffInstall({
+			mode: "diagnose",
+			bundles: ["rust"],
+			cwd: dir,
+			env: { PATH: binDir, SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-rust-toolkit-") },
+		});
+		expect(result.tools.find(({ tool }) => tool === "cargo-clippy")).toMatchObject({ status: "usable", resolvedPath: cargo });
+	});
+
 	test("real sleeping executable is classified as timed-out", async () => {
 		const dir = tempDir("sniff-sleep-");
 		const binDir = join(dir, "bin");
@@ -617,6 +634,10 @@ describe("runSniffInstall", () => {
 			bundles: ["dup"],
 			cwd: target,
 			runtime,
+			env: {
+				RUSTUP_HOME: "/host/rustup",
+				RUSTUP_TOOLCHAIN: "host-toolchain",
+			},
 		});
 		expect(installed.ok).toBe(true);
 		expect(installed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
@@ -627,6 +648,8 @@ describe("runSniffInstall", () => {
 			MISE_SYSTEM_CONFIG_FILE: join(toolkitDirectory, ".system-config-disabled.toml"),
 			MISE_AUTO_INSTALL: "0",
 			MISE_CEILING_PATHS: dirname(toolkitDirectory),
+			RUSTUP_HOME: join(toolkitDirectory, ".rustup"),
+			RUSTUP_TOOLCHAIN: "",
 		} });
 		expect(readFileSync(join(toolkitDirectory, "mise.toml"), "utf8")).toBe(renderMiseToolkit("dup"));
 		expect(readdirSync(target)).toEqual(["marker"]);
@@ -635,7 +658,7 @@ describe("runSniffInstall", () => {
 		expect(diagnosed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
 		expect(refreshes).toHaveLength(2);
 		for (const refresh of refreshes) {
-			expect(refresh).toMatchObject({ cwd: toolkitDirectory, env: { MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: dirname(toolkitDirectory), MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config") } });
+			expect(refresh).toMatchObject({ cwd: toolkitDirectory, env: { MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: dirname(toolkitDirectory), MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config"), RUSTUP_HOME: join(toolkitDirectory, ".rustup"), RUSTUP_TOOLCHAIN: "" } });
 		}
 	});
 
@@ -651,6 +674,166 @@ describe("runSniffInstall", () => {
 		writeFileSync(join(directory, "mise.toml"), '[tools]\n"go:example.invalid/tool" = "latest"\n');
 		const result = await runSniffInstall({ mode: "diagnose", bundles: ["go"], runtime });
 		expect(result.tools.find(({ tool }) => tool === "go-vet")).toMatchObject({ status: "missing", resolvedPath: null });
+	});
+
+	test("isolates rustup component installation inside the bundle toolkit", async () => {
+		const target = tempDir("sniff-rust-toolchain-");
+		writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+		let clippyInstalled = false;
+		let stableInstalled = false;
+		let stableDefault = false;
+		let nightlyUsable = false;
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => `/fake/bin/${bin}`,
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env } });
+				if (argv.slice(-2).join(" ") === "toolchain list")
+					return commandResult(argv, timeoutMs, { stdout: `${stableInstalled ? `stable-aarch64-apple-darwin${stableDefault ? " (active, default)" : ""}\n` : ""}nightly-aarch64-apple-darwin\n` });
+				if (argv.slice(-6).join(" ") === "toolchain install stable --profile minimal --no-self-update") stableInstalled = true;
+				if (argv.slice(-2).join(" ") === "default stable") stableDefault = true;
+				if (argv.slice(-4).join(" ") === "run nightly rustc --version" && !nightlyUsable)
+					return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "missing manifest" });
+				if (argv.slice(-6).join(" ") === "toolchain install nightly --profile minimal --no-self-update") nightlyUsable = true;
+				if (argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled)
+					return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "clippy is not installed" });
+				if (argv.at(-3) === "component" && argv.at(-2) === "add" && argv.at(-1) === "clippy") clippyInstalled = true;
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const result = await runSniffInstall({
+			mode: "install",
+			bundles: ["rust"],
+			cwd: target,
+			env: { CARGO_HOME: "/host/cargo", RUSTUP_HOME: "/host/rustup", RUSTUP_TOOLCHAIN: "host-toolchain" },
+			runtime,
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+		const bootstrap = calls.find(({ argv }) => argv.slice(-6).join(" ") === "toolchain install stable --profile minimal --no-self-update");
+		expect(bootstrap?.env).toMatchObject({
+			RUSTUP_HOME: join(directory, ".rustup"),
+			CARGO_HOME: join(directory, ".cargo"),
+			RUSTUP_TOOLCHAIN: "stable",
+		});
+		const install = calls.find(({ argv }) => argv.slice(-3).join(" ") === "component add clippy");
+		expect(install?.argv[0]).toBe("/fake/bin/rustup");
+		expect(install).toMatchObject({
+			argv: ["/fake/bin/rustup", "component", "add", "clippy"],
+			cwd: target,
+			env: { CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") },
+		});
+		const clippyProbes = calls.filter(({ argv }) => argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version");
+		expect(clippyProbes.at(-1)).toMatchObject({ cwd: target });
+		expect("RUSTUP_TOOLCHAIN" in (install?.env ?? {})).toBe(false);
+		expect("RUSTUP_TOOLCHAIN" in (clippyProbes.at(-1)?.env ?? {})).toBe(false);
+		for (const call of calls.filter(({ argv }) => argv[0] === "/fake/bin/cargo")) {
+			expect(call.env).toMatchObject({ CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") });
+			expect("RUSTUP_TOOLCHAIN" in call.env).toBe(false);
+		}
+		expect(readFileSync(join(install?.cwd ?? "", "rust-toolchain.toml"), "utf8")).toContain("1.85.1");
+		expect(calls.findIndex(({ argv }) => argv === bootstrap?.argv)).toBeLessThan(calls.findIndex(({ argv }) => argv.join(" ") === "mise install"));
+		expect(calls.findIndex(({ argv }) => argv.slice(-3).join(" ") === "component add clippy")).toBeGreaterThan(calls.findIndex(({ argv }) => argv.join(" ") === "mise install"));
+		expect(calls.filter(({ argv }) => argv.slice(-6).join(" ") === "toolchain install stable --profile minimal --no-self-update")).toHaveLength(1);
+		const nightly = calls.find(({ argv }) => argv.slice(-6).join(" ") === "toolchain install nightly --profile minimal --no-self-update");
+		expect(nightly).toMatchObject({ cwd: directory, env: { CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup"), RUSTUP_TOOLCHAIN: "nightly" } });
+		expect(calls.findIndex(({ argv }) => argv === nightly?.argv)).toBeLessThan(calls.findIndex(({ argv }) => argv.join(" ") === "mise install"));
+		expect(calls.filter(({ argv }) => argv.slice(-2).join(" ") === "default stable")).toHaveLength(1);
+		expect(result.tools.find(({ tool }) => tool === "cargo-clippy")).toMatchObject({ status: "usable" });
+	});
+
+	test("scrubs host rustup state without executing target configuration during diagnosis", async () => {
+		const target = tempDir("sniff-rust-diagnose-");
+		writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"nightly-2026-09-01\"\n");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+		const runtime = fakeRuntime({
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env } });
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		await runSniffInstall({
+			mode: "diagnose",
+			bundles: ["rust"],
+			cwd: target,
+			env: { CARGO_HOME: "/host/cargo", RUSTUP_HOME: "/host/rustup", RUSTUP_TOOLCHAIN: "host-toolchain" },
+			runtime,
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+		const clippyProbe = calls.find(({ argv }) => argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version");
+		expect(clippyProbe).toMatchObject({
+			cwd: tmpdir(),
+			env: { CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") },
+		});
+		expect("RUSTUP_TOOLCHAIN" in (clippyProbe?.env ?? {})).toBe(false);
+	});
+
+	test("includes isolated Rust toolchains in install dry runs", async () => {
+		const calls: string[][] = [];
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => `/fake/bin/${bin}`,
+			run: async (argv, _cwd, _env, timeoutMs) => {
+				calls.push([...argv]);
+				const missingClippy = argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version";
+				return commandResult(argv, timeoutMs, missingClippy ? { exitCode: 1 } : {});
+			},
+		});
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], dryRun: true, runtime });
+		expect(result.report).toContain("toolchain install stable --profile minimal --no-self-update (if missing)");
+		expect(result.report).toContain("default stable (if not default)");
+		expect(result.report).toContain("toolchain install nightly --profile minimal --no-self-update (if missing)");
+		expect(result.report).toContain("component add clippy");
+		const reportLines = result.report.split("\n");
+		expect(reportLines.findIndex((line) => line.includes("toolchain install stable"))).toBeLessThan(reportLines.findIndex((line) => line.includes("component add clippy")));
+		expect(reportLines.findIndex((line) => line.includes("toolchain install nightly"))).toBeLessThan(reportLines.findIndex((line) => line.includes("mise install")));
+		expect(reportLines.findIndex((line) => line.includes("component add clippy"))).toBeGreaterThan(reportLines.findIndex((line) => line.includes("mise install")));
+		expect(calls.some((argv) => argv.join(" ") === "mise install")).toBe(false);
+		expect(calls.some((argv) => argv.includes("install") || argv.includes("default") || argv.includes("component"))).toBe(false);
+	});
+
+	test("provisions Rust with mise before installing components", async () => {
+		const calls: string[][] = [];
+		let miseInstalled = false;
+		let clippyInstalled = false;
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => bin === "rustup" && !miseInstalled ? null : `/fake/bin/${bin}`,
+			run: async (argv, _cwd, _env, timeoutMs) => {
+				calls.push([...argv]);
+				if (argv.join(" ") === "mise install") miseInstalled = true;
+				if (argv.slice(-2).join(" ") === "toolchain list")
+					return commandResult(argv, timeoutMs, { stdout: "stable-aarch64-apple-darwin (active, default)\nnightly-aarch64-apple-darwin\n" });
+				if (argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled)
+					return commandResult(argv, timeoutMs, { exitCode: 1 });
+				if (argv.slice(-3).join(" ") === "component add clippy") clippyInstalled = true;
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], runtime });
+		const miseInstall = calls.findIndex((argv) => argv.join(" ") === "mise install");
+		const clippyInstall = calls.findIndex((argv) => argv.slice(-3).join(" ") === "component add clippy");
+		expect(miseInstall).toBeGreaterThanOrEqual(0);
+		expect(clippyInstall).toBeGreaterThan(miseInstall);
+		expect(calls.filter((argv) => argv.join(" ") === "mise install")).toHaveLength(1);
+		expect(result.ok).toBe(true);
+		expect(result.tools).toHaveLength(4);
+		expect(result.tools.every(({ status }) => status === "usable")).toBe(true);
+	});
+
+	test("fails closed when isolated Rustup bootstrap fails", async () => {
+		const calls: string[][] = [];
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => `/fake/bin/${bin}`,
+			run: async (argv, _cwd, _env, timeoutMs) => {
+				calls.push([...argv]);
+				return commandResult(argv, timeoutMs, argv.slice(-6).join(" ") === "toolchain install stable --profile minimal --no-self-update"
+					? { exitCode: 1, stderr: "bootstrap failed" }
+					: {});
+			},
+		});
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], runtime });
+		expect(result.ok).toBe(false);
+		expect(result.tools.find(({ tool }) => tool === "cargo-geiger")).toMatchObject({ status: "installation-failed" });
+		expect(calls.some((argv) => argv.join(" ") === "mise install")).toBe(false);
+		expect(calls.some((argv) => argv.slice(-3).join(" ") === "component add clippy")).toBe(false);
 	});
 
 	test("managed installation requires mise without package-manager fallback", async () => {

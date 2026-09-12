@@ -193,6 +193,7 @@ export const TOOLS = {
 			bin: "cargo",
 			key: "rustup",
 			hint: "rustup component add clippy",
+			probeTimeoutMs: 10_000,
 			probeArgs: [["clippy", "--version"]],
 			runPrefix: ["clippy"],
 		},
@@ -209,6 +210,7 @@ export const TOOLS = {
 			hint: "cargo install cargo-udeps --locked",
 			pkg: "cargo-udeps",
 			probeArgs: [["+nightly", "udeps", "--version"]],
+			probeTimeoutMs: 10_000,
 			runPrefix: ["+nightly", "udeps"],
 		},
 		{
@@ -216,6 +218,7 @@ export const TOOLS = {
 			bin: "cargo",
 			key: "cargo",
 			hint: "cargo install cargo-geiger --locked",
+			probeTimeoutMs: 10_000,
 			pkg: "cargo-geiger",
 			probeArgs: [["geiger", "--version"]],
 			runPrefix: ["geiger"],
