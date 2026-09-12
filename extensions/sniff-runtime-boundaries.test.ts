@@ -314,6 +314,9 @@ describe("adaptive runtime boundaries", () => {
 
   test("runs every selectable disposition through fixed recipes with a scrubbed environment", async () => {
     process.env.SNIFF_TEST_SECRET = "must-not-leak";
+    process.env.RUSTUP_HOME = "/host/rustup";
+    process.env.RUSTUP_TOOLCHAIN = "host-toolchain";
+    process.env.CARGO_HOME = "/host/cargo";
     const miseData = mkdtempSync(join(tmpdir(), "sniff-mise-data-"));
     temporary.push(miseData);
     process.env.MISE_DATA_DIR = miseData;
@@ -334,12 +337,15 @@ describe("adaptive runtime boundaries", () => {
     expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.argv.slice(1, 8)).toEqual(["--csv", "-C", "10", "-L", "50", "-a", "5"]);
     expect(executions.every(({ env }) => env.SNIFF_TEST_SECRET === undefined && env.HOME?.includes("sniff-run-home-"))).toBe(true);
     const miseWhich = calls.find(({ argv }) => argv.join(" ") === "mise which lizard");
-    expect(miseWhich?.env).toMatchObject({ MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: runtime.toolkitCacheRoot, MISE_DATA_DIR: miseData });
-    expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.env.MISE_DATA_DIR).toBe(miseData);
+    expect(miseWhich?.env).toMatchObject({ CARGO_HOME: join(coreToolkit, ".cargo"), MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: runtime.toolkitCacheRoot, MISE_DATA_DIR: miseData, RUSTUP_HOME: join(coreToolkit, ".rustup"), RUSTUP_TOOLCHAIN: "" });
+    expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.env).toMatchObject({ CARGO_HOME: join(coreToolkit, ".cargo"), MISE_DATA_DIR: miseData, RUSTUP_HOME: join(coreToolkit, ".rustup"), RUSTUP_TOOLCHAIN: "" });
     cancelRunLease(lease.capability, lease.manifestId);
 
     delete process.env.SNIFF_TEST_SECRET;
     delete process.env.MISE_DATA_DIR;
+    delete process.env.RUSTUP_HOME;
+    delete process.env.RUSTUP_TOOLCHAIN;
+    delete process.env.CARGO_HOME;
   });
   test("accepts Lizard's warning exit and projects every configured threshold", async () => {
     const { lease, manifest } = localLease();
@@ -390,6 +396,23 @@ describe("adaptive runtime boundaries", () => {
     expect(calls).toHaveLength(0);
     cancelRunLease(lease.capability, lease.manifestId);
   });
+
+	test("validates an analyzer symlink without changing its invocation path", async () => {
+		const { lease } = localLease();
+		const host = mkdtempSync(join(tmpdir(), "sniff-analyzer-proxy-"));
+		temporary.push(host);
+		const executable = join(host, "real-analyzer");
+		writeFileSync(executable, "#!/bin/sh\nexit 0\n");
+		chmodSync(executable, 0o755);
+		const proxy = join(host, "lizard");
+		symlinkSync(executable, proxy);
+		const calls: AnalyzerCall[] = [];
+		const runtime = analyzerRuntime(calls, { resolveCommand: (bin) => bin === "lizard" ? proxy : join(host, bin) });
+		const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: "lizard:complexity", runtime });
+		expect(result.ok).toBe(true);
+		expect(calls.every(({ argv }) => argv[0] === proxy)).toBe(true);
+		cancelRunLease(lease.capability, lease.manifestId);
+	});
 
   test("revalidates the target after preflight and before analyzer spawn", async () => {
     const { root, lease } = localLease({ remote: true });

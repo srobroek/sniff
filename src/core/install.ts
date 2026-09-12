@@ -14,7 +14,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
 import { type AnalyzerCapture, type AnalyzerObservation, parseAnalyzerOutput } from "./analyzer-output.ts";
 import {
@@ -194,7 +194,8 @@ function resolveCommand(
 		try {
 			if (!statSync(candidate).isFile()) continue;
 			accessSync(candidate, constants.X_OK);
-			return realpathSync(candidate);
+			const resolved = realpathSync(candidate);
+			return basename(resolved) === "rustup" && basename(candidate) !== "rustup" ? candidate : resolved;
 		} catch {
 			// Not an executable candidate.
 		}
@@ -321,7 +322,7 @@ async function inspectTool(
   const attempts: ProbeAttempt[] = [];
   const probeArgs = rec.probeArgs ?? [["--version"], ["--help"]];
   const probeTimeoutMs = rec.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
-  const executionCwd = rec.key === "npm-local" && allowAuthorizedProjectLocalProbe ? cwd : tmpdir();
+  const executionCwd = allowAuthorizedProjectLocalProbe && (rec.key === "npm-local" || rec.key === "rustup" || rec.key === "cargo") ? cwd : tmpdir();
   for (const args of probeArgs) {
     const result = await runtime.run([resolvedPath, ...args], executionCwd, effectiveEnv, probeTimeoutMs, signal);
     attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
@@ -335,6 +336,39 @@ async function inspectTool(
 
 function isMiseManaged(rec: ToolRec): boolean {
 	return rec.key === "brew" || rec.key === "pipx" || rec.key === "npm" || rec.key === "cargo" || rec.key === "go";
+}
+
+function isolatedRustupEnvironment(directory: string, env: ProcessEnvironment): ProcessEnvironment {
+	const cargoHome = join(directory, ".cargo");
+	const cargoBin = join(cargoHome, "bin");
+	const path = env.PATH ?? "";
+	return {
+		...env,
+		CARGO_HOME: cargoHome,
+		PATH: path.split(delimiter).includes(cargoBin) ? path : [cargoBin, path].filter(Boolean).join(delimiter),
+		RUSTUP_HOME: join(directory, ".rustup"),
+		RUSTUP_TOOLCHAIN: "",
+	};
+}
+function usesToolkitEnvironment(rec: ToolRec): boolean {
+	return isMiseManaged(rec) || rec.key === "rustup";
+}
+
+function environmentForTool(
+	bundle: BundleName,
+	rec: ToolRec,
+	toolkit: FreshEnvironment,
+	processEnvironment: ProcessEnvironment,
+	runtime: SniffInstallRuntime,
+): ProcessEnvironment {
+	const directory = toolkitDirectory(bundle, processEnvironment, runtime);
+	let environment = rec.key === "rustup"
+		? isolatedRustupEnvironment(directory, toolkit.env)
+		: isMiseManaged(rec) ? toolkit.env : processEnvironment;
+	if (bundle !== "rust" || (rec.key !== "rustup" && rec.key !== "cargo")) return environment;
+	environment = isolatedRustupEnvironment(directory, environment);
+	delete environment.RUSTUP_TOOLCHAIN;
+	return environment;
 }
 
 function miseToolSpec(rec: ToolRec): string | null {
@@ -367,7 +401,7 @@ function toolkitConfigPath(bundle: BundleName, env: ProcessEnvironment, runtime?
 }
 
 function isolatedMiseEnvironment(directory: string, env: ProcessEnvironment, miseHome?: string): ProcessEnvironment {
-	return {
+	return isolatedRustupEnvironment(directory, {
 		...env,
 		...(miseHome ? { HOME: miseHome } : {}),
 		MISE_CONFIG_DIR: join(directory, ".mise-config"),
@@ -379,7 +413,7 @@ function isolatedMiseEnvironment(directory: string, env: ProcessEnvironment, mis
 		RUSTC_WORKSPACE_WRAPPER: "",
 		CARGO_BUILD_RUSTC_WRAPPER: "",
 		CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER: "",
-	};
+	});
 }
 
 export function renderMiseToolkit(bundle: BundleName): string {
@@ -472,6 +506,43 @@ function failedInstallResult(
 	return { ...initial, status, remediation, install };
 }
 
+async function ensureRustToolchain(
+	rustupPath: string,
+	channel: "stable" | "nightly",
+	makeDefault: boolean,
+	directory: string,
+	env: ProcessEnvironment,
+	runtime: SniffInstallRuntime,
+	lines: string[],
+	signal?: AbortSignal,
+): Promise<CommandResult | null> {
+	const bootstrapEnvironment = { ...env, RUSTUP_TOOLCHAIN: channel };
+	const listed = await runtime.run([rustupPath, "toolchain", "list"], directory, bootstrapEnvironment, PROBE_TIMEOUT_MS, signal);
+	const installedLine = listed.exitCode === 0 && !listed.timedOut && !listed.error
+		? listed.stdout.split("\n").find((line) => line.trim() === channel || line.trim().startsWith(`${channel}-`) || line.trim().startsWith(`${channel} `))
+		: undefined;
+	const usable = installedLine
+		? await runtime.run([rustupPath, "run", channel, "rustc", "--version"], directory, bootstrapEnvironment, PROBE_TIMEOUT_MS, signal)
+		: undefined;
+	if (!installedLine || !usable || usable.exitCode !== 0 || usable.timedOut || usable.error) {
+		const argv = [rustupPath, "toolchain", "install", channel, "--profile", "minimal", "--no-self-update"];
+		lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+		const installed = await runtime.run(argv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
+		if (installed.stdout.trim()) lines.push(installed.stdout.trimEnd());
+		if (installed.stderr.trim()) lines.push(installed.stderr.trimEnd());
+		if (installed.stdoutTruncated || installed.stderrTruncated) lines.push(`      (output truncated at ${installed.outputLimitBytes} bytes per stream)`);
+		if (installed.exitCode !== 0 || installed.timedOut || installed.error) return installed;
+	}
+	if (!makeDefault || installedLine?.includes("default")) return null;
+	const defaultArgv = [rustupPath, "default", channel];
+	lines.push(`  + ${defaultArgv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+	const selected = await runtime.run(defaultArgv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
+	if (selected.stdout.trim()) lines.push(selected.stdout.trimEnd());
+	if (selected.stderr.trim()) lines.push(selected.stderr.trimEnd());
+	if (selected.stdoutTruncated || selected.stderrTruncated) lines.push(`      (output truncated at ${selected.outputLimitBytes} bytes per stream)`);
+	return selected.exitCode !== 0 || selected.timedOut || selected.error ? selected : null;
+}
+
 async function installUnmanagedTool(
 	bundle: BundleName,
 	rec: ToolRec,
@@ -482,8 +553,18 @@ async function installUnmanagedTool(
 	runtime: SniffInstallRuntime,
 	lines: string[],
 	signal?: AbortSignal,
+	deferDryRunPlan = false,
 ): Promise<SniffToolResult> {
-	const initial = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+	const environment = rec.key === "rustup"
+		? await toolkitEnvironment(bundle, env, runtime, signal)
+		: { env, source: "process" as const };
+	if (environment.error) {
+		const result = toolkitUnavailableResult(bundle, rec, true, environment.error);
+		lines.push(`  ! ${rec.name}: ${result.status} — ${result.remediation}`);
+		return result;
+	}
+	const installEnvironment = environmentForTool(bundle, rec, environment, env, runtime);
+	const initial = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime);
 	if (initial.status === "usable") {
 		lines.push(`  = ${rec.name} already installed (${initial.resolvedPath})`);
 		return initial;
@@ -510,16 +591,28 @@ async function installUnmanagedTool(
 			return failedInstallResult(initial, "installation-failed", undefined, message);
 		}
 	}
-	const argv = rec.key === "rustup" && runtime.resolveCommand("rustup", installCwd, env)
-		? ["rustup", "component", "add", "clippy"]
-		: null;
-	if (!argv) {
+	const rustupPath = rec.key === "rustup" ? runtime.resolveCommand("rustup", probeCwd, installEnvironment) : null;
+	if (!rustupPath) {
+		if (dryRun && deferDryRunPlan) return initial;
 		lines.push(`  ! ${rec.name}: no supported installation route — ${rec.hint}`);
 		return failedInstallResult(initial, "unavailable-route");
 	}
+	const argv = [rustupPath, "component", "add", "clippy"];
+	if (dryRun && deferDryRunPlan) return initial;
+	if (dryRun) {
+		lines.push(`  + ${rustupPath} toolchain install stable --profile minimal --no-self-update (if missing)`);
+		lines.push(`  + ${rustupPath} default stable (if not default)`);
+		lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+		return initial;
+	}
+	const bootstrapFailure = await ensureRustToolchain(rustupPath, "stable", true, installCwd, installEnvironment, runtime, lines, signal);
+	if (bootstrapFailure) {
+		const status = classifyInstallFailure(bootstrapFailure);
+		lines.push(`      (${status}${bootstrapFailure.exitCode === null ? "" : ` — exit ${bootstrapFailure.exitCode}`})`);
+		return failedInstallResult(initial, status, bootstrapFailure, "isolated stable Rust toolchain bootstrap failed");
+	}
 	lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
-	if (dryRun) return initial;
-	const install = await runtime.run(argv, installCwd, env, INSTALL_TIMEOUT_MS, signal);
+	const install = await runtime.run(argv, probeCwd, installEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
 	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
@@ -528,7 +621,10 @@ async function installUnmanagedTool(
 		lines.push(`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
 		return failedInstallResult(initial, status, install);
 	}
-	const verified = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+	const verified = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime, undefined, signal, true);
+	lines.push(verified.status === "usable"
+		? `      verified ${rec.name} in target toolchain (${verified.resolvedPath})`
+		: `      (${rec.name}: ${verified.status} after component install; resolved=${verified.resolvedPath ?? "<unresolved>"})`);
 	verified.install = install;
 	return verified;
 }
@@ -542,16 +638,25 @@ async function installMiseBundle(
 	runtime: SniffInstallRuntime,
 	lines: string[],
 	signal?: AbortSignal,
+	prepareVerification?: () => Promise<void>,
 ): Promise<SniffToolResult[]> {
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
 	const initial: SniffToolResult[] = [];
 	for (const rec of records) {
-		initial.push(await inspectTool(bundle, rec, true, probeCwd, initialEnvironment.error ? env : initialEnvironment.env, runtime));
+		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime));
 	}
 	const directory = toolkitDirectory(bundle, env, runtime);
 	lines.push(`  + Sniff mise toolkit ${directory}`);
-	lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
-	if (dryRun) return initial;
+	if (dryRun) {
+		const rustupPath = runtime.resolveCommand("rustup", directory, isolatedMiseEnvironment(directory, env)) ?? "rustup";
+		if (records.some((rec) => rec.key === "cargo")) {
+			lines.push(`  + ${rustupPath} toolchain install stable --profile minimal --no-self-update (if missing)`);
+			lines.push(`  + ${rustupPath} default stable (if not default)`);
+		}
+		if (records.some((rec) => rec.name === "cargo-udeps")) lines.push(`  + ${rustupPath} toolchain install nightly --profile minimal --no-self-update (if missing)`);
+		lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+		return initial;
+	}
 	const miseEnvironment = isolatedMiseEnvironment(directory, env);
 	if (!runtime.resolveCommand("mise", directory, miseEnvironment)) {
 		const remediation = `mise is required to install the Sniff-managed ${bundle} toolkit`;
@@ -559,6 +664,23 @@ async function installMiseBundle(
 		return initial.map((result) => failedInstallResult(result, "unavailable-route", undefined, remediation));
 	}
 	writeMiseToolkit(bundle, env, runtime);
+	if (records.some((rec) => rec.key === "cargo")) {
+		const rustupPath = runtime.resolveCommand("rustup", directory, miseEnvironment);
+		if (rustupPath) {
+			const requiredToolchains: Array<{ channel: "stable" | "nightly"; makeDefault: boolean }> = [
+				{ channel: "stable", makeDefault: true },
+				...(records.some((rec) => rec.name === "cargo-udeps") ? [{ channel: "nightly" as const, makeDefault: false }] : []),
+			];
+			for (const { channel, makeDefault } of requiredToolchains) {
+				const bootstrapFailure = await ensureRustToolchain(rustupPath, channel, makeDefault, directory, miseEnvironment, runtime, lines, signal);
+				if (!bootstrapFailure) continue;
+				const status = classifyInstallFailure(bootstrapFailure);
+				lines.push(`      (${status}${bootstrapFailure.exitCode === null ? "" : ` — exit ${bootstrapFailure.exitCode}`})`);
+				return initial.map((result) => failedInstallResult(result, status, bootstrapFailure, `isolated ${channel} Rust toolchain bootstrap failed`));
+			}
+		}
+	}
+	lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
 	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
@@ -566,7 +688,19 @@ async function installMiseBundle(
 	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
 		? classifyInstallFailure(install)
 		: undefined;
+	if (!installStatus && records.some((rec) => rec.name === "cargo-udeps")) {
+		const rustupPath = runtime.resolveCommand("rustup", directory, miseEnvironment);
+		if (rustupPath) {
+			const bootstrapFailure = await ensureRustToolchain(rustupPath, "nightly", false, directory, miseEnvironment, runtime, lines, signal);
+			if (bootstrapFailure) {
+				const status = classifyInstallFailure(bootstrapFailure);
+				lines.push(`      (${status}${bootstrapFailure.exitCode === null ? "" : ` — exit ${bootstrapFailure.exitCode}`})`);
+				return initial.map((result) => failedInstallResult(result, status, bootstrapFailure, "isolated nightly Rust toolchain bootstrap failed"));
+			}
+		}
+	}
 	if (installStatus) lines.push(`      (${installStatus}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
+	if (!installStatus) await prepareVerification?.();
 	const fresh = await toolkitEnvironment(bundle, env, runtime, signal);
 	if (fresh.error) {
 		const status = installStatus ?? "unavailable-route";
@@ -575,7 +709,7 @@ async function installMiseBundle(
 	}
 	const verified: SniffToolResult[] = [];
 	for (const rec of records) {
-		const inspected = await inspectTool(bundle, rec, true, probeCwd, fresh.env, runtime);
+		const inspected = await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, fresh, env, runtime), runtime, undefined, signal, bundle === "rust" && rec.key === "cargo");
 		const result = inspected.status !== "usable" && installStatus
 			? failedInstallResult(inspected, installStatus, install)
 			: { ...inspected, install };
@@ -705,7 +839,7 @@ function hostAnalyzerExecutable(path: string, targetRoot: string): string {
 	}
 	if (!statSync(executable).isFile()) throw new Error("Analyzer executable is not a file");
 	accessSync(executable, constants.X_OK);
-	return executable;
+	return path;
 }
 
 function validExitContract(codes: readonly number[]): boolean {
@@ -739,8 +873,8 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
 	const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
-	const managed = isMiseManaged(catalog.rec);
-	const toolkit = managed
+	const toolkitScoped = usesToolkitEnvironment(catalog.rec);
+	const toolkit = toolkitScoped
 		? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
 		: { env: baseEnvironment, source: "process" as const };
 	if (toolkit.error) {
@@ -748,7 +882,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		const preflight = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
-	const env = toolkit.env;
+	const env = environmentForTool(catalog.bundle, catalog.rec, toolkit, baseEnvironment, runtime);
 	const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
@@ -830,10 +964,10 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			const bundleResults: SniffToolResult[] = [];
 			for (const rec of TOOLS[bundle]) {
-				const managed = isMiseManaged(rec);
-				bundleResults.push(environment.error && managed
+				const toolkitScoped = usesToolkitEnvironment(rec);
+				bundleResults.push(environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, false, environment.error)
-					: await inspectTool(bundle, rec, false, probeCwd, managed ? environment.env : env, runtime));
+					: await inspectTool(bundle, rec, false, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime));
 			}
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
@@ -863,10 +997,10 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			for (const rec of TOOLS[bundle]) {
-				const managed = isMiseManaged(rec);
-				const result = environment.error && managed
+				const toolkitScoped = usesToolkitEnvironment(rec);
+				const result = environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, true, environment.error)
-					: await inspectTool(bundle, rec, true, probeCwd, managed ? environment.env : env, runtime);
+					: await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime);
 				tools.push(result);
 				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}
@@ -878,14 +1012,33 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	if (opts.dryRun) lines.push("(dry run — no changes will be made)");
 	for (const bundle of selected) {
 		lines.push("", `[${bundle}]`);
-		const managedRecords = TOOLS[bundle].filter(isMiseManaged);
+		const records = TOOLS[bundle];
+		const unmanagedByTool = new Map<string, SniffToolResult>();
+		const unmanagedRecords = records.filter((rec) => !isMiseManaged(rec));
+		if (bundle === "rust" && opts.dryRun) {
+			for (const rec of unmanagedRecords) {
+				unmanagedByTool.set(rec.name, await installUnmanagedTool(bundle, rec, probeCwd, installCwd, true, env, runtime, lines, opts.signal, true));
+			}
+		}
+		const managedRecords = records.filter(isMiseManaged);
+		const prepareVerification = bundle === "rust" && !opts.dryRun
+			? async () => {
+				for (const rec of unmanagedRecords) {
+					unmanagedByTool.set(rec.name, await installUnmanagedTool(bundle, rec, probeCwd, installCwd, false, env, runtime, lines, opts.signal));
+				}
+			}
+			: undefined;
 		const managedResults = managedRecords.length > 0
-			? await installMiseBundle(bundle, managedRecords, probeCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal)
+			? await installMiseBundle(bundle, managedRecords, probeCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal, prepareVerification)
 			: [];
+		if (bundle === "rust" && opts.dryRun) {
+			for (const rec of unmanagedRecords) {
+				if (unmanagedByTool.get(rec.name)?.status !== "usable") lines.push(`  + rustup component add clippy (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+			}
+		}
 		const managedByTool = new Map(managedResults.map((result) => [result.tool, result]));
-		for (const rec of TOOLS[bundle]) {
-			const managed = managedByTool.get(rec.name);
-			tools.push(managed ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
+		for (const rec of records) {
+			tools.push(managedByTool.get(rec.name) ?? unmanagedByTool.get(rec.name) ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
 		}
 	}
 	const failures = tools.filter((result) => result.status !== "usable");
