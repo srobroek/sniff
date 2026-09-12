@@ -8,6 +8,8 @@ dist/claude/*
 dist/codex/*
 !dist/codex/server.js
 !dist/codex/sniff-opengrep-hardcoded-values.yml
+!dist/codex/skills/
+!dist/codex/skills/**
 !dist/omp/
 dist/omp/*
 !dist/omp/sniff-plugin.js

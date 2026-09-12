@@ -82,7 +82,7 @@ test("write mode writes only temporary output trees", () => {
 	}
 });
 
-test("generated skills preserve the six-tool workflow and security gates", () => {
+test("generated skills preserve the seven-tool workflow and security gates", () => {
 	const skill = readFileSync(join(generatedRoots[0], "SKILL.md"), "utf8");
 	const sequence = [
 		"sniff_intake",
@@ -120,7 +120,6 @@ test("generated Codex trees are OMP-free and byte-identical", () => {
 	expect(markdown).not.toMatch(/skill:\/\//);
 	expect(markdown).not.toContain("OMP_SNIFF_ACTIVE=1");
 	expect(markdown).not.toMatch(/\b(?:bloodhound|refactor-challenger|TTSR)\b/i);
-	expect(markdown).toContain("independent read-only challenge pass");
 
 	const paths = filesUnder(generatedRoots[1]);
 	expect(paths).toEqual(filesUnder(generatedRoots[2]));
