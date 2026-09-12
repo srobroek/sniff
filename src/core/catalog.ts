@@ -150,7 +150,7 @@ export const TOOLS = {
 			key: "manual",
 			hint: "sniff_install_tools mode=install bundles=[core]",
 			probeArgs: [["--version"]],
-			probeTimeoutMs: 30_000,
+			probeTimeoutMs: 60_000,
 		},
 		{ name: "lizard", bin: "lizard", key: "pipx", hint: "pipx install lizard" },
 		{

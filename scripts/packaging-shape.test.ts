@@ -50,7 +50,7 @@ const codexManifest = JSON.parse(
 	readFileSync(join(codexRoot, "plugin.json"), "utf8"),
 ) as JsonObject;
 const claudeMcp = JSON.parse(
-	readFileSync(join(repoRoot, ".mcp.json"), "utf8"),
+	readFileSync(join(repoRoot, "claude-mcp.json"), "utf8"),
 ) as JsonObject;
 const codexMcp = JSON.parse(
 	readFileSync(join(codexRoot, "mcp.json"), "utf8"),
@@ -203,7 +203,7 @@ function copyClaudePackage(destination: string): void {
 	cpSync(join(repoRoot, ".claude", "skills"), join(destination, ".claude", "skills"), {
 		recursive: true,
 	});
-	cpSync(join(repoRoot, ".mcp.json"), join(destination, ".mcp.json"));
+	cpSync(join(repoRoot, "claude-mcp.json"), join(destination, "claude-mcp.json"));
 	cpSync(claudeServerPath, join(destination, "dist", "claude", "server.js"));
 	cpSync(
 		join(repoRoot, "dist", "claude", OPENGREP_RULE_NAME),
@@ -422,7 +422,8 @@ test("Claude metadata discovers its generated skill and shared MCP config", () =
 	expect(claudeManifest.version).toBe(packageJson.version);
 	expect(ompManifest.version).toBe(packageJson.version);
 	expect(claudeManifest.skills).toBe("./.claude/skills/");
-	expect(claudeManifest.mcpServers).toBe("./.mcp.json");
+	expect(claudeManifest.mcpServers).toBe("./claude-mcp.json");
+	expect(existsSync(join(repoRoot, ".mcp.json"))).toBe(false);
 	expect(claudeManifest).not.toHaveProperty("agents");
 	expect(claudeManifest).not.toHaveProperty("rules");
 });

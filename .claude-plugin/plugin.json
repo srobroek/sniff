@@ -6,5 +6,5 @@
     "name": "srobroek"
   },
   "skills": "./.claude/skills/",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./claude-mcp.json"
 }

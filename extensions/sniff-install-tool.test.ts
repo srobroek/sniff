@@ -223,7 +223,7 @@ describe("probe timeouts", () => {
 			}),
 		});
 		expect(result.ok).toBe(true);
-		expect(calls.find(({ bin }) => bin === "opengrep")?.timeoutMs).toBe(30_000);
+		expect(calls.find(({ bin }) => bin === "opengrep")?.timeoutMs).toBe(60_000);
 		expect(calls.filter(({ bin }) => bin !== "opengrep").every(({ timeoutMs }) => timeoutMs === 1_500)).toBe(true);
 	});
 

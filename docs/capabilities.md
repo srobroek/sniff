@@ -74,7 +74,7 @@ MCP registration lives in these files:
 
 - `adapters/mcp/server.ts`
 - `adapters/mcp/server.test.ts`
-- `.mcp.json`
+- `claude-mcp.json`
 - `dist/claude/server.js`
 - `dist/codex/server.js`
 

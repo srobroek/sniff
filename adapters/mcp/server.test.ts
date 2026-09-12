@@ -26,7 +26,7 @@ function object(value: unknown): Message {
   return value as Message;
 }
 
-type ElicitationAction = "accept" | "decline" | "method-not-found";
+type ElicitationAction = "accept" | "decline" | "method-not-found" | "error";
 
 function startClient(action: ElicitationAction = "accept", env: Record<string, string> = {}, sequence: readonly ElicitationAction[] = []): Client {
   const child = Bun.spawn([process.execPath, "run", serverPath], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env, ...env } });
@@ -59,6 +59,8 @@ function startClient(action: ElicitationAction = "accept", env: Record<string, s
             const responseAction = sequence[elicitationParams.length - 1] ?? action;
             if (responseAction === "method-not-found") {
               input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "Method not found" } })}\n`);
+            } else if (responseAction === "error") {
+              input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: 42, message: "Codex elicitation failed" } })}\n`);
             } else {
               const result = responseAction === "accept" ? { action: "accept", content: { acceptedDigest } } : { action: "decline" };
               input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, result })}\n`);
@@ -232,7 +234,7 @@ describe("MCP transport and concurrency units", () => {
 describe("MCP Sniff server", () => {
 
   test("parses the Claude stdio manifest with a plugin-root-safe path", () => {
-    const claude = object(JSON.parse(readFileSync(new URL("../../.mcp.json", import.meta.url), "utf8")));
+    const claude = object(JSON.parse(readFileSync(new URL("../../claude-mcp.json", import.meta.url), "utf8")));
     const claudeServer = object(object(claude.mcpServers).sniff);
     expect(claudeServer.command).toBe("bun");
     expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/dist/claude/server.js`]);
@@ -244,6 +246,12 @@ describe("MCP Sniff server", () => {
       expect(object(initialized.result).serverInfo).toEqual({ name: "sniff", version: "0.1.0" });
       const listed = object((await client.request("tools/list")).result);
       const tools = listed.tools as Message[];
+      const analyzerReader = tools.find((tool) => tool.name === "sniff_read_analyzer_artifact");
+      if (!analyzerReader) throw new Error("Missing sniff_read_analyzer_artifact tool");
+      const analyzerReaderSchema = object(analyzerReader.inputSchema);
+      expect(analyzerReaderSchema.oneOf).toBeUndefined();
+      expect(analyzerReaderSchema.required).toEqual(["analyzerResultId", "readCapability"]);
+      expect(Object.keys(object(analyzerReaderSchema.properties)).sort()).toEqual(["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"]);
       expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report", "sniff_read_report_artifact", "sniff_read_analyzer_artifact"]);
       expect(tools.every((tool) => object(tool.inputSchema).type === "object" && object(tool.outputSchema).type === "object")).toBe(true);
       const call = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: {} } })).result);
@@ -293,6 +301,69 @@ describe("MCP Sniff server", () => {
     } finally {
       await client.close();
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+  test("rejects analyzer artifact reads with zero or multiple selectors", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "analyzer-selector-test", version: "1" } });
+      const base = { analyzerResultId: "analyzer-result", readCapability: "read-capability" };
+      for (const selectors of [{}, { relativePath: "index.json", sourcePath: "src/index.ts" }]) {
+        const result = object((await client.request("tools/call", { name: "sniff_read_analyzer_artifact", arguments: { ...base, ...selectors } })).result);
+        expect(result.isError).toBe(true);
+        expect(object(result.structuredContent).error).toEqual({ code: "invalid_input", message: "Provide exactly one analyzer artifact relativePath or sourcePath" });
+      }
+    } finally {
+      await client.close();
+    }
+  });
+  // @ts-expect-error Bun runtime supports timeout options despite installed test typings.
+  test("reads analyzer artifacts by relativePath and sourcePath", { timeout: 30_000 }, async () => {
+    const toolsFixture = fakeToolchain();
+    executable(join(toolsFixture.bin, "lizard"), `#!/bin/sh
+if [ "$1" = "--version" ] || [ "$1" = "--help" ]; then exit 0; fi
+printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,main\\n'
+`);
+    const root = repository();
+    const client = startClient("accept", toolsFixture.env);
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "analyzer-reader-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
+      const lease = object(object(intake.structuredContent).lease);
+      const analyzer = object((await client.request("tools/call", { name: "sniff_run_analyzer", arguments: { capability: lease.capability, manifestId: lease.manifestId, analyzer: "lizard:complexity" } })).result);
+      const analyzerStructured = object(analyzer.structuredContent);
+      expect(analyzerStructured.ok).toBe(true);
+      const analyzerResultId = analyzerStructured.analyzerResultId;
+      const readCapability = analyzerStructured.readCapability;
+      expect(typeof analyzerResultId).toBe("string");
+      expect(typeof readCapability).toBe("string");
+      const index = object((await client.request("tools/call", { name: "sniff_read_analyzer_artifact", arguments: { analyzerResultId, readCapability, relativePath: "index.json", maxBytes: 8 } })).result);
+      const indexStructured = object(index.structuredContent);
+      expect(indexStructured.ok).toBe(true);
+      expect(indexStructured.bytes).toBeLessThanOrEqual(8);
+      expect(indexStructured.relativePath).toBe("index.json");
+      const descriptors = analyzerStructured.descriptors as Message[];
+      const source = descriptors.find((descriptor) => typeof descriptor.sourcePath === "string");
+      if (!source) throw new Error("Analyzer fixture did not produce a source descriptor");
+      const sourceRead = object((await client.request("tools/call", { name: "sniff_read_analyzer_artifact", arguments: { analyzerResultId, readCapability, sourcePath: source.sourcePath } })).result);
+      const sourceStructured = object(sourceRead.structuredContent);
+      expect(sourceStructured.ok).toBe(true);
+      expect(sourceStructured.sourcePath).toBe(source.sourcePath);
+      const sourceContent = String(sourceStructured.content);
+      const multibyteOffset = Buffer.from(sourceContent.slice(0, sourceContent.indexOf("é")), "utf8").byteLength;
+      const tooSmall = object((await client.request("tools/call", { name: "sniff_read_analyzer_artifact", arguments: { analyzerResultId, readCapability, relativePath: source.relativePath, offset: multibyteOffset, maxBytes: 1 } })).result);
+      expect(tooSmall.isError).toBe(true);
+      expect(object(tooSmall.structuredContent).error).toEqual({ code: "invalid_input", message: "Analyzer artifact maxBytes must be an integer from 4 through 65536" });
+      const bounded = object((await client.request("tools/call", { name: "sniff_read_analyzer_artifact", arguments: { analyzerResultId, readCapability, relativePath: source.relativePath, offset: multibyteOffset, maxBytes: 4 } })).result);
+      const boundedStructured = object(bounded.structuredContent);
+      expect(Number(boundedStructured.bytes)).toBeGreaterThan(0);
+      expect(Number(boundedStructured.bytes)).toBeLessThanOrEqual(4);
+      expect(Number(boundedStructured.nextOffset)).toBeGreaterThan(multibyteOffset);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+      rmSync(toolsFixture.root, { recursive: true, force: true });
     }
   });
 
@@ -590,6 +661,28 @@ exit 0
     const client = startClient("method-not-found", toolsFixture.env);
     try {
       await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "codex-headless-install-test", version: "1" } });
+      const result = object((await client.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["core"], dryRun: true } })).result);
+      expect(result.isError).toBe(true);
+      expect(object(result.structuredContent).error).toMatchObject({ code: "confirmation_required" });
+      expect(existsSync(mutationMarker)).toBe(false);
+      expect(client.elicitationParams).toHaveLength(1);
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(toolsFixture.root, { recursive: true, force: true });
+    }
+  });
+  test("maps arbitrary Codex elicitation errors to confirmation_required without installing", async () => {
+    const toolsFixture = fakeToolchain();
+    const mutationMarker = join(toolsFixture.root, "install-called");
+    const usableTool = "#!/bin/sh\nexit 0\n";
+    for (const bin of ["opengrep", "lizard", "scc", "sg", "tokei"]) executable(join(toolsFixture.bin, bin), usableTool);
+    for (const bin of ["pipx", "brew", "cargo"]) {
+      executable(join(toolsFixture.bin, bin), `#!/bin/sh\nprintf called > ${mutationMarker}\nexit 0\n`);
+    }
+    const client = startClient("error", toolsFixture.env);
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "codex-arbitrary-error-test", version: "1" } });
       const result = object((await client.request("tools/call", { name: "sniff_install_tools", arguments: { mode: "install", bundles: ["core"], dryRun: true } })).result);
       expect(result.isError).toBe(true);
       expect(object(result.structuredContent).error).toMatchObject({ code: "confirmation_required" });

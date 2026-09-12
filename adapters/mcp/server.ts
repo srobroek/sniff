@@ -449,10 +449,16 @@ const tools = [
     description: "Read one bounded UTF-8 page from complete analyzer observations using an opaque capability; provide relativePath or sourcePath.",
     inputSchema: {
       type: "object",
-      oneOf: [
-        { properties: { capability: stringSchema, analyzerResultId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } }, required: ["capability", "analyzerResultId", "relativePath"], additionalProperties: false },
-        { properties: { capability: stringSchema, analyzerResultId: stringSchema, sourcePath: stringSchema, offset: { type: "integer", minimum: 0 } }, required: ["capability", "analyzerResultId", "sourcePath"], additionalProperties: false },
-      ],
+      properties: {
+        analyzerResultId: stringSchema,
+        readCapability: stringSchema,
+        relativePath: stringSchema,
+        sourcePath: stringSchema,
+        offset: { type: "integer", minimum: 0 },
+        maxBytes: { type: "integer", minimum: 4, maximum: MAX_OUTPUT_TEXT_BYTES },
+      },
+      required: ["analyzerResultId", "readCapability"],
+      additionalProperties: false,
     },
     outputSchema: outputSchemas.analyzerArtifact,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
@@ -820,10 +826,12 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
     const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
     const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, noMise: options.noMise ?? false, cwd: tmpdir(), tools: planTools };
     const request = { ...authorization, digest: digest(authorization) };
-    const accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ").catch((error) => {
-      if (isElicitationFailure(error)) throw confirmationRequiredError();
-      throw error;
-    });
+    let accepted: false | { acceptedDigest: string; actor?: string; reason?: string };
+    try {
+      accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ");
+    } catch {
+      throw confirmationRequiredError();
+    }
     if (!accepted) throw new SniffMcpError("confirmation_required", "Sniff installation authorization was denied");
     assertNotAborted(signal);
     const installed = await runSniffInstall({ ...options, mode: "install", signal });
@@ -885,7 +893,7 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
       }
     }
     activeLeases.delete(leaseKey(capability, manifestId));
-  }
+}
 }
 function reportArtifact(args: JsonObject): ToolResponse {
   const capability = requiredString(args.capability, "capability");
@@ -896,15 +904,24 @@ function reportArtifact(args: JsonObject): ToolResponse {
   return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
 }
 function analyzerArtifact(args: JsonObject): ToolResponse {
-  const capability = requiredString(args.capability, "capability");
+  const readCapability = requiredString(args.readCapability, "readCapability");
   const analyzerResultId = requiredString(args.analyzerResultId, "analyzerResultId");
   const relativePath = args.relativePath === undefined ? undefined : requiredString(args.relativePath, "relativePath");
   const sourcePath = args.sourcePath === undefined ? undefined : requiredString(args.sourcePath, "sourcePath");
   if ((relativePath === undefined) === (sourcePath === undefined)) throw new SniffMcpError("invalid_input", "Provide exactly one analyzer artifact relativePath or sourcePath");
   const offset = args.offset;
   if (offset !== undefined && (!Number.isSafeInteger(offset) || Number(offset) < 0)) throw new SniffMcpError("invalid_input", "Analyzer artifact offset must be a non-negative integer");
-  const result = readAnalyzerArtifact({ capability, analyzerResultId, ...(relativePath === undefined ? { sourcePath } : { relativePath }), ...(offset === undefined ? {} : { offset: Number(offset) }) });
-  return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
+  const maxBytes = args.maxBytes;
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || Number(maxBytes) < 4 || Number(maxBytes) > MAX_OUTPUT_TEXT_BYTES)) throw new SniffMcpError("invalid_input", "Analyzer artifact maxBytes must be an integer from 4 through 65536");
+  const result = readAnalyzerArtifact({ capability: readCapability, analyzerResultId, ...(relativePath === undefined ? { sourcePath } : { relativePath }), ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  if (maxBytes === undefined || result.bytes <= Number(maxBytes)) return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
+  const bytes = Buffer.from(result.content, "utf8");
+  let end = Math.min(Number(maxBytes), bytes.byteLength);
+  while (end > 0 && end < bytes.byteLength && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  const page = bytes.subarray(0, end).toString("utf8");
+  const nextOffset = result.offset + end;
+  const bounded = { ...result, content: page, bytes: end, nextOffset, eof: nextOffset === result.totalBytes };
+  return toolSuccess({ ok: true, ...bounded }, `Read ${bounded.bytes} bytes from ${bounded.relativePath} at offset ${bounded.offset}.`);
 }
 
 
