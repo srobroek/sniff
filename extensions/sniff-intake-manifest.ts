@@ -11,4 +11,4 @@ export {
   type ManifestInput,
   type RunManifest,
   validateRunManifest,
-} from "./sniff-intake.ts";
+} from "../src/core/manifest.ts";

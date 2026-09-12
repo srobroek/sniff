@@ -5,22 +5,23 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import {
   buildNoninteractiveManifest,
+  canonicalConfirmationRequest,
   createRunManifest,
   decisionFrontier,
-} from "./sniff-intake.ts";
-import { SecurityScopeError, selectSecurityAnalyzers } from "./sniff-intake-security.ts";
-import sniffIntakeExtension, { runSniffIntakeTool } from "./sniff-intake-tool.ts";
+} from "../src/core/intake.ts";
+import { canonicalReportTargetIdentity, publicConfirmationSummary, publicSniffIntakeResult, runSniffIntakeTool } from "../src/core/intake-use-case.ts";
+import { SecurityScopeError, selectSecurityAnalyzers } from "../src/core/security.ts";
 import {
   type ArgvResult,
   type ArgvRunner,
+  type ResolvedTarget,
   redactTransportValues,
-  resolveTarget,
   runArgv,
   TargetResolutionError,
-  withResolvedTarget,
   withTemporaryCheckout,
-} from "./sniff-target.ts";
-import { resolveGitHubRelease, resolveGitLabRelease } from "./sniff-target-provider.ts";
+} from "../src/core/target.ts";
+import { resolveGitHubRelease, resolveGitLabRelease, resolveTarget, withResolvedTarget } from "../src/core/target-provider.ts";
+import sniffIntakeExtension from "./sniff-intake-tool.ts";
 
 const temporary: string[] = [];
 const sha = (character: string) => character.repeat(40);
@@ -55,6 +56,8 @@ function initializeRepository(): { root: string; git: (...args: string[]) => str
   git("init", "-q");
   git("config", "user.email", "sniff@example.invalid");
   git("config", "user.name", "Sniff Test");
+  git("config", "commit.gpgsign", "false");
+  git("config", "core.hooksPath", "/dev/null");
   return { root, git };
 }
 
@@ -84,13 +87,14 @@ function remoteCheckoutRunner(repository: string, head: string, base = sha("b"))
 describe("adaptive intake", () => {
   test("asks only the highest-impact unresolved question", () => {
     expect(decisionFrontier({}).questions.map(({ id }) => id)).toEqual(["target"]);
-    expect(decisionFrontier({ target: { kind: "working-tree", root: "." } }).questions.map(({ id }) => id)).toEqual(["intent"]);
+    expect(decisionFrontier({ target: { kind: "working-tree", root: "." }, intent: "audit", scopeMode: "full" }).questions.map(({ id }) => id)).toEqual(["objectives"]);
   });
 
   test("complete input is silent and produces one plan", () => {
     const interview = decisionFrontier({
       target: { kind: "working-tree", root: "." },
       intent: "audit",
+      scopeMode: "full",
       objectives: ["structure-and-maintainability"],
       budget: { maxMinutes: 5 },
     });
@@ -100,20 +104,72 @@ describe("adaptive intake", () => {
 
   test("noninteractive manifests require a trusted authority boundary", async () => {
     const resolved = await buildNoninteractiveManifest(
-      { target: target("/tmp"), intent: "audit" },
-      { authorize: async () => ({ actor: "test-authority", reason: "fixture" }) },
+      { target: target("/tmp"), intent: "audit", scopeMode: "full" },
+      { authorize: async (request) => ({ acceptedDigest: request.digest, actor: "test-authority", reason: "fixture" }) },
     );
-    expect(resolved.authorization).toMatchObject({ granted: true, actor: "test-authority" });
+    expect(resolved.authorization).toMatchObject({ required: true, actor: "test-authority", acceptedDigest: resolved.confirmation.digest });
     expect(resolved.defaults.map(({ field }) => field).sort()).toEqual(["analyzers", "budget", "exclusions", "objectives"]);
     expect(resolved.gaps.map(({ field }) => field)).toEqual(["budget"]);
-    await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", authorization: { granted: true, actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
+    await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", scopeMode: "full", authorization: { acceptedDigest: "forged", actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
+  });
+  test("returns a minimized canonical confirmation target", () => {
+    const manifest = createRunManifest({
+      target: { ...target("/private/host/repository"), label: "src/a.ts, ".repeat(30_000) },
+      intent: "audit",
+      scopeMode: "full",
+      objectives: ["structure-and-maintainability"],
+      budget: { maxMinutes: 1 },
+    });
+    const summary = publicConfirmationSummary(canonicalConfirmationRequest(manifest));
+    expect(summary.target).toEqual({ kind: "files", label: "selected files", scopeMode: "full", filesAnalyzed: 1 });
+    expect(summary.target).not.toHaveProperty("root");
+    expect(summary.target).not.toHaveProperty("repository");
+    expect(summary.target).not.toHaveProperty("immutableRef");
+    expect(summary.target).not.toHaveProperty("headRef");
+    expect(summary.selectedAnalyzers.every(({ name, tool, recipe, disposition }) => name && tool && recipe && disposition === "selected")).toBe(true);
+    expect(canonicalReportTargetIdentity({ ...target("/tmp"), kind: "working-tree" }, "full")).toMatchObject({ kind: "uncommitted", label: "uncommitted changes" });
+    expect(canonicalReportTargetIdentity({ ...target("/tmp"), kind: "module" }, "full")).toMatchObject({ kind: "area", label: "selected area" });
+  });
+  test("omits analyzer count until actual analyzers are selected", () => {
+    const result = publicSniffIntakeResult({
+      interview: {
+        questions: [],
+        confirmationRequired: true,
+        plan: {
+          target: { kind: "files", root: "/private/secret/repository", paths: ["src/a.ts"] },
+          intent: "audit",
+          scopeMode: "full",
+          objectives: ["structure-and-maintainability"],
+          exclusions: [],
+          budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10 },
+          security: {},
+        },
+      },
+    });
+    expect(result.interview.planSummary).toEqual({
+      target: { kind: "files", rootBasename: "repository" },
+      intent: "audit",
+      scopeMode: "full",
+      objectiveCount: 1,
+      exclusionCount: 0,
+      budget: { maxMinutes: 1, maxAnalyzers: 2, maxFiles: 10 },
+    });
+    expect(result.interview.planSummary).not.toHaveProperty("analyzerCount");
   });
 
   test("remote defaults use only runnable config-free recipes", () => {
-    const remote = selectSecurityAnalyzers({ deepStatic: true }, { trust: "untrusted-remote" });
-    expect(remote.filter(({ disposition }) => disposition === "selected").map(({ name }) => name)).toEqual(["gitleaks:tracked-history", "lizard:complexity", "semgrep:hardcoded-values"]);
+    const remote = selectSecurityAnalyzers({ deepStatic: true }, { trust: "untrusted-remote", scopeMode: "full" });
+    expect(remote.filter(({ disposition }) => disposition === "selected").map(({ name }) => name)).toEqual(["lizard:complexity", "opengrep:hardcoded-values"]);
     expect(remote.every(({ name, recipe }) => name === recipe)).toBe(true);
     expect(remote.every(({ tier }) => tier === "lightweight-static")).toBe(true);
+  });
+  test("allows repository-wide analyzers only for repository and whole-repo targets", () => {
+    const wholeRepo = { ...target("/tmp"), kind: "whole-repo" as const, materialization: "temporary-checkout" as const };
+    const directory = { ...target("/tmp"), kind: "directory" as const };
+    const selected = (resolvedTarget: ResolvedTarget) => selectSecurityAnalyzers({}, { target: resolvedTarget, scopeMode: "full" }).find(({ name }) => name === "gitleaks:tracked-history");
+    expect(selected(wholeRepo)?.disposition).toBe("selected");
+    expect(selected(directory)?.disposition).toBe("skipped");
+    expect(selected({ ...wholeRepo, kind: "repository" })).toMatchObject({ disposition: "selected" });
   });
 
   test("rejects malicious analyzer overrides and aliases", () => {
@@ -127,14 +183,14 @@ describe("adaptive intake", () => {
     const left = createRunManifest({
       target: target("/tmp/a"),
       intent: "audit",
-      objectives: ["correctness-and-resilience", "bounded-security-smells"],
+      scopeMode: "full",
       exclusions: ["beta", "alpha"],
       defaults,
     });
     const right = createRunManifest({
-      target: target("/tmp/b"),
+      target: target("/tmp/a"),
       intent: "audit",
-      objectives: ["bounded-security-smells", "correctness-and-resilience"],
+      scopeMode: "full",
       exclusions: ["alpha", "beta"],
       defaults,
     });
@@ -398,7 +454,7 @@ describe("history semantics", () => {
 describe("extension reachability", () => {
   test("registers sniff_intake in the package and extension API", () => {
     const packageJson = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"));
-    expect(packageJson.omp.extensions).toContain("./extensions/sniff-intake-tool.ts");
+    expect(packageJson.omp.extensions).toContain("./dist/omp/sniff-plugin.js");
     let definition: { name?: string } | undefined;
     const schema = { describe() { return this; } };
     const api = {
@@ -420,11 +476,12 @@ describe("extension reachability", () => {
       input: {
         target: { kind: "files", root, paths: ["src/a.ts"] },
         intent: "audit",
+        scopeMode: "full",
         objectives: ["correctness-and-resilience"],
         budget: { maxMinutes: 5 },
       },
-    }, { confirmInteractive: async () => true });
-    expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, confirmation: { confirmed: true } });
+    }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, scopeMode: "full", confirmation: { required: true, actor: "test-user" } });
   });
 });
 

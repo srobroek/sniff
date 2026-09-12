@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/release-please-config.json",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "package-name": "@srobroek/sniff",
+      "extra-files": [
+        ".omp-plugin/plugin.json"
+      ]
+    }
+  }
+}

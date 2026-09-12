@@ -1,100 +1,136 @@
 # Sniff
 
-Sniff finds code smells in OMP and produces reviewed plans for refactoring. Analysis stays read-only until you approve a change.
+Sniff audits code smells and produces a reviewed plan. It asks for unresolved intake decisions. It runs approved analyzers. It challenges findings in `full` mode. It renders or saves a report.
 
-| Field | Value |
-| --- | --- |
-| Status | Pre-release |
-| Version | `0.1.0` |
-| Runtime | Oh My Pi |
+## Portable core and adapters
 
-## Install from source
+Sniff uses a portable core. The core handles these concerns:
 
-You need Git and an installed `omp` command.
+- intake and target resolution
+- analyzer catalogs
+- run leases and approvals
+- report validation
+- cancellation, expiry, and replay protection
+
+The source skill generates native skill trees. It lives in `.skill-source/sniff/`.
+
+Claude Code and Codex load the bundled MCP server through plugin manifests.
+
+All adapters expose exactly seven tools:
+
+- `sniff_intake`
+- `sniff_install_tools`
+- `sniff_run_analyzer`
+- `sniff_report`
+- `sniff_read_report_artifact`
+- `sniff_read_analyzer_artifact`
+- `sniff_cancel`
+
+The authored skill generates native skill trees for every supported adapter.
+
+The interview uses five frontier axes:
+
+- `target`
+- `intent`
+- `scopeMode`
+- `objectives`
+- `budget`
+
+Analyzer family and tier follow from the confirmed target, objectives, trust route, and availability.
+
+## Install
+
+Install Git.
+
+Install Bun for the bundled Claude Code and Codex MCP server. The clean-room probe used Bun `1.4.2`.
+
+Use the marketplace commands for your harness.
+
+### OMP
 
 ```sh
-git clone https://github.com/srobroek/sniff.git
-omp plugin link "$(pwd)/sniff"
-omp plugin doctor
+omp plugin marketplace add https://github.com/srobroek/sniff.git
+omp plugin install sniff@sniff --scope=user
 ```
 
-After linking the plugin, start a new OMP session. Run `omp plugin doctor` and confirm that it identifies Sniff as a plugin.
+### Claude Code
 
-## Run your first audit
+```sh
+claude plugin marketplace add https://github.com/srobroek/sniff.git
+claude plugin install sniff@sniff --scope user --yes
+```
 
-Open OMP in the repository that you want to inspect. Ask:
+### Codex
 
-> Sniff the uncommitted changes in this repository.
+```sh
+codex plugin marketplace add https://github.com/srobroek/sniff.git
+codex plugin add sniff@sniff
+```
 
-A normal run follows this sequence:
 
-1. Resolve the target and its exact file set.
-2. Ask for the highest-impact missing decision.
-3. Detect the languages in scope.
-4. Probe suitable analyzers.
-5. Run approved analyzers with fixed recipes.
-6. Challenge each finding.
-7. Render a validated report.
+## Use Sniff
 
-Remote repositories use an isolated checkout. Sniff treats every remote target as untrusted. It does not load project executable configuration or install project dependencies for that target.
-
-## Choose a skill mode
-
-| Mode | Behavior |
-| --- | --- |
-| `quick` | Checks common errors and local smells. It skips the full sweep and challenge. |
-| `full` | Runs every skill step. |
-| `plan-only` | Runs planning and inspection but never changes code. |
-
-A missing mode triggers a question only if the choice changes the plan.
-
-## Select a target
-
-Sniff accepts local and hosted Git targets. It also accepts releases and history windows.
+Describe the target and desired outcome in the host conversation. Sniff asks for the highest-impact unresolved choice. Sniff asks for the next choice. A complete request still needs plan confirmation.
 
 Example requests:
 
-- `Sniff src/parser in full mode.`
-- `Sniff the range main...HEAD for correctness and maintainability.`
-- `Sniff PR 42 from https://github.com/srobroek/sniff in plan-only mode.`
-- `Sniff changes since release v2.4.0.`
+- `Find code smells in src/auth and explain which ones are worth fixing.`
+- `Audit this branch for maintainability risks without changing code.`
+- `Review PR 42 for structural problems and risky refactoring opportunities.`
+- `Plan a refactor of the payment module, but do not apply it.`
+- `Check these files for hardcoded credentials and configuration values.`
 
-See [Targets and providers](docs/targets-and-providers.md) for the full target table.
+A confirmed run follows this flow:
 
-## Understand approvals
+1. Resolve the target and file set.
+2. Detect languages.
+3. Select analyzer recipes.
+4. Probe analyzer availability.
+5. Approve installation.
+6. Run approved analyzers.
+7. If the preview omits observations, page them with `sniff_read_analyzer_artifact`.
+8. Challenge findings in `full` mode.
+9. Render a validated report.
+10. Use `sniff_read_report_artifact` to page complete findings.
+11. Before saving report files, get approval.
 
-Sniff separates these decisions:
+Each approval has a separate boundary. A denied intake issues no lease. Installation approval does not authorize analysis. Save approval does not authorize a refactor. Use `sniff_cancel` to stop an unfinished run. Expiry and terminal report events also release the host-owned materialization.
 
-- confirm the resolved analysis plan
-- install a missing analyzer
-- save report artifacts
-- apply an approved refactor
+If observations are absent from the preview, call `sniff_read_analyzer_artifact`. Pass `readCapability`, `analyzerResultId`, and one `relativePath` or `sourcePath`. Continue from `nextOffset` until `eof`.
 
-Analysis does not grant permission for installation, saving, or editing. To stop a run, ask Sniff to cancel it. Otherwise, lease expiry removes temporary files.
+After `sniff_report`, call `sniff_read_report_artifact`. Pass its `readCapability`, `reportId`, and descriptor `relativePath`. Continue with the returned `nextOffset` until `eof`.
 
-## Read the output
+Registry expiry or eviction ends a read capability. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Saving to a repository still needs separate approval.
 
-The default report stays in the session. An explicit save request writes three files:
+`quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 
-- `<report-id>.json`
-- `<report-id>.md`
-- `<report-id>.receipt.json`
+Read [Getting started](docs/getting-started.md) for installation and the first run. Read [Interviewing](docs/interviewing.md) for adaptive intake and approvals. Read [Sniff types](docs/sniff-types.md) for the structured contract. Read [Capabilities](docs/capabilities.md) for implementation and clean-room evidence.
 
-The receipt binds the report ID to the canonical JSON hash. Sniff refuses to overwrite an existing artifact set.
+## Targets and trust
 
-## Guides
+Sniff accepts these target kinds:
 
-- [Getting started](docs/getting-started.md)
-- [Workflow](docs/workflow.md)
-- [Targets and providers](docs/targets-and-providers.md)
-- [Security and trust](docs/security-and-trust.md)
-- [Reports](docs/reports.md)
+- local paths
+- commits and ranges
+- branches and refs
+- repositories and releases
+- history windows
+- pull requests and merge requests
 
-## Develop Sniff
+Remote targets use an isolated checkout. They use bundled rules. They use an analyzer home.
+The analyzer home does not load project executable configuration. It does not install target dependencies.
+
+See [Targets and providers](docs/targets-and-providers.md) for provider behavior. See [Security and trust](docs/security-and-trust.md) for trust boundaries.
+
+## Development
 
 ```sh
 bun install
 bun run check
 ```
 
-The check runs TypeScript and Biome. It also runs the Bun test suite.
+The check validates generated harness skills. It validates MCP bundles. It runs TypeScript, Biome, and Bun tests.
+
+## License
+
+Apache-2.0.

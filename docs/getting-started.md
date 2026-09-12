@@ -1,77 +1,93 @@
 # Getting started
 
+Sniff exposes one portable workflow through native and MCP adapters. Every adapter provides the same seven tools.
+
 ## Requirements
 
-Before you begin, install these commands:
+Install Git.
 
-- `git`
-- `omp`
+Install Bun for the bundled MCP server. Claude Code and Codex use Bun to run that server. The 2026-09-11 clean-room probes used Bun `1.4.2`.
 
-Sniff runs inside OMP. Analyzer availability depends on the languages in your selected target.
+## Install an adapter
 
-## Link the plugin
+Use the marketplace commands for your harness.
 
-Clone the repository and link its root directory:
+### OMP
 
 ```sh
-git clone https://github.com/srobroek/sniff.git
-omp plugin link "$(pwd)/sniff"
-omp plugin doctor
+omp plugin marketplace add https://github.com/srobroek/sniff.git
+omp plugin install sniff@sniff --scope=user
 ```
 
-After linking, start a new OMP session. Run the session from the repository that you want to inspect.
+### Claude Code
 
-## Make a complete request
+```sh
+claude plugin marketplace add https://github.com/srobroek/sniff.git
+claude plugin install sniff@sniff --scope user --yes
+```
 
-A complete request names these decisions:
+### Codex
 
-- target
-- intent
-- objective group
-- budget choice
+```sh
+codex plugin marketplace add https://github.com/srobroek/sniff.git
+codex plugin add sniff@sniff
+```
 
-Interactive intake requires the budget choice. The time, file, and analyzer limits are optional. Every supplied limit must be a positive integer.
+After installation, start a new session in the repository that you want to inspect.
 
-Noninteractive intake can omit the budget. Its manifest records an empty default and a budget gap.
+## Describe the intake
 
-Use this request for a first run:
+Sniff adapts its interview across five frontier axes:
 
-> Sniff the uncommitted changes in this repository. Audit structure and correctness in plan-only mode with a five-minute budget.
+- `target` identifies the repository or file set.
+- `intent` identifies the desired outcome.
+- `scopeMode` selects `quick`, `full`, or `plan-only` behavior.
+- `objectives` identifies the objective groups.
+- `budget` sets time, analyzer, and file limits.
 
-A required decision triggers one question. Sniff chooses the question that changes the plan most.
+Analyzer family and tier follow from the target, objectives, trust route, and availability.
 
-## Confirm the plan
+The five frontier axes form the decision frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next unresolved question.
 
-Before analysis, check these values:
+Example requests:
 
-- target label
-- immutable commit or working-tree state
-- exact file count
-- selected analyzers
-- skipped analyzers and reasons
-- time and file budgets
+- `Find code smells in the authentication package.`
+- `Audit my uncommitted changes for correctness and maintainability.`
+- `Review this pull request for structural risks.`
+- `Plan a safe refactor of the cache layer without applying changes.`
 
-Check that the target matches your request. Then confirm the plan.
+Requests can specify any frontier axis. Sniff resolves missing choices and shows the plan that needs confirmation.
 
-## Handle analyzer availability
+Read [Interviewing](interviewing.md) for request patterns and noninteractive defaults. Read [Sniff types](sniff-types.md) for exact values.
 
-Before installation, ask Sniff to probe the catalog. The agent calls `sniff_install_tools mode=probe` and shows each bundle status.
+## Approve, analyze, and report
 
-Choose only the bundles that the target needs. After you approve installation, the agent can call `sniff_install_tools mode=install bundles=["core","js-ts"]`. Replace those names with the bundles from the probe.
+Plan confirmation issues a capability bound to the manifest. Installation needs separate approval. Analyzer execution uses the live capability. Report saving needs separate approval. Refactoring needs separate approval.
 
-An unavailable analyzer becomes a coverage gap. Remote targets use config-free recipes. Sniff does not install their dependencies or run their executable configuration.
+The seven tools follow this sequence:
 
-## Finish the run
+1. `sniff_intake` resolves the frontier and obtains host approval or denial.
+2. `sniff_install_tools` checks analyzer bundles and installs approved bundles.
+3. `sniff_run_analyzer` revalidates the target and runs one selected recipe.
+4. Use `sniff_read_analyzer_artifact` to page analyzer observations with the capability from `sniff_run_analyzer`.
+5. `sniff_report` validates and renders a report or saves its artifact set.
+6. `sniff_read_report_artifact` pages a complete report artifact with the opaque read capability returned by `sniff_report`.
+7. `sniff_cancel` closes an unfinished run and removes temporary materialization.
 
-Before report rendering, full mode challenges the initial findings. Quick mode skips that pass. Refuted full-mode findings remain visible as dropped or downgraded entries.
+Pass each reader's `nextOffset` as the next `offset` until `eof`. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Registry expiry or eviction ends a read capability. Saving to a repository still needs separate approval.
 
-The rendered report stays in the session. When you need files, ask Sniff to save the report. Give an explicit output directory with that request.
+Before installation, Sniff needs explicit approval. Remote targets use config-free, remote-safe recipes. Remote targets do not load project executable configuration.
 
-A cancellation before reporting stops the run. It removes any temporary checkout and the isolated analyzer home.
+After explicit approval, `sniff_install_tools` provisions pinned OpenGrep v1.30.0 for the selected `core` bundle. Before caching the asset, Sniff verifies its SHA-256 digest. Provisioning and version probing use a host-owned neutral directory. They do not execute target code. A later `sniff_run_analyzer` call runs the fixed, config-free recipe against authorized files.
 
-## Next guides
+`quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 
+## Continue with the guides
+
+- [Interviewing](interviewing.md)
+- [Sniff types](sniff-types.md)
 - [Workflow](workflow.md)
 - [Targets and providers](targets-and-providers.md)
+- [Capabilities and evidence](capabilities.md)
 - [Security and trust](security-and-trust.md)
 - [Reports](reports.md)

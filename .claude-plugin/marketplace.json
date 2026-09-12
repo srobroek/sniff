@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "sniff",
+  "version": "0.1.0",
+  "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
+  "owner": {
+    "name": "srobroek"
+  },
+  "plugins": [
+    {
+      "name": "sniff",
+      "version": "0.1.0",
+      "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
+      "source": "./",
+      "category": "development"
+    }
+  ]
+}

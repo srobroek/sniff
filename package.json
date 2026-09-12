@@ -4,16 +4,18 @@
   "description": "Portable code-smell auditing for OMP, Claude Code, and Codex.",
   "private": true,
   "scripts": {
-    "check": "bun run typecheck && bun run lint && bun test",
+    "check": "bun run skills:check && bun run bundles:check && bun run typecheck && bun run lint && bun test",
     "lint": "biome check .",
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "mcp": "bun run adapters/mcp/server.ts",
+    "skills:check": "bun run scripts/generate-harness-skills.ts --check",
+    "bundles": "bun run scripts/build-harness-bundles.ts",
+    "bundles:check": "bun run scripts/build-harness-bundles.ts --check"
   },
   "omp": {
     "extensions": [
-      "./extensions/sniff-install-tool.ts",
-      "./extensions/sniff-intake-tool.ts",
-      "./extensions/sniff-report-tool.ts"
+      "./dist/omp/sniff-plugin.js"
     ]
   },
   "devDependencies": {
@@ -24,6 +26,7 @@
     "typescript": "7.0.2"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "ajv": "8.20.0"
   }
 }
