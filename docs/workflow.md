@@ -102,4 +102,4 @@ A run that stops before reporting needs `sniff_cancel`.
 
 Cancellation closes the capability. It releases analyzer reservations. It removes the temporary checkout. It removes the analyzer home.
 
-A successful report closes the lease. A failed report keeps the lease active for another attempt. Cancellation performs the same cleanup as successful reporting. An expiry timer cleans abandoned runs. The lease registry is single-process state.
+A successful report closes the lease. Before artifact creation, rejected input leaves the lease active for correction. Once Sniff creates canonical artifacts, the report attempt closes the lease whether later steps succeed or fail. Cancellation performs the same cleanup as successful reporting. An expiry timer cleans abandoned runs. The lease registry is single-process state.

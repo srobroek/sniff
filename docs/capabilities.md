@@ -19,7 +19,7 @@ The authored skill in `.skill-source/sniff/` generates native skill trees for ea
 
 ## Capability matrix
 
-The matrix records the exact-head lifecycle run completed on 2026-09-12.
+The matrix records the runtime lifecycle run completed on 2026-09-12.
 
 ```text
 Capability | OMP | Claude Code | Codex
@@ -94,7 +94,7 @@ The suite covers these paths:
 
 ## Cross-harness verification
 
-The final matrix ran from commit `12e10cab52444dff2963043e0e5ad719dcd868ef` on 2026-09-12.
+The runtime matrix ran from commit `12e10cab52444dff2963043e0e5ad719dcd868ef` on 2026-09-12.
 
 It exercised three adapters against these repositories:
 

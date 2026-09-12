@@ -102,7 +102,7 @@ Sniff rejects these states:
 - replayed capability
 - target metadata that differs from intake
 
-A terminal report attempt releases the capability even when validation fails.
+Before artifact creation, rejected input leaves the lease active for correction. Once Sniff creates canonical artifacts, the report attempt closes the lease whether later steps succeed or fail.
 
 ## Apply tiers
 
