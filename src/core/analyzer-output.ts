@@ -184,8 +184,9 @@ export function parseLizardOutput(stdout: string, targetRoot: string, truncated 
 	if (parsed.malformed) return incompleteResult(stdout, false, "Lizard CSV was malformed or unterminated");
 	const rows = nonBlankRows(parsed.rows);
 	if (rows.length === 0) return incompleteResult(stdout, false, "Lizard CSV did not contain its header row");
-	const header = rows[0]?.map((value) => value.trim().toLowerCase()) ?? [];
-const indexes = {
+	const firstRow = rows[0]?.map((value) => value.trim()) ?? [];
+	const header = firstRow.map((value) => value.toLowerCase());
+	const headerIndexes = {
 		nloc: header.indexOf("nloc"),
 		ccn: header.indexOf("ccn"),
 		param: header.indexOf("param"),
@@ -194,11 +195,16 @@ const indexes = {
 		file: header.indexOf("file"),
 		function: header.indexOf("function"),
 	};
-	if (Object.values(indexes).some((index) => index < 0)) return incompleteResult(stdout, false, "Lizard CSV was missing one or more required columns");
+	const hasHeader = Object.values(headerIndexes).every((index) => index >= 0);
+	const headerless = !hasHeader && firstRow.length === 11 && [0, 1, 3, 4, 9, 10].every((index) => /^\d+$/.test(firstRow[index] ?? ""));
+	if (!hasHeader && !headerless) return incompleteResult(stdout, false, "Lizard CSV was missing one or more required columns");
+	const indexes = hasHeader ? headerIndexes : { nloc: 0, ccn: 1, param: 3, length: 4, location: 9, file: 6, function: 7 };
+	const dataRows = hasHeader ? rows.slice(1) : rows;
+	const expectedColumns = hasHeader ? header.length : 11;
 	const state: ParseState = { reasons: [] };
 	const observations: AnalyzerObservation[] = [];
-	for (const row of rows.slice(1)) {
-		if (row.length !== header.length) {
+	for (const row of dataRows) {
+		if (row.length !== expectedColumns) {
 			addReason(state, "Lizard CSV contained a row with the wrong number of columns");
 			continue;
 		}

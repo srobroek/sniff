@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { tmpdir } from "node:os";
 import type { Readable, Writable } from "node:stream";
 import { Server } from "@modelcontextprotocol/sdk/server";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport";
@@ -23,6 +22,7 @@ import {
   intakeInput,
   publicSniffIntakeResult,
   releaseAllRunLeases,
+  resolveSniffToolkitCacheRoot,
   runSniffAnalyzer,
   runSniffInstall,
   runSniffIntakeTool,
@@ -394,7 +394,6 @@ const tools = [
         bundles: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
         all: { type: "boolean" },
         dryRun: { type: "boolean" },
-        noMise: { type: "boolean" },
         path: stringSchema,
       },
       additionalProperties: false,
@@ -815,7 +814,6 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
     ...(bundles ? { bundles: bundles as string[] } : {}),
     ...(typeof args.all === "boolean" ? { all: args.all } : {}),
     ...(typeof args.dryRun === "boolean" ? { dryRun: args.dryRun } : {}),
-    ...(typeof args.noMise === "boolean" ? { noMise: args.noMise } : {}),
     cwd: selectedMode === "install" ? process.cwd() : typeof args.path === "string" ? args.path : process.cwd(),
     signal,
   };
@@ -824,11 +822,11 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
     const plan = await runSniffInstall({ ...options, mode: "diagnose", signal });
     const planTools = plan.tools.map((tool) => ({ bundle: tool.bundle, tool: tool.tool, bin: tool.bin, status: tool.status, resolvedPath: tool.resolvedPath, routes: tool.attempts.map((attempt) => ({ argv: attempt.argv, exitCode: attempt.exitCode, timeoutMs: attempt.timeoutMs })) }));
     const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
-    const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, noMise: options.noMise ?? false, cwd: tmpdir(), tools: planTools };
+    const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, toolkitCacheRoot: resolveSniffToolkitCacheRoot(), tools: planTools };
     const request = { ...authorization, digest: digest(authorization) };
     let accepted: false | { acceptedDigest: string; actor?: string; reason?: string };
     try {
-      accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (host-owned neutral cwd). ");
+      accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (Sniff-owned toolkit cache). ");
     } catch {
       throw confirmationRequiredError();
     }

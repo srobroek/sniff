@@ -269,7 +269,9 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 	const targetRoot = mkdtempSync(join(tmpdir(), "sniff-omp-target-"));
 	const analyzerBin = mkdtempSync(join(tmpdir(), "sniff-omp-analyzer-"));
 	const originalPath = process.env.PATH;
+	const originalToolkitCache = process.env.SNIFF_TOOLKIT_CACHE_DIR;
 	process.env.PATH = `${analyzerBin}${delimiter}${originalPath ?? ""}`;
+	process.env.SNIFF_TOOLKIT_CACHE_DIR = join(cache, "toolkits");
 	try {
 		writeFileSync(join(analyzerBin, "lizard"), "#!/bin/sh\nfor arg do last=$arg; done\nprintf 'NLOC,CCN,token,PARAM,length,location,file,function,long_name\\n1,1,1,0,1,1-1,%s,module,module\\n' \"$last\"\n", { mode: 0o755 });
 		writeFileSync(join(targetRoot, "source.ts"), "export const source = true;\n");
@@ -410,6 +412,8 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 		expect(stringValue(replayDetails.error, "sniff_cancel replay error")).toContain("already released");
 	} finally {
 		process.env.PATH = originalPath;
+		if (originalToolkitCache === undefined) delete process.env.SNIFF_TOOLKIT_CACHE_DIR;
+		else process.env.SNIFF_TOOLKIT_CACHE_DIR = originalToolkitCache;
 		rmSync(cache, { recursive: true, force: true });
 		rmSync(targetRoot, { recursive: true, force: true });
 		rmSync(analyzerBin, { recursive: true, force: true });

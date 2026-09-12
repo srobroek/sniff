@@ -4,17 +4,19 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+	readdirSync,
+	readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../src/core/analyzer-artifact-registry.ts";
 import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } from "../src/core/analyzer-output.ts";
 import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
-import { runSniffInstall } from "../src/core/install.ts";
+import { renderMiseToolkit, runSniffInstall } from "../src/core/install.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../src/core/opengrep.ts";
 import sniffInstallTool from "./sniff-install-tool.ts";
 
@@ -53,6 +55,7 @@ function commandResult(argv: string[], timeoutMs: number, overrides: Partial<Com
 function fakeRuntime(overrides: Partial<SniffInstallRuntime> = {}): SniffInstallRuntime {
 	return {
 		resolveCommand: (bin) => `/fake/bin/${bin}`,
+		toolkitCacheRoot: tempDir("sniff-toolkit-"),
 		readLauncher: () => "",
 		run: async (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
 		freshEnvironment: async (_cwd, env, miseAware) => ({
@@ -171,6 +174,17 @@ describe("bounded analyzer output projections", () => {
 		expect(parsed.observations.map(({ severity }) => severity)).toEqual(["MEDIUM", "MEDIUM", "MEDIUM"]);
 		expect(parsed.capture.incomplete).toBe(false);
 		expect(parsed.capture.digest).toMatch(/^[a-f0-9]{64}$/);
+	});
+
+	test("accepts the headerless CSV emitted by Lizard 1.24", () => {
+		const root = tempDir("sniff-lizard-headerless-");
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src", "main.ts"), "function complex() {}\n");
+		const path = join(root, "src", "main.ts");
+		const parsed = parseLizardOutput(`14,12,50,2,20,"complex@4-23@${path}",${path},complex,"complex ( value )",4,23`, root);
+		expect(parsed.observations).toHaveLength(1);
+		expect(parsed.observations[0]).toMatchObject({ path: "src/main.ts", start: { line: 4, column: 1 }, message: "complex: cyclomatic complexity 12 (NLOC 14, 2 parameters, 20 lines)" });
+		expect(parsed.capture.incomplete).toBe(false);
 	});
 
 	test("projects Gitleaks JSON with exact rule IDs and rejects escaped paths", () => {
@@ -298,7 +312,7 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({
 			mode: "probe",
 			cwd: dir,
-			env: { PATH: shimDir, SNIFF_OPENGREP_CACHE_DIR: join(dir, "empty-opengrep-cache") },
+			env: { PATH: shimDir, SNIFF_OPENGREP_CACHE_DIR: join(dir, "empty-opengrep-cache"), SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-toolkit-") },
 		});
 		expect(result.ok).toBe(true);
 		expect(result.tools.find((tool) => tool.tool === "opengrep")?.status).toBe(
@@ -318,7 +332,7 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({
 			mode: "probe",
 			cwd: dir,
-			env: { PATH: binDir },
+			env: { PATH: binDir, SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-toolkit-") },
 		});
 		expect(result.ok).toBe(true);
 		expect(result.tools.find((tool) => tool.tool === "lizard")?.status).toBe(
@@ -369,7 +383,7 @@ describe("runSniffInstall", () => {
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
-			env: { PATH: shimDir },
+			env: { PATH: shimDir, SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-toolkit-") },
 		});
 		expect(result.ok).toBe(false);
 		expect(result.tools[0]).toMatchObject({
@@ -401,7 +415,7 @@ describe("runSniffInstall", () => {
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
-			env: { PATH: binDir },
+			env: { PATH: binDir, SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-toolkit-") },
 		});
 		expect(result.ok).toBe(false);
 		expect(result.tools[0]).toMatchObject({
@@ -418,7 +432,7 @@ describe("runSniffInstall", () => {
 			mode: "diagnose",
 			bundles: ["dup"],
 			cwd: dir,
-			env: { PATH: `${binDir}${delimiter}/bin:/usr/bin` },
+			env: { PATH: `${binDir}${delimiter}/bin:/usr/bin`, SNIFF_TOOLKIT_CACHE_DIR: tempDir("sniff-empty-toolkit-") },
 		});
 		expect(result.ok).toBe(false);
 		expect(result.tools[0]?.status).toBe("timed-out");
@@ -500,7 +514,6 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
-			noMise: true,
 			runtime,
 			signal: controller.signal,
 		});
@@ -521,7 +534,6 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
-			noMise: true,
 			runtime,
 		});
 		expect(result.ok).toBe(false);
@@ -541,7 +553,6 @@ describe("runSniffInstall", () => {
 		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["dup"],
-			noMise: true,
 			runtime,
 		});
 		expect(result.tools[0]?.status).toBe("policy-blocked");
@@ -581,41 +592,81 @@ describe("runSniffInstall", () => {
 		expect(result.tools[0]?.status).toBe("installation-failed");
 	});
 
-	test("successful mise install is re-probed in a fresh environment", async () => {
-		const calls: string[][] = [];
-		const refreshes: boolean[] = [];
+	test("installs one bundle toolkit and reuses it for later preflight", async () => {
+		const target = tempDir("sniff-target-");
+		writeFileSync(join(target, "marker"), "unchanged");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+		const refreshes: Array<{ cwd: string; env: Record<string, string | undefined> }> = [];
 		const runtime = fakeRuntime({
 			resolveCommand: (bin, _cwd, env) => {
-				if (bin === "jscpd")
-					return env.FRESH === "1" ? "/fresh/bin/jscpd" : null;
+				if (bin === "jscpd") return env.FRESH === "1" ? "/fresh/bin/jscpd" : null;
 				return `/fake/bin/${bin}`;
 			},
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv, cwd, env });
+				return commandResult(argv, timeoutMs);
+			},
+			freshEnvironment: async (cwd, env) => {
+				refreshes.push({ cwd, env });
+				return { env: { ...env, FRESH: "1" }, source: "mise" };
+			},
+		});
+		const toolkitDirectory = join(runtime.toolkitCacheRoot ?? "", "dup");
+		const installed = await runSniffInstall({
+			mode: "install",
+			bundles: ["dup"],
+			cwd: target,
+			runtime,
+		});
+		expect(installed.ok).toBe(true);
+		expect(installed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
+		const installCall = calls.find(({ argv }) => argv.join(" ") === "mise install");
+		expect(installCall).toMatchObject({ argv: ["mise", "install"], cwd: toolkitDirectory, env: {
+			MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config"),
+			MISE_GLOBAL_CONFIG_FILE: join(toolkitDirectory, ".global-config-disabled.toml"),
+			MISE_SYSTEM_CONFIG_FILE: join(toolkitDirectory, ".system-config-disabled.toml"),
+			MISE_AUTO_INSTALL: "0",
+			MISE_CEILING_PATHS: dirname(toolkitDirectory),
+		} });
+		expect(readFileSync(join(toolkitDirectory, "mise.toml"), "utf8")).toBe(renderMiseToolkit("dup"));
+		expect(readdirSync(target)).toEqual(["marker"]);
+
+		const diagnosed = await runSniffInstall({ mode: "diagnose", bundles: ["dup"], cwd: target, runtime });
+		expect(diagnosed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
+		expect(refreshes).toHaveLength(2);
+		for (const refresh of refreshes) {
+			expect(refresh).toMatchObject({ cwd: toolkitDirectory, env: { MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: dirname(toolkitDirectory), MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config") } });
+		}
+	});
+
+	test("does not borrow a managed toolkit runtime for unmanaged analyzers", async () => {
+		const runtime = fakeRuntime({
+			resolveCommand: (bin, _cwd, env) => bin === "go"
+				? env.TOOLKIT === "1" ? "/toolkit/bin/go" : null
+				: `/fake/bin/${bin}`,
+			freshEnvironment: async (_cwd, env) => ({ env: { ...env, TOOLKIT: "1" }, source: "mise" }),
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "go");
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, "mise.toml"), '[tools]\n"go:example.invalid/tool" = "latest"\n');
+		const result = await runSniffInstall({ mode: "diagnose", bundles: ["go"], runtime });
+		expect(result.tools.find(({ tool }) => tool === "go-vet")).toMatchObject({ status: "missing", resolvedPath: null });
+	});
+
+	test("managed installation requires mise without package-manager fallback", async () => {
+		const calls: string[][] = [];
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => bin === "mise" || bin === "jscpd" ? null : `/fake/bin/${bin}`,
 			run: async (argv, _cwd, _env, timeoutMs) => {
 				calls.push(argv);
 				return commandResult(argv, timeoutMs);
 			},
-			freshEnvironment: async (_cwd, env, miseAware) => {
-				refreshes.push(miseAware);
-				return { env: { ...env, FRESH: "1" }, source: "mise" };
-			},
 		});
-		const result = await runSniffInstall({
-			mode: "install",
-			bundles: ["dup"],
-			runtime,
-		});
-		expect(result.ok).toBe(true);
-		expect(result.tools[0]).toMatchObject({
-			status: "usable",
-			resolvedPath: "/fresh/bin/jscpd",
-		});
-		expect(calls.some((argv) => argv.join(" ") === "mise use npm:jscpd")).toBe(
-			true,
-		);
-		expect(
-			calls.some((argv) => argv.join(" ") === "/fresh/bin/jscpd --version"),
-		).toBe(true);
-		expect(refreshes).toEqual([true]);
+		const result = await runSniffInstall({ mode: "install", bundles: ["dup"], runtime });
+		expect(result.ok).toBe(false);
+		expect(result.tools[0]).toMatchObject({ status: "unavailable-route", remediation: "mise is required to install the Sniff-managed dup toolkit" });
+		expect(calls).toEqual([]);
+		expect(existsSync(join(runtime.toolkitCacheRoot ?? "", "dup", "mise.toml"))).toBe(false);
 	});
 
 	test("install fails when a successful manager command leaves a shim", async () => {
@@ -664,7 +715,6 @@ describe("runSniffInstall", () => {
 			mode: "install",
 			bundles: ["core"],
 			dryRun: true,
-			noMise: true,
 			cwd: dir,
 			runtime: fakeRuntime({
 				resolveCommand: (bin) => (bin === "brew" ? "/fake/bin/brew" : null),

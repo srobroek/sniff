@@ -157,8 +157,8 @@ export const TOOLS = {
 			name: "scc",
 			bin: "scc",
 			key: "brew",
-			hint: "brew install scc (or: go install github.com/boyter/scc/v3@latest)",
-			miseSpec: "go:github.com/boyter/scc/v3",
+			hint: "brew install scc (or: go install github.com/boyter/scc/v4@latest)",
+			miseSpec: "go:github.com/boyter/scc/v4",
 		},
 		{
 			name: "ast-grep",
