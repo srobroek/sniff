@@ -436,8 +436,8 @@ const tools = [
     description: "Read one bounded UTF-8 page from a complete in-process Sniff report artifact using its opaque read capability.",
     inputSchema: {
       type: "object",
-      properties: { capability: stringSchema, reportId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } },
-      required: ["capability", "reportId", "relativePath"],
+      properties: { readCapability: stringSchema, reportId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } },
+      required: ["readCapability", "reportId", "relativePath"],
       additionalProperties: false,
     },
     outputSchema: outputSchemas.reportArtifact,
@@ -896,11 +896,11 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
 }
 }
 function reportArtifact(args: JsonObject): ToolResponse {
-  const capability = requiredString(args.capability, "capability");
+  const readCapability = requiredString(args.readCapability, "readCapability");
   const reportId = requiredString(args.reportId, "reportId");
   const relativePath = requiredString(args.relativePath, "relativePath");
   const offset = args.offset;
-  const result = readReportArtifact({ capability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  const result = readReportArtifact({ capability: readCapability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) });
   return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
 }
 function analyzerArtifact(args: JsonObject): ToolResponse {

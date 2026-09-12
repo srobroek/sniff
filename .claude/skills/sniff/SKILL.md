@@ -30,7 +30,7 @@ Read `./references/workflow.md` first. Follow these steps in order:
    - For trusted local work, read each governing configuration file.
    - For remote work, do not load executable configuration or install dependencies.
 4. Run detection.
-   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`. If its preview is truncated or complete observations are needed, page `sniff_read_analyzer_artifact` with `analyzerResultId` and either `relativePath` or `sourcePath`; continue with `nextOffset` until `eof`.
+   - Pass the capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`. If its preview is truncated or complete observations are needed, page `sniff_read_analyzer_artifact` with its `readCapability`, `analyzerResultId`, and either `relativePath` or `sourcePath`; continue with `nextOffset` until `eof`.
    - Record unavailable analyzers as coverage gaps.
    - For large targets, propose an independent read-only scout plan by language and subtree. Build each brief from `./references/scout-brief.md` and include the matching `./references/languages/<lang>.md` path.
 5. Map findings.
@@ -40,7 +40,7 @@ Read `./references/workflow.md` first. Follow these steps in order:
 7. Report or apply.
    - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
    - Pass the capability and manifest ID to `sniff_report`; omit `extensions["sniff.intake"]` so the host injects the authenticated manifest.
-   - Use the returned read capability, report ID, and descriptor relative path with `sniff_read_report_artifact`; follow UTF-8-safe pages through `nextOffset` until `eof`.
+   - Pass the returned `readCapability`, report ID, and descriptor relative path to `sniff_read_report_artifact`; follow UTF-8-safe pages through `nextOffset` until `eof`.
    - Call `sniff_cancel` when a run stops before reporting.
    - Save or apply only with explicit approval.
 

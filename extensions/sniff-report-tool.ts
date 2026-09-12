@@ -78,23 +78,26 @@ function reportArtifactEnvelope(result: ReportArtifactReadResult): string {
   return best;
 }
 
-type SniffReadReportArtifactParams = ReportArtifactReadOptions;
+type SniffReadReportArtifactParams = Omit<ReportArtifactReadOptions, "capability"> & {
+  readonly readCapability: string;
+};
 
 function registerReportArtifactReader(pi: ExtensionAPI): void {
   const z = pi.zod;
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_read_report_artifact",
     label: "Read Sniff report artifact",
-    description: "Read one UTF-8-safe page from a complete in-process Sniff report artifact using its opaque capability.",
+    description: "Read one UTF-8-safe page from a complete in-process Sniff report artifact using the readCapability returned by sniff_report.",
     parameters: z.object({
-      capability: z.string().describe("Opaque report artifact read capability returned by sniff_report"),
+      readCapability: z.string().describe("Opaque report artifact read capability returned by sniff_report"),
       reportId: z.string().describe("Report ID returned by sniff_report"),
       relativePath: z.string().describe("Artifact relative path from a sniff_report descriptor"),
       offset: z.number().int().nonnegative().optional().describe("UTF-8 byte offset returned as nextOffset; defaults to zero"),
     }) as unknown as TSchema,
     execute: async (_id, params: SniffReadReportArtifactParams) => {
       try {
-        const result = readReportArtifact(params);
+        const { readCapability, ...options } = params;
+        const result = readReportArtifact({ ...options, capability: readCapability });
         return {
           content: [{ type: "text", text: reportArtifactEnvelope(result) }],
           details: {

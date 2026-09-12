@@ -252,6 +252,11 @@ describe("MCP Sniff server", () => {
       expect(analyzerReaderSchema.oneOf).toBeUndefined();
       expect(analyzerReaderSchema.required).toEqual(["analyzerResultId", "readCapability"]);
       expect(Object.keys(object(analyzerReaderSchema.properties)).sort()).toEqual(["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"]);
+      const reportReader = tools.find((tool) => tool.name === "sniff_read_report_artifact");
+      if (!reportReader) throw new Error("Missing sniff_read_report_artifact tool");
+      const reportReaderSchema = object(reportReader.inputSchema);
+      expect(reportReaderSchema.required).toEqual(["readCapability", "reportId", "relativePath"]);
+      expect(Object.keys(object(reportReaderSchema.properties)).sort()).toEqual(["offset", "readCapability", "relativePath", "reportId"]);
       expect(tools.map((tool) => tool.name)).toEqual(["sniff_intake", "sniff_cancel", "sniff_install_tools", "sniff_run_analyzer", "sniff_report", "sniff_read_report_artifact", "sniff_read_analyzer_artifact"]);
       expect(tools.every((tool) => object(tool.inputSchema).type === "object" && object(tool.outputSchema).type === "object")).toBe(true);
       const call = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: {} } })).result);
@@ -711,12 +716,12 @@ exit 0
       const renderedStructured = object(rendered.structuredContent);
       const listedTools = object((await client.request("tools/list")).result).tools as Message[];
       const readValid = outputSchemaValidator(listedTools, "sniff_read_report_artifact");
-      const read = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { capability: renderedStructured.readCapability, reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
+      const read = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { readCapability: renderedStructured.readCapability, reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
       const readStructured = object(read.structuredContent);
       expect(readStructured.content).toContain("Deterministic MCP report fixture.");
       expect(readStructured.eof).toBe(true);
       expect(readValid(readStructured)).toBe(true);
-      const rejectedRead = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { capability: "wrong-capability", reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
+      const rejectedRead = object((await client.request("tools/call", { name: "sniff_read_report_artifact", arguments: { readCapability: "wrong-capability", reportId: renderedStructured.reportId, relativePath: "summary.md" } })).result);
       expect(rejectedRead.isError).toBe(true);
 
       const secondIntake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);

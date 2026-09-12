@@ -779,7 +779,7 @@ describe("sniff tools integration", () => {
 		if (!reader) throw new Error("sniff_read_analyzer_artifact was not registered");
 		const path = artifacts.descriptors.find((descriptor) => descriptor.kind === "source-file")?.relativePath;
 		if (!path) throw new Error("source artifact was not registered");
-		const first = await reader.execute("id", { capability, analyzerResultId: artifacts.analyzerResultId, relativePath: path }, undefined, undefined, { cwd: process.cwd() });
+    const first = await reader.execute("id", { readCapability: capability, analyzerResultId: artifacts.analyzerResultId, relativePath: path }, undefined, undefined, { cwd: process.cwd() });
 		const firstText = first.content[0]?.text ?? "";
 		const firstPage = JSON.parse(firstText) as { analyzerResultId: string; relativePath: string; offset: number; nextOffset: number; eof: boolean; bytes: number; content: string };
 		expect(firstPage.analyzerResultId).toBe(artifacts.analyzerResultId);
@@ -789,7 +789,7 @@ describe("sniff tools integration", () => {
 		expect(firstPage.bytes).toBe(Buffer.byteLength(firstPage.content));
 		expect(Buffer.byteLength(firstText)).toBeLessThan(64 * 1024);
 
-		const second = await reader.execute("id", { capability, analyzerResultId: firstPage.analyzerResultId, relativePath: firstPage.relativePath, offset: firstPage.nextOffset }, undefined, undefined, { cwd: process.cwd() });
+    const second = await reader.execute("id", { readCapability: capability, analyzerResultId: firstPage.analyzerResultId, relativePath: firstPage.relativePath, offset: firstPage.nextOffset }, undefined, undefined, { cwd: process.cwd() });
 		const secondPage = JSON.parse(second.content[0]?.text ?? "") as { analyzerResultId: string; offset: number; nextOffset: number; content: string };
 		expect(secondPage.analyzerResultId).toBe(firstPage.analyzerResultId);
 		expect(secondPage.offset).toBe(firstPage.nextOffset);

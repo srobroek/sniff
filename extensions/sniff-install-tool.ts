@@ -151,22 +151,27 @@ function analyzerArtifactEnvelope(result: {
   return best;
 }
 
+type SniffReadAnalyzerArtifactParams = Omit<AnalyzerArtifactReadOptions, "capability"> & {
+  readonly readCapability: string;
+};
+
 function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
   const z = pi.zod;
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_read_analyzer_artifact",
     label: "Read Sniff analyzer artifact",
-    description: "Read one UTF-8-safe page from complete analyzer observations using an opaque capability. Provide relativePath or sourcePath.",
+    description: "Read one UTF-8-safe page from complete analyzer observations using the readCapability returned by sniff_run_analyzer. Provide relativePath or sourcePath.",
     parameters: z.object({
-      capability: z.string().describe("Opaque analyzer artifact read capability returned by sniff_run_analyzer"),
+      readCapability: z.string().describe("Opaque analyzer artifact read capability returned by sniff_run_analyzer"),
       analyzerResultId: z.string().describe("Analyzer result ID returned by sniff_run_analyzer"),
       relativePath: z.string().optional().describe("Artifact relative path from the analyzer result index"),
       sourcePath: z.string().optional().describe("Normalized source path for direct lookup"),
       offset: z.number().int().nonnegative().optional().describe("UTF-8 byte offset returned as nextOffset; defaults to zero"),
     }) as unknown as TSchema,
-    execute: async (_id, params: AnalyzerArtifactReadOptions) => {
+    execute: async (_id, params: SniffReadAnalyzerArtifactParams) => {
       try {
-        const result = readAnalyzerArtifact(params);
+        const { readCapability, ...options } = params;
+        const result = readAnalyzerArtifact({ ...options, capability: readCapability });
         return { content: [{ type: "text", text: analyzerArtifactEnvelope(result) }], details: { ok: true, analyzerResultId: result.analyzerResultId, relativePath: result.relativePath, sourcePath: result.sourcePath, offset: result.offset, nextOffset: result.nextOffset, eof: result.eof, bytes: result.bytes, totalBytes: result.totalBytes, sha256: result.sha256 } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

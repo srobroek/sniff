@@ -344,7 +344,7 @@ describe("structured Sniff reports", () => {
 
     const descriptor = metadata.descriptors.find((item) => item.relativePath === "summary.md");
     if (!descriptor) throw new Error("bounded report metadata omitted summary.md");
-    const rejected = await readerTool.execute("read", { capability: "wrong-capability", reportId: metadata.reportId, relativePath: descriptor.relativePath }, undefined, undefined, { hasUI: false });
+    const rejected = await readerTool.execute("read", { readCapability: "wrong-capability", reportId: metadata.reportId, relativePath: descriptor.relativePath }, undefined, undefined, { hasUI: false });
     expect(rejected.isError).toBe(true);
     expect(outputText(rejected)).toBe("sniff_read_report_artifact failed: Unknown Sniff report artifact capability");
     expect(rejected.details).toEqual({ ok: false, error: "Unknown Sniff report artifact capability" });
@@ -354,7 +354,7 @@ describe("structured Sniff reports", () => {
     let eof = false;
     for (let pageCount = 0; pageCount < 128; pageCount += 1) {
       const pageOutput = await readerTool.execute("read", {
-        capability: metadata.readCapability,
+        readCapability: metadata.readCapability,
         reportId: metadata.reportId,
         relativePath: descriptor.relativePath,
         offset,
