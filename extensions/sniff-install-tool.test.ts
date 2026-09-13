@@ -806,28 +806,71 @@ describe("runSniffInstall", () => {
 			writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
 			const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
 			let cargoPath = "";
+			let preparationFailure: CommandResult | undefined;
 			const runtime = fakeRuntime({
 				resolveCommand: (bin) => bin === "cargo" ? cargoPath : `/fake/bin/${bin}`,
 				run: async (argv, cwd, env, timeoutMs) => {
 					calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
 					if (argv.join(" ") === "mise which cargo") return commandResult(argv, timeoutMs, { stdout: `${cargoPath}\n` });
 					const isPreparation = cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version";
-					return commandResult(argv, timeoutMs, isPreparation ? failure.result : {});
+					if (isPreparation) preparationFailure = commandResult(argv, timeoutMs, failure.result);
+					return preparationFailure ?? commandResult(argv, timeoutMs);
 				},
 			});
 			const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
 			cargoPath = join(directory, ".cargo", "bin", "cargo");
 			const result = await runSniffInstall({ mode: "install", bundles: ["rust"], cwd: target, runtime });
 			const targetCargoCalls = calls.filter(({ argv, cwd }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version");
+			const preparationIndex = calls.findIndex(({ argv, cwd }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version");
+			const callsAfterPreparation = calls.slice(preparationIndex + 1);
 			expect(result.ok).toBe(false);
 			expect(result.tools).toHaveLength(4);
 			expect(result.tools.every(({ status }) => status === failure.status)).toBe(true);
+			for (const tool of result.tools) expect(tool.install).toEqual(preparationFailure);
 			expect(targetCargoCalls).toHaveLength(1);
 			expect(targetCargoCalls[0]?.argv[0]).toBe(cargoPath);
 			expect(targetCargoCalls[0]).toMatchObject({ cwd: target, timeoutMs: 300_000 });
 			expect(calls.some(({ argv }) => argv.slice(-3).join(" ") === "component add clippy")).toBe(false);
 			expect(calls.some(({ argv, cwd }) => cwd === target && argv.slice(1).join(" ") === "clippy --version")).toBe(false);
+			expect(callsAfterPreparation).toHaveLength(0);
 		}
+	});
+
+	test("preserves timed-out Cargo selection across all Rust tools", async () => {
+		const target = tempDir("sniff-rust-selection-timeout-");
+		writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
+		const selectionFailure = commandResult(["mise", "which", "cargo"], 10_000, {
+			exitCode: null,
+			stdout: "partial selection\n",
+			stderr: "selection timed out",
+			stdoutTruncated: true,
+			stderrTruncated: true,
+			outputLimitBytes: 512,
+			timedOut: true,
+			error: "selection timed out",
+		});
+		const runtime = fakeRuntime({
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
+				if (argv.join(" ") === "mise which cargo") {
+					return env.FRESH === "1" ? selectionFailure : commandResult(argv, timeoutMs, { stdout: "/fake/bin/cargo\n" });
+				}
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], cwd: target, runtime });
+		const selectionCalls = calls.filter(({ argv, env }) => argv.join(" ") === "mise which cargo" && env.FRESH === "1");
+		const selectionIndex = calls.findIndex(({ argv, env }) => argv.join(" ") === "mise which cargo" && env.FRESH === "1");
+		const callsAfterSelection = calls.slice(selectionIndex + 1);
+		expect(result.ok).toBe(false);
+		expect(result.tools).toHaveLength(4);
+		expect(result.tools.every(({ status }) => status === "timed-out")).toBe(true);
+		for (const tool of result.tools) expect(tool.install).toEqual(selectionFailure);
+		expect(selectionCalls).toHaveLength(1);
+		expect(callsAfterSelection.some(({ argv, cwd }) => cwd === target && argv.join(" ") !== "mise which cargo")).toBe(false);
+		expect(callsAfterSelection.some(({ argv }) => argv.slice(-3).join(" ") === "component add clippy")).toBe(false);
+		expect(callsAfterSelection.some(({ argv }) => argv.some((part) => part.includes("analyzer")))).toBe(false);
 	});
 
 	test("skips long Rust preparation for an unpinned target", async () => {
