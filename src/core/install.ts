@@ -629,6 +629,73 @@ async function installUnmanagedTool(
 	return verified;
 }
 
+function hasRustToolchainPin(target: string): boolean {
+	let directory = resolve(target);
+	for (;;) {
+		if (existsSync(join(directory, "rust-toolchain.toml")) || existsSync(join(directory, "rust-toolchain"))) return true;
+		const parent = dirname(directory);
+		if (parent === directory) return false;
+		directory = parent;
+	}
+}
+
+type RustPreparationResult = {
+	status: SniffToolStatus;
+	remediation: string;
+	install?: CommandResult;
+};
+
+async function prepareRustTargetToolchain(
+	probeCwd: string,
+	directory: string,
+	env: ProcessEnvironment,
+	runtime: SniffInstallRuntime,
+	lines: string[],
+	signal?: AbortSignal,
+): Promise<RustPreparationResult | null> {
+	const toolkit = await toolkitEnvironment("rust", env, runtime, signal);
+	if (toolkit.error) {
+		return {
+			status: "unavailable-route",
+			remediation: `managed Rust toolkit environment was unavailable: ${toolkit.error}`,
+		};
+	}
+	const selectedCargo = await runtime.run(["mise", "which", "cargo"], directory, toolkit.env, ENV_REFRESH_TIMEOUT_MS, signal);
+	const cargoPaths = selectedCargo.stdout.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
+	const cargoPath = cargoPaths.length === 1 ? cargoPaths[0] : undefined;
+	if (selectedCargo.exitCode !== 0 || selectedCargo.timedOut || selectedCargo.error || !cargoPath || !isAbsolute(cargoPath)) {
+		const status = selectedCargo.exitCode !== 0 || selectedCargo.timedOut || selectedCargo.error
+			? classifyInstallFailure(selectedCargo)
+			: "unavailable-route";
+		return {
+			status,
+			remediation: `managed Cargo was not uniquely resolved by the Rust toolkit at ${directory}`,
+			install: selectedCargo,
+		};
+	}
+	const cargoEnvironment = isolatedRustupEnvironment(directory, toolkit.env);
+	delete cargoEnvironment.RUSTUP_TOOLCHAIN;
+	const argv = [cargoPath, "--version"];
+	lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+	const prepared = await runtime.run(argv, probeCwd, cargoEnvironment, INSTALL_TIMEOUT_MS, signal);
+	if (prepared.stdout.trim()) lines.push(prepared.stdout.trimEnd());
+	if (prepared.stderr.trim()) lines.push(prepared.stderr.trimEnd());
+	if (prepared.stdoutTruncated || prepared.stderrTruncated) lines.push(`      (output truncated at ${prepared.outputLimitBytes} bytes per stream)`);
+	if (prepared.exitCode !== 0 || prepared.timedOut || prepared.error) {
+		return {
+			status: classifyInstallFailure(prepared),
+			remediation: "target-selected Rust toolchain preparation failed",
+			install: prepared,
+		};
+	}
+	return null;
+}
+
+type MiseBundleInstallResult = {
+	results: SniffToolResult[];
+	preparationFailure?: RustPreparationResult;
+};
+
 async function installMiseBundle(
 	bundle: BundleName,
 	records: ToolRec[],
@@ -639,7 +706,7 @@ async function installMiseBundle(
 	lines: string[],
 	signal?: AbortSignal,
 	prepareVerification?: () => Promise<void>,
-): Promise<SniffToolResult[]> {
+): Promise<MiseBundleInstallResult> {
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
 	const initial: SniffToolResult[] = [];
 	for (const rec of records) {
@@ -655,13 +722,13 @@ async function installMiseBundle(
 		}
 		if (records.some((rec) => rec.name === "cargo-udeps")) lines.push(`  + ${rustupPath} toolchain install nightly --profile minimal --no-self-update (if missing)`);
 		lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
-		return initial;
+		return { results: initial };
 	}
 	const miseEnvironment = isolatedMiseEnvironment(directory, env);
 	if (!runtime.resolveCommand("mise", directory, miseEnvironment)) {
 		const remediation = `mise is required to install the Sniff-managed ${bundle} toolkit`;
 		lines.push(`      (unavailable-route — ${remediation})`);
-		return initial.map((result) => failedInstallResult(result, "unavailable-route", undefined, remediation));
+		return { results: initial.map((result) => failedInstallResult(result, "unavailable-route", undefined, remediation)) };
 	}
 	writeMiseToolkit(bundle, env, runtime);
 	if (records.some((rec) => rec.key === "cargo")) {
@@ -676,7 +743,7 @@ async function installMiseBundle(
 				if (!bootstrapFailure) continue;
 				const status = classifyInstallFailure(bootstrapFailure);
 				lines.push(`      (${status}${bootstrapFailure.exitCode === null ? "" : ` — exit ${bootstrapFailure.exitCode}`})`);
-				return initial.map((result) => failedInstallResult(result, status, bootstrapFailure, `isolated ${channel} Rust toolchain bootstrap failed`));
+				return { results: initial.map((result) => failedInstallResult(result, status, bootstrapFailure, `isolated ${channel} Rust toolchain bootstrap failed`)) };
 			}
 		}
 	}
@@ -688,6 +755,16 @@ async function installMiseBundle(
 	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
 		? classifyInstallFailure(install)
 		: undefined;
+	if (!installStatus && bundle === "rust" && hasRustToolchainPin(probeCwd)) {
+		const preparation = await prepareRustTargetToolchain(probeCwd, directory, env, runtime, lines, signal);
+		if (preparation) {
+			lines.push(`      (${preparation.status}${preparation.install?.exitCode === null || preparation.install === undefined ? "" : ` — exit ${preparation.install.exitCode}`})`);
+			return {
+				results: initial.map((result) => failedInstallResult(result, preparation.status, preparation.install, preparation.remediation)),
+				preparationFailure: preparation,
+			};
+		}
+	}
 	if (!installStatus && records.some((rec) => rec.name === "cargo-udeps")) {
 		const rustupPath = runtime.resolveCommand("rustup", directory, miseEnvironment);
 		if (rustupPath) {
@@ -695,7 +772,7 @@ async function installMiseBundle(
 			if (bootstrapFailure) {
 				const status = classifyInstallFailure(bootstrapFailure);
 				lines.push(`      (${status}${bootstrapFailure.exitCode === null ? "" : ` — exit ${bootstrapFailure.exitCode}`})`);
-				return initial.map((result) => failedInstallResult(result, status, bootstrapFailure, "isolated nightly Rust toolchain bootstrap failed"));
+				return { results: initial.map((result) => failedInstallResult(result, status, bootstrapFailure, "isolated nightly Rust toolchain bootstrap failed")) };
 			}
 		}
 	}
@@ -705,7 +782,7 @@ async function installMiseBundle(
 	if (fresh.error) {
 		const status = installStatus ?? "unavailable-route";
 		lines.push(`      (${status} — fresh mise environment failed: ${fresh.error})`);
-		return initial.map((result) => failedInstallResult(result, status, install, fresh.error));
+		return { results: initial.map((result) => failedInstallResult(result, status, install, fresh.error)) };
 	}
 	const verified: SniffToolResult[] = [];
 	for (const rec of records) {
@@ -718,7 +795,7 @@ async function installMiseBundle(
 			? `      verified ${rec.name} in fresh mise environment (${result.resolvedPath})`
 			: `      (${rec.name}: ${result.status} after toolkit install; resolved=${result.resolvedPath ?? "<unresolved>"})`);
 	}
-	return verified;
+	return { results: verified };
 }
 
 
@@ -1028,9 +1105,25 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 				}
 			}
 			: undefined;
-		const managedResults = managedRecords.length > 0
+		const managedBundle: MiseBundleInstallResult = managedRecords.length > 0
 			? await installMiseBundle(bundle, managedRecords, probeCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal, prepareVerification)
-			: [];
+			: { results: [] };
+		const managedResults = managedBundle.results;
+		const preparationFailure = managedBundle.preparationFailure;
+		if (preparationFailure) {
+			for (const rec of unmanagedRecords) {
+				unmanagedByTool.set(rec.name, failedInstallResult({
+					bundle,
+					tool: rec.name,
+					bin: rec.bin,
+					required: true,
+					status: "missing",
+					resolvedPath: null,
+					remediation: rec.hint,
+					attempts: [],
+				}, preparationFailure.status, preparationFailure.install, preparationFailure.remediation));
+			}
+		}
 		if (bundle === "rust" && opts.dryRun) {
 			for (const rec of unmanagedRecords) {
 				if (unmanagedByTool.get(rec.name)?.status !== "usable") lines.push(`  + rustup component add clippy (timeout ${INSTALL_TIMEOUT_MS}ms)`);

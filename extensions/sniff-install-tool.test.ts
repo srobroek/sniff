@@ -684,9 +684,11 @@ describe("runSniffInstall", () => {
 		let stableInstalled = false;
 		let stableDefault = false;
 		let nightlyUsable = false;
+		let cargoPath = "";
 		const runtime = fakeRuntime({
-			resolveCommand: (bin) => `/fake/bin/${bin}`,
+			resolveCommand: (bin) => bin === "cargo" ? cargoPath : `/fake/bin/${bin}`,
 			run: async (argv, cwd, env, timeoutMs) => {
+				if (argv.join(" ") === "mise which cargo") return commandResult(argv, timeoutMs, { stdout: `${cargoPath}\n` });
 				calls.push({ argv: [...argv], cwd, env: { ...env } });
 				if (argv.slice(-2).join(" ") === "toolchain list")
 					return commandResult(argv, timeoutMs, { stdout: `${stableInstalled ? `stable-aarch64-apple-darwin${stableDefault ? " (active, default)" : ""}\n` : ""}nightly-aarch64-apple-darwin\n` });
@@ -695,12 +697,14 @@ describe("runSniffInstall", () => {
 				if (argv.slice(-4).join(" ") === "run nightly rustc --version" && !nightlyUsable)
 					return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "missing manifest" });
 				if (argv.slice(-6).join(" ") === "toolchain install nightly --profile minimal --no-self-update") nightlyUsable = true;
-				if (argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled)
+				if (argv[0] === cargoPath && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled)
 					return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "clippy is not installed" });
 				if (argv.at(-3) === "component" && argv.at(-2) === "add" && argv.at(-1) === "clippy") clippyInstalled = true;
 				return commandResult(argv, timeoutMs);
 			},
 		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+		cargoPath = join(directory, ".cargo", "bin", "cargo");
 		const result = await runSniffInstall({
 			mode: "install",
 			bundles: ["rust"],
@@ -708,7 +712,6 @@ describe("runSniffInstall", () => {
 			env: { CARGO_HOME: "/host/cargo", RUSTUP_HOME: "/host/rustup", RUSTUP_TOOLCHAIN: "host-toolchain" },
 			runtime,
 		});
-		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
 		const bootstrap = calls.find(({ argv }) => argv.slice(-6).join(" ") === "toolchain install stable --profile minimal --no-self-update");
 		expect(bootstrap?.env).toMatchObject({
 			RUSTUP_HOME: join(directory, ".rustup"),
@@ -722,11 +725,12 @@ describe("runSniffInstall", () => {
 			cwd: target,
 			env: { CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") },
 		});
-		const clippyProbes = calls.filter(({ argv }) => argv[0] === "/fake/bin/cargo" && argv.slice(1).join(" ") === "clippy --version");
+		const clippyProbes = calls.filter(({ argv }) => argv.slice(1).join(" ") === "clippy --version");
+		expect(clippyProbes.at(-1)?.argv[0]).toBe(cargoPath);
 		expect(clippyProbes.at(-1)).toMatchObject({ cwd: target });
 		expect("RUSTUP_TOOLCHAIN" in (install?.env ?? {})).toBe(false);
 		expect("RUSTUP_TOOLCHAIN" in (clippyProbes.at(-1)?.env ?? {})).toBe(false);
-		for (const call of calls.filter(({ argv }) => argv[0] === "/fake/bin/cargo")) {
+		for (const call of calls.filter(({ argv }) => argv[0] === cargoPath)) {
 			expect(call.env).toMatchObject({ CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") });
 			expect("RUSTUP_TOOLCHAIN" in call.env).toBe(false);
 		}
@@ -739,6 +743,160 @@ describe("runSniffInstall", () => {
 		expect(calls.findIndex(({ argv }) => argv === nightly?.argv)).toBeLessThan(calls.findIndex(({ argv }) => argv.join(" ") === "mise install"));
 		expect(calls.filter(({ argv }) => argv.slice(-2).join(" ") === "default stable")).toHaveLength(1);
 		expect(result.tools.find(({ tool }) => tool === "cargo-clippy")).toMatchObject({ status: "usable" });
+	});
+
+
+	test("prepares a pinned Rust target before Clippy and managed Cargo verification", async () => {
+		const target = tempDir("sniff-rust-pinned-target-");
+		writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
+		let clippyInstalled = false;
+		let cargoPath = "";
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => bin === "cargo" ? cargoPath : `/fake/bin/${bin}`,
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
+				if (argv.join(" ") === "mise which cargo") return commandResult(argv, timeoutMs, { stdout: `${cargoPath}\n` });
+				if (argv.slice(-2).join(" ") === "toolchain list") return commandResult(argv, timeoutMs, { stdout: "stable-aarch64-apple-darwin (active, default)\nnightly-aarch64-apple-darwin\n" });
+				if (argv[0] === cargoPath && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled) return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "clippy is not installed" });
+				if (argv.slice(-3).join(" ") === "component add clippy") clippyInstalled = true;
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+		cargoPath = join(directory, ".cargo", "bin", "cargo");
+		const result = await runSniffInstall({
+			mode: "install",
+			bundles: ["rust"],
+			cwd: target,
+			env: { CARGO_HOME: "/host/cargo", RUSTUP_HOME: "/host/rustup", RUSTUP_TOOLCHAIN: "host-toolchain" },
+			runtime,
+		});
+		const isPreparation = ({ argv, cwd }: { argv: string[]; cwd: string }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version";
+		const preparation = calls.find(isPreparation);
+		const preparationIndex = calls.findIndex(isPreparation);
+		const miseIndex = calls.findIndex(({ argv }) => argv.join(" ") === "mise install");
+		const componentIndex = calls.findIndex(({ argv }) => argv.slice(-3).join(" ") === "component add clippy");
+		const targetClippyIndex = calls.findIndex(({ argv, cwd }) => cwd === target && argv.slice(1).join(" ") === "clippy --version");
+		const targetManagedCargo = calls.filter(({ argv, cwd }) => cwd === target && argv.slice(1).join(" ") !== "--version");
+		expect(result.ok).toBe(true);
+		expect(preparation?.argv[0]).toBe(cargoPath);
+		expect(preparation?.argv.slice(1)).toEqual(["--version"]);
+		expect(preparation).toMatchObject({
+			cwd: target,
+			env: { CARGO_HOME: join(directory, ".cargo"), RUSTUP_HOME: join(directory, ".rustup") },
+			timeoutMs: 300_000,
+		});
+		expect("RUSTUP_TOOLCHAIN" in (preparation?.env ?? {})).toBe(false);
+		expect(preparationIndex).toBeGreaterThan(miseIndex);
+		expect(componentIndex).toBeGreaterThan(preparationIndex);
+		expect(targetClippyIndex).toBeGreaterThan(componentIndex);
+		expect(targetManagedCargo.length).toBeGreaterThan(0);
+		expect(targetManagedCargo.every(({ cwd }) => cwd === target)).toBe(true);
+		expect(Math.min(...targetManagedCargo.map((call) => calls.indexOf(call)))).toBeGreaterThan(preparationIndex);
+		expect(result.tools.find(({ tool }) => tool === "cargo-clippy")).toMatchObject({ status: "usable" });
+	});
+
+	test("fails closed when pinned Rust target preparation is nonzero or timed out", async () => {
+		for (const failure of [
+			{ status: "installation-failed" as const, result: { exitCode: 23, stderr: "target hydration failed" } },
+			{ status: "timed-out" as const, result: { exitCode: null, timedOut: true, error: "target hydration timed out" } },
+		]) {
+			const target = tempDir(`sniff-rust-preparation-${failure.status}-`);
+			writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
+			const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
+			let cargoPath = "";
+			let preparationFailure: CommandResult | undefined;
+			const runtime = fakeRuntime({
+				resolveCommand: (bin) => bin === "cargo" ? cargoPath : `/fake/bin/${bin}`,
+				run: async (argv, cwd, env, timeoutMs) => {
+					calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
+					if (argv.join(" ") === "mise which cargo") return commandResult(argv, timeoutMs, { stdout: `${cargoPath}\n` });
+					const isPreparation = cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version";
+					if (isPreparation) preparationFailure = commandResult(argv, timeoutMs, failure.result);
+					return preparationFailure ?? commandResult(argv, timeoutMs);
+				},
+			});
+			const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+			cargoPath = join(directory, ".cargo", "bin", "cargo");
+			const result = await runSniffInstall({ mode: "install", bundles: ["rust"], cwd: target, runtime });
+			const targetCargoCalls = calls.filter(({ argv, cwd }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version");
+			const preparationIndex = calls.findIndex(({ argv, cwd }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version");
+			const callsAfterPreparation = calls.slice(preparationIndex + 1);
+			expect(result.ok).toBe(false);
+			expect(result.tools).toHaveLength(4);
+			expect(result.tools.every(({ status }) => status === failure.status)).toBe(true);
+			for (const tool of result.tools) expect(tool.install).toEqual(preparationFailure);
+			expect(targetCargoCalls).toHaveLength(1);
+			expect(targetCargoCalls[0]?.argv[0]).toBe(cargoPath);
+			expect(targetCargoCalls[0]).toMatchObject({ cwd: target, timeoutMs: 300_000 });
+			expect(calls.some(({ argv }) => argv.slice(-3).join(" ") === "component add clippy")).toBe(false);
+			expect(calls.some(({ argv, cwd }) => cwd === target && argv.slice(1).join(" ") === "clippy --version")).toBe(false);
+			expect(callsAfterPreparation).toHaveLength(0);
+		}
+	});
+
+	test("preserves timed-out Cargo selection across all Rust tools", async () => {
+		const target = tempDir("sniff-rust-selection-timeout-");
+		writeFileSync(join(target, "rust-toolchain.toml"), "[toolchain]\nchannel = \"1.85.1\"\n");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
+		const selectionFailure = commandResult(["mise", "which", "cargo"], 10_000, {
+			exitCode: null,
+			stdout: "partial selection\n",
+			stderr: "selection timed out",
+			stdoutTruncated: true,
+			stderrTruncated: true,
+			outputLimitBytes: 512,
+			timedOut: true,
+			error: "selection timed out",
+		});
+		const runtime = fakeRuntime({
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
+				if (argv.join(" ") === "mise which cargo") {
+					return env.FRESH === "1" ? selectionFailure : commandResult(argv, timeoutMs, { stdout: "/fake/bin/cargo\n" });
+				}
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], cwd: target, runtime });
+		const selectionCalls = calls.filter(({ argv, env }) => argv.join(" ") === "mise which cargo" && env.FRESH === "1");
+		const selectionIndex = calls.findIndex(({ argv, env }) => argv.join(" ") === "mise which cargo" && env.FRESH === "1");
+		const callsAfterSelection = calls.slice(selectionIndex + 1);
+		expect(result.ok).toBe(false);
+		expect(result.tools).toHaveLength(4);
+		expect(result.tools.every(({ status }) => status === "timed-out")).toBe(true);
+		for (const tool of result.tools) expect(tool.install).toEqual(selectionFailure);
+		expect(selectionCalls).toHaveLength(1);
+		expect(callsAfterSelection.some(({ argv, cwd }) => cwd === target && argv.join(" ") !== "mise which cargo")).toBe(false);
+		expect(callsAfterSelection.some(({ argv }) => argv.slice(-3).join(" ") === "component add clippy")).toBe(false);
+		expect(callsAfterSelection.some(({ argv }) => argv.some((part) => part.includes("analyzer")))).toBe(false);
+	});
+
+	test("skips long Rust preparation for an unpinned target", async () => {
+		const target = tempDir("sniff-rust-unpinned-target-");
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
+		let clippyInstalled = false;
+		let cargoPath = "";
+		const runtime = fakeRuntime({
+			resolveCommand: (bin) => bin === "cargo" ? cargoPath : `/fake/bin/${bin}`,
+			run: async (argv, cwd, env, timeoutMs) => {
+				calls.push({ argv: [...argv], cwd, env: { ...env }, timeoutMs });
+				if (argv.join(" ") === "mise which cargo") return commandResult(argv, timeoutMs, { stdout: `${cargoPath}\n` });
+				if (argv[0] === cargoPath && argv.slice(1).join(" ") === "clippy --version" && !clippyInstalled) {
+					clippyInstalled = true;
+					return commandResult(argv, timeoutMs, { exitCode: 1, stderr: "clippy is not installed" });
+				}
+				return commandResult(argv, timeoutMs);
+			},
+		});
+		const directory = join(runtime.toolkitCacheRoot ?? "", "rust");
+		cargoPath = join(directory, ".cargo", "bin", "cargo");
+		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], cwd: target, runtime });
+		const preparations = calls.filter(({ argv, cwd }) => cwd === target && argv[0] === cargoPath && argv.slice(1).join(" ") === "--version");
+		expect(result.ok).toBe(true);
+		expect(preparations).toHaveLength(0);
+		expect(calls.some(({ argv }) => argv.join(" ") === "mise install")).toBe(true);
 	});
 
 	test("scrubs host rustup state without executing target configuration during diagnosis", async () => {
