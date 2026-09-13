@@ -612,7 +612,7 @@ describe("runSniffInstall", () => {
 	test("installs one bundle toolkit and reuses it for later preflight", async () => {
 		const target = tempDir("sniff-target-");
 		writeFileSync(join(target, "marker"), "unchanged");
-		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined> }> = [];
+		const calls: Array<{ argv: string[]; cwd: string; env: Record<string, string | undefined>; timeoutMs: number }> = [];
 		const refreshes: Array<{ cwd: string; env: Record<string, string | undefined> }> = [];
 		const runtime = fakeRuntime({
 			resolveCommand: (bin, _cwd, env) => {
@@ -620,7 +620,7 @@ describe("runSniffInstall", () => {
 				return `/fake/bin/${bin}`;
 			},
 			run: async (argv, cwd, env, timeoutMs) => {
-				calls.push({ argv, cwd, env });
+				calls.push({ argv, cwd, env, timeoutMs });
 				return commandResult(argv, timeoutMs);
 			},
 			freshEnvironment: async (cwd, env) => {
@@ -642,7 +642,7 @@ describe("runSniffInstall", () => {
 		expect(installed.ok).toBe(true);
 		expect(installed.tools[0]).toMatchObject({ status: "usable", resolvedPath: "/fresh/bin/jscpd" });
 		const installCall = calls.find(({ argv }) => argv.join(" ") === "mise install");
-		expect(installCall).toMatchObject({ argv: ["mise", "install"], cwd: toolkitDirectory, env: {
+		expect(installCall).toMatchObject({ argv: ["mise", "install"], cwd: toolkitDirectory, timeoutMs: 300_000, env: {
 			MISE_CONFIG_DIR: join(toolkitDirectory, ".mise-config"),
 			MISE_GLOBAL_CONFIG_FILE: join(toolkitDirectory, ".global-config-disabled.toml"),
 			MISE_SYSTEM_CONFIG_FILE: join(toolkitDirectory, ".system-config-disabled.toml"),
@@ -940,6 +940,7 @@ describe("runSniffInstall", () => {
 		expect(result.report).toContain("default stable (if not default)");
 		expect(result.report).toContain("toolchain install nightly --profile minimal --no-self-update (if missing)");
 		expect(result.report).toContain("component add clippy");
+		expect(result.report).toContain("mise install (timeout 900000ms)");
 		const reportLines = result.report.split("\n");
 		expect(reportLines.findIndex((line) => line.includes("toolchain install stable"))).toBeLessThan(reportLines.findIndex((line) => line.includes("component add clippy")));
 		expect(reportLines.findIndex((line) => line.includes("toolchain install nightly"))).toBeLessThan(reportLines.findIndex((line) => line.includes("mise install")));
@@ -948,14 +949,25 @@ describe("runSniffInstall", () => {
 		expect(calls.some((argv) => argv.includes("install") || argv.includes("default") || argv.includes("component"))).toBe(false);
 	});
 
+	test("keeps non-Rust mise install dry runs at the default timeout", async () => {
+		const result = await runSniffInstall({
+			mode: "install",
+			bundles: ["dup"],
+			dryRun: true,
+			runtime: fakeRuntime({ resolveCommand: (bin) => `/fake/bin/${bin}` }),
+		});
+		expect(result.report).toContain("mise install (timeout 300000ms)");
+		expect(result.report).not.toContain("mise install (timeout 900000ms)");
+	});
+
 	test("provisions Rust with mise before installing components", async () => {
-		const calls: string[][] = [];
+		const calls: Array<{ argv: string[]; cwd: string; timeoutMs: number }> = [];
 		let miseInstalled = false;
 		let clippyInstalled = false;
 		const runtime = fakeRuntime({
 			resolveCommand: (bin) => bin === "rustup" && !miseInstalled ? null : `/fake/bin/${bin}`,
 			run: async (argv, _cwd, _env, timeoutMs) => {
-				calls.push([...argv]);
+				calls.push({ argv: [...argv], cwd: _cwd, timeoutMs });
 				if (argv.join(" ") === "mise install") miseInstalled = true;
 				if (argv.slice(-2).join(" ") === "toolchain list")
 					return commandResult(argv, timeoutMs, { stdout: "stable-aarch64-apple-darwin (active, default)\nnightly-aarch64-apple-darwin\n" });
@@ -966,11 +978,13 @@ describe("runSniffInstall", () => {
 			},
 		});
 		const result = await runSniffInstall({ mode: "install", bundles: ["rust"], runtime });
-		const miseInstall = calls.findIndex((argv) => argv.join(" ") === "mise install");
-		const clippyInstall = calls.findIndex((argv) => argv.slice(-3).join(" ") === "component add clippy");
+		const miseInstall = calls.findIndex(({ argv }) => argv.join(" ") === "mise install");
+		const clippyInstall = calls.findIndex(({ argv }) => argv.slice(-3).join(" ") === "component add clippy");
+		const miseCall = calls[miseInstall];
+		expect(miseCall).toMatchObject({ argv: ["mise", "install"], cwd: join((runtime.toolkitCacheRoot ?? ""), "rust"), timeoutMs: 900_000 });
 		expect(miseInstall).toBeGreaterThanOrEqual(0);
 		expect(clippyInstall).toBeGreaterThan(miseInstall);
-		expect(calls.filter((argv) => argv.join(" ") === "mise install")).toHaveLength(1);
+		expect(calls.filter(({ argv }) => argv.join(" ") === "mise install")).toHaveLength(1);
 		expect(result.ok).toBe(true);
 		expect(result.tools).toHaveLength(4);
 		expect(result.tools.every(({ status }) => status === "usable")).toBe(true);
