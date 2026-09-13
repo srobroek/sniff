@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.2](https://github.com/srobroek/sniff/compare/sniff-v0.2.1...sniff-v0.2.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* isolate managed Rust toolchains ([#16](https://github.com/srobroek/sniff/issues/16)) ([1bc1bff](https://github.com/srobroek/sniff/commit/1bc1bffdbaac5cc3ac82c49cddffeb2c2dd11dd9))
+* **rust:** extend cold mise install timeout ([#19](https://github.com/srobroek/sniff/issues/19)) ([2271e8e](https://github.com/srobroek/sniff/commit/2271e8eccf8c5e66803cb64c5646e1f8fa7410bf))
+* **rust:** hydrate pinned target toolchains ([#18](https://github.com/srobroek/sniff/issues/18)) ([850131f](https://github.com/srobroek/sniff/commit/850131f270e2e15d005a1169a86bde4726883946))
+
 ## [0.2.1](https://github.com/srobroek/sniff/compare/sniff-v0.2.0...sniff-v0.2.1) (2026-09-12)
 
 
