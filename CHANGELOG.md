@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/srobroek/sniff/compare/sniff-v0.2.2...sniff-v0.2.3) (2026-09-13)
+
+
+### Bug Fixes
+
+* **deps:** update MCP SDK to 1.30.0 ([#24](https://github.com/srobroek/sniff/issues/24)) ([f3d4205](https://github.com/srobroek/sniff/commit/f3d4205d08c90d55b2efbed982d9097727e68510))
+
 ## [0.2.2](https://github.com/srobroek/sniff/compare/sniff-v0.2.1...sniff-v0.2.2) (2026-09-13)
 
 
