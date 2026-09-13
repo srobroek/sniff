@@ -34,6 +34,7 @@ import {
 
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
+const RUST_MISE_INSTALL_TIMEOUT_MS = 900_000;
 const ENV_REFRESH_TIMEOUT_MS = 10_000;
 /** Maximum bytes retained from each subprocess output stream. */
 export const COMMAND_OUTPUT_LIMIT_BYTES = 1_048_576;
@@ -707,6 +708,7 @@ async function installMiseBundle(
 	signal?: AbortSignal,
 	prepareVerification?: () => Promise<void>,
 ): Promise<MiseBundleInstallResult> {
+	const miseInstallTimeoutMs = bundle === "rust" ? RUST_MISE_INSTALL_TIMEOUT_MS : INSTALL_TIMEOUT_MS;
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
 	const initial: SniffToolResult[] = [];
 	for (const rec of records) {
@@ -721,7 +723,7 @@ async function installMiseBundle(
 			lines.push(`  + ${rustupPath} default stable (if not default)`);
 		}
 		if (records.some((rec) => rec.name === "cargo-udeps")) lines.push(`  + ${rustupPath} toolchain install nightly --profile minimal --no-self-update (if missing)`);
-		lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
+		lines.push(`  + mise install (timeout ${miseInstallTimeoutMs}ms)`);
 		return { results: initial };
 	}
 	const miseEnvironment = isolatedMiseEnvironment(directory, env);
@@ -747,8 +749,8 @@ async function installMiseBundle(
 			}
 		}
 	}
-	lines.push(`  + mise install (timeout ${INSTALL_TIMEOUT_MS}ms)`);
-	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, INSTALL_TIMEOUT_MS, signal);
+	lines.push(`  + mise install (timeout ${miseInstallTimeoutMs}ms)`);
+	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, miseInstallTimeoutMs, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
 	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
