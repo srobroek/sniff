@@ -629,6 +629,21 @@ async function installUnmanagedTool(
 	return verified;
 }
 
+function hasRustToolchainPin(target: string): boolean {
+	let directory = resolve(target);
+	for (;;) {
+		if (existsSync(join(directory, "rust-toolchain.toml")) || existsSync(join(directory, "rust-toolchain"))) return true;
+		const parent = dirname(directory);
+		if (parent === directory) return false;
+		directory = parent;
+	}
+}
+
+type RustPreparationResult = {
+	result: CommandResult;
+	status?: SniffToolStatus;
+};
+
 async function prepareRustTargetToolchain(
 	probeCwd: string,
 	directory: string,
@@ -636,11 +651,9 @@ async function prepareRustTargetToolchain(
 	runtime: SniffInstallRuntime,
 	lines: string[],
 	signal?: AbortSignal,
-): Promise<CommandResult | null> {
-	const miseEnvironment = isolatedMiseEnvironment(directory, env);
-	const cargoPath = runtime.resolveCommand("cargo", directory, miseEnvironment);
-	if (!cargoPath) {
-		return {
+): Promise<RustPreparationResult | null> {
+	const unavailable = (error: string): RustPreparationResult => ({
+		result: {
 			argv: ["cargo", "--version"],
 			exitCode: null,
 			stdout: "",
@@ -649,11 +662,20 @@ async function prepareRustTargetToolchain(
 			stderrTruncated: false,
 			outputLimitBytes: COMMAND_OUTPUT_LIMIT_BYTES,
 			timedOut: false,
-			error: `managed Cargo was not found in the Rust toolkit at ${directory}`,
+			error,
 			timeoutMs: INSTALL_TIMEOUT_MS,
-		};
+		},
+		status: "unavailable-route",
+	});
+	const toolkit = await toolkitEnvironment("rust", env, runtime, signal);
+	if (toolkit.error) return unavailable(`managed Rust toolkit environment was unavailable: ${toolkit.error}`);
+	const selectedCargo = await runtime.run(["mise", "which", "cargo"], directory, toolkit.env, ENV_REFRESH_TIMEOUT_MS, signal);
+	const cargoPaths = selectedCargo.stdout.split(/\r?\n/).map((path) => path.trim()).filter(Boolean);
+	const cargoPath = cargoPaths.length === 1 ? cargoPaths[0] : undefined;
+	if (selectedCargo.exitCode !== 0 || selectedCargo.timedOut || selectedCargo.error || !cargoPath || !isAbsolute(cargoPath)) {
+		return unavailable(`managed Cargo was not uniquely resolved by the Rust toolkit at ${directory}`);
 	}
-	const cargoEnvironment = isolatedRustupEnvironment(directory, miseEnvironment);
+	const cargoEnvironment = isolatedRustupEnvironment(directory, toolkit.env);
 	delete cargoEnvironment.RUSTUP_TOOLCHAIN;
 	const argv = [cargoPath, "--version"];
 	lines.push(`  + ${argv.join(" ")} (timeout ${INSTALL_TIMEOUT_MS}ms)`);
@@ -661,7 +683,7 @@ async function prepareRustTargetToolchain(
 	if (prepared.stdout.trim()) lines.push(prepared.stdout.trimEnd());
 	if (prepared.stderr.trim()) lines.push(prepared.stderr.trimEnd());
 	if (prepared.stdoutTruncated || prepared.stderrTruncated) lines.push(`      (output truncated at ${prepared.outputLimitBytes} bytes per stream)`);
-	return prepared.exitCode !== 0 || prepared.timedOut || prepared.error ? prepared : null;
+	return prepared.exitCode !== 0 || prepared.timedOut || prepared.error ? { result: prepared } : null;
 }
 
 type RustPreparationFailure = {
@@ -734,14 +756,14 @@ async function installMiseBundle(
 	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
 		? classifyInstallFailure(install)
 		: undefined;
-	if (!installStatus && bundle === "rust") {
-		const preparationFailure = await prepareRustTargetToolchain(probeCwd, directory, env, runtime, lines, signal);
-		if (preparationFailure) {
-			const status = classifyInstallFailure(preparationFailure);
-			lines.push(`      (${status}${preparationFailure.exitCode === null ? "" : ` — exit ${preparationFailure.exitCode}`})`);
+	if (!installStatus && bundle === "rust" && hasRustToolchainPin(probeCwd)) {
+		const preparation = await prepareRustTargetToolchain(probeCwd, directory, env, runtime, lines, signal);
+		if (preparation) {
+			const status = preparation.status ?? classifyInstallFailure(preparation.result);
+			lines.push(`      (${status}${preparation.result.exitCode === null ? "" : ` — exit ${preparation.result.exitCode}`})`);
 			const failure = {
 				status,
-				install: preparationFailure,
+				install: preparation.result,
 				remediation: "target-selected Rust toolchain preparation failed",
 			};
 			return {
