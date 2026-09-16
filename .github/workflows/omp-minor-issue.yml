@@ -33,11 +33,10 @@ jobs:
             exit 0
           fi
           title="Review OMP ${latest_major}.${latest_minor} compatibility"
-          existing=$(curl --fail --silent --show-error \
-            -H "Authorization: Bearer $GH_TOKEN" \
+          existing=$(gh api --paginate --slurp \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/$REPOSITORY/issues?state=all&per_page=100" |
-            jq --arg title "$title" 'any(.[]; (.pull_request | not) and .title == $title)')
+            "/repos/$REPOSITORY/issues?state=all&per_page=100" |
+            jq --arg title "$title" 'any(.[][]; (.pull_request | not) and .title == $title)')
           if [ "$existing" = true ]; then
             exit 0
           fi
