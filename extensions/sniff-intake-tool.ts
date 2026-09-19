@@ -84,7 +84,7 @@ export default function sniffIntakeTool(pi: ExtensionAPI): void {
 		parameters: sniffToolInputSchemas.sniff_cancel as unknown as TSchema,
 		execute: async (_id, params: { capability: string; manifestId: string }) => {
 			try {
-				cancelRunLease(params.capability, params.manifestId);
+				await cancelRunLease(params.capability, params.manifestId);
 				return { content: [{ type: "text", text: "Sniff run cancelled and materialization released." }], details: { ok: true } };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

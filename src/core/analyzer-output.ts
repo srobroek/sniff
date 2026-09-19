@@ -47,6 +47,42 @@ function incompleteResult(stdout: string, truncated: boolean, reason: string): A
 	return { observations: [], capture: capture(stdout, truncated, true, reason) };
 }
 
+/**
+ * Merges the parse results of one sharded analyzer run. Each shard is parsed on its own, so a
+ * shard-local header or malformed row can never corrupt a sibling shard. The merged digest chains
+ * the shard digests, because no single stdout exists for a sharded run.
+ */
+export function mergeAnalyzerResults(results: readonly AnalyzerParseResult[]): AnalyzerParseResult {
+	if (results.length === 1) return results[0] as AnalyzerParseResult;
+	const observations: AnalyzerObservation[] = [];
+	const state: ParseState = { reasons: [] };
+	let capped = false;
+	for (const result of results) {
+		for (const observation of result.observations) {
+			if (observations.length >= ANALYZER_MAX_OBSERVATIONS) {
+				capped = true;
+				break;
+			}
+			observations.push(observation);
+		}
+		if (result.capture.reason) addReason(state, result.capture.reason);
+	}
+	if (capped) addReason(state, `Analyzer observations exceeded the bounded limit of ${ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US")}`);
+	const reason = state.reasons.join("; ");
+	const digest = createHash("sha256");
+	for (const result of results) digest.update(result.capture.digest);
+	return {
+		observations,
+		capture: {
+			bytes: results.reduce((total, result) => total + result.capture.bytes, 0),
+			truncated: results.some((result) => result.capture.truncated),
+			digest: digest.digest("hex"),
+			incomplete: capped || results.some((result) => result.capture.incomplete),
+			...(reason ? { reason: reason.slice(0, 512) } : {}),
+		},
+	};
+}
+
 function addReason(state: ParseState, reason: string): void {
 	if (!state.reasons.includes(reason)) state.reasons.push(reason);
 }

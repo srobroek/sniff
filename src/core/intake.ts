@@ -1,13 +1,7 @@
 import { createHash } from "node:crypto";
 import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./objectives.ts";
-import {
-  type SecurityAnalyzerDisposition,
-  type SecurityRequest,
-  securityExclusions,
-  selectSecurityAnalyzers,
-  type TargetTrust,
-  validateAnalyzerDispositions,
-} from "./security.ts";
+import { reportPersistenceSupported } from "./report-native-persistence.ts";
+import { type SecurityAnalyzerDisposition, type SecurityRequest, securityExclusions, selectSecurityAnalyzers, type TargetTrust, validateAnalyzerDispositions } from "./security.ts";
 import { type ResolvedTarget, type TargetRequest, validateRepository } from "./target.ts";
 
 export type ScopeMode = "quick" | "full" | "plan-only";
@@ -69,6 +63,7 @@ export type IntakeInterview = {
   readonly questions: readonly IntakeQuestion[];
   readonly plan?: IntakePlan;
   readonly confirmationRequired: boolean;
+  readonly platformWarning?: string;
 };
 
 export type AppliedDefault = {
@@ -115,9 +110,10 @@ function isCompleteInput(input: IntakeInput): boolean {
 }
 
 export function decisionFrontier(input: IntakeInput): IntakeInterview {
+  const platformWarning = reportPersistenceSupported() ? undefined : "Sniff report persistence requires Darwin or Linux; this host can complete discovery but cannot save reports.";
   if (isCompleteInput(input)) {
     const objectives = selectObjectiveGroups(input.objectives).selected;
-    return { questions: [], plan: buildPlan(input, objectives), confirmationRequired: true };
+    return { questions: [], plan: buildPlan(input, objectives), confirmationRequired: true, ...(platformWarning ? { platformWarning } : {}) };
   }
   const question = QUESTION_ORDER.find((candidate) => {
     if (candidate.id === "target") return input.target === undefined;
@@ -126,7 +122,7 @@ export function decisionFrontier(input: IntakeInput): IntakeInterview {
     if (candidate.id === "objectives") return (input.objectives?.length ?? 0) === 0;
     return input.budget === undefined;
   });
-  return { questions: question ? [question] : [], confirmationRequired: false };
+  return { questions: question ? [question] : [], confirmationRequired: false, ...(platformWarning ? { platformWarning } : {}) };
 }
 
 export const getDecisionFrontier = decisionFrontier;

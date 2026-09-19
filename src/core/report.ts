@@ -34,6 +34,7 @@ export interface ToolCoverage {
   status: CoverageStatus;
   notes: string;
   config?: string;
+  version?: string;
 }
 
 export interface SniffFinding {
@@ -340,9 +341,8 @@ function renderMarkdown(report: SniffReport, bounded: boolean): string {
   const allRetained = report.findings.filter((finding) => finding.adversarial.verdict !== "drop").sort(comparePriority);
   const retained = bounded ? allRetained.slice(0, MAX_REPORT_SUMMARY_FINDINGS) : allRetained;
   const allChallenged = report.findings.filter((finding) => finding.adversarial.verdict !== "keep").sort(comparePriority);
-  const challenged = bounded ? allChallenged.slice(0, MAX_REPORT_SUMMARY_FINDINGS) : allChallenged;
   const coverageRows = report.coverage.map(
-    (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(entry.notes)} |`,
+    (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(`${entry.notes}${entry.version ? ` (version ${entry.version})` : ""}`)} |`,
   );
   const findingRows = retained.map((finding, index) => {
     const mapping = finding.smell && finding.refactoring
@@ -353,7 +353,7 @@ function renderMarkdown(report: SniffReport, bounded: boolean): string {
     const findingLabel = `[${escapeMarkdown(finding.title)}](${file})`;
     return `| ${index + 1} | ${findingLabel} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${mapping} | ${finding.impact} | ${finding.evidence.tier} | ${finding.value} | ${finding.cost} | ${compatibility} | ${finding.applyTier} |`;
   });
-  const challengedRows = challenged.map(
+  const challengedRows = allChallenged.map(
     (finding) => `| ${escapeMarkdown(finding.title)} (${escapeMarkdown(finding.location.path)}:${finding.location.line}) | ${finding.adversarial.verdict.toUpperCase()} | ${escapeMarkdown(finding.adversarial.reason)} |`,
   );
   const lines = [

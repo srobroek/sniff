@@ -153,6 +153,6 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       planned.opened.close();
     }
   } finally {
-    if (finalizeLease) finalizeRunLease(options.capability, options.manifestId);
+    if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId);
   }
 }

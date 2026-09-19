@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   ANALYZER_ARTIFACT_CHUNK_BYTES,
+  ANALYZER_ARTIFACT_MAX_AGE_MS,
   ANALYZER_ARTIFACT_TTL_MS,
   clearAnalyzerArtifactRegistryForTests,
   createAnalyzerArtifacts,
+  MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES,
   projectAnalyzerObservations,
   publicAnalyzerDescriptors,
   readAnalyzerArtifact,
@@ -42,6 +44,36 @@ describe("analyzer artifact registry", () => {
     const capability = registerAnalyzerArtifacts(artifacts, 1_000);
     expect(() => readAnalyzerArtifact({ capability: "wrong", analyzerResultId: artifacts.analyzerResultId, relativePath: "index.json" }, 1_001)).toThrow("Unknown Sniff analyzer artifact capability");
     expect(() => readAnalyzerArtifact({ capability, analyzerResultId: artifacts.analyzerResultId, relativePath: "index.json" }, 1_000 + ANALYZER_ARTIFACT_TTL_MS + 1)).toThrow("Unknown Sniff analyzer artifact capability");
+  });
+
+  test("evicts the oldest entry once retained bytes exceed the registry budget", () => {
+    clearAnalyzerArtifactRegistryForTests();
+    const bulk = (tag: string) => createAnalyzerArtifacts(`opengrep:${tag}`, Array.from({ length: 2_400 }, (_, index) => ({ ...observation(index, `src/${tag}-${index % 8}.ts`), message: "x".repeat(8_000) })));
+    const first = bulk("first");
+    const firstBytes = first.descriptors.reduce((total, descriptor) => total + descriptor.bytes, 0);
+    expect(firstBytes).toBeLessThan(MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES);
+    expect(firstBytes * 2).toBeGreaterThan(MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES);
+    const firstCapability = registerAnalyzerArtifacts(first, 1_000);
+    const second = bulk("second");
+    const secondCapability = registerAnalyzerArtifacts(second, 2_000);
+    expect(() => readAnalyzerArtifact({ capability: firstCapability, analyzerResultId: first.analyzerResultId, relativePath: "index.json" }, 2_000)).toThrow("Unknown Sniff analyzer artifact capability");
+    expect(readAnalyzerArtifact({ capability: secondCapability, analyzerResultId: second.analyzerResultId, relativePath: "index.json" }, 2_000).totalBytes).toBeGreaterThan(0);
+  });
+
+  test("expires an entry at its absolute age however often it is read", () => {
+    clearAnalyzerArtifactRegistryForTests();
+    const artifacts = createAnalyzerArtifacts("test", [observation(0)]);
+    const capability = registerAnalyzerArtifacts(artifacts, 1_000);
+    let at = 1_000;
+    let reads = 0;
+    expect(() => {
+      for (let index = 0; index < 12; index += 1) {
+        at += ANALYZER_ARTIFACT_TTL_MS - 1;
+        readAnalyzerArtifact({ capability, analyzerResultId: artifacts.analyzerResultId, relativePath: "index.json" }, at);
+        reads += 1;
+      }
+    }).toThrow("Unknown Sniff analyzer artifact capability");
+    expect(reads).toBe(Math.floor(ANALYZER_ARTIFACT_MAX_AGE_MS / (ANALYZER_ARTIFACT_TTL_MS - 1)));
   });
 
   test("keeps malformed, truncated, and hard-overflow captures incomplete", () => {

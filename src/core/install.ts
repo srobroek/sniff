@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import {
 	accessSync,
 	closeSync,
@@ -6,6 +7,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readFileSync,
 	readSync,
 	realpathSync,
 	renameSync,
@@ -16,24 +18,31 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
-import { type AnalyzerCapture, type AnalyzerObservation, parseAnalyzerOutput } from "./analyzer-output.ts";
+import { type AnalyzerCapture, type AnalyzerObservation, type AnalyzerParseResult, mergeAnalyzerResults, parseAnalyzerOutput } from "./analyzer-output.ts";
 import {
-	BUNDLES,
-	type BundleName,
-	TOOLS,
-	type ToolRec,
+  BUNDLES,
+  type BundleName,
+  TOOLS,
+  type ToolRec,
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
+import { processAlive, type SpawnedProcess, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
 import {
-	type AnalyzerRunAuthorization,
-	abandonAnalyzerReservation,
-	authorizeAnalyzerRun,
-	completeAnalyzerReservation,
-	prepareAnalyzerSpawn,
+  type AnalyzerRunAuthorization,
+  abandonAnalyzerReservation,
+  authorizeAnalyzerRun,
+  completeAnalyzerReservation,
+  prepareAnalyzerSpawn,
+  registerActiveProcess,
+  unregisterActiveProcess,
 } from "./run-registry.ts";
+import type { HistoryWindow } from "./target.ts";
 
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
+export const ANALYZER_TIMEOUT_MS = 900_000;
+/** Operand shard size for scoped-files analyzers when the manifest sets no maxFiles ceiling. */
+export const DEFAULT_ANALYZER_SHARD_SIZE = 500;
 const RUST_MISE_INSTALL_TIMEOUT_MS = 900_000;
 const ENV_REFRESH_TIMEOUT_MS = 10_000;
 /** Maximum bytes retained from each subprocess output stream. */
@@ -64,7 +73,7 @@ export type CommandResult = {
 	timeoutMs: number;
 };
 
-export type ProbeAttempt = Pick<CommandResult, "argv" | "exitCode" | "stderr" | "timedOut" | "error" | "timeoutMs">;
+export type ProbeAttempt = Pick<CommandResult, "argv" | "exitCode" | "stderr" | "timedOut" | "error" | "timeoutMs"> & { readonly stdout?: string };
 
 export type SniffToolResult = {
 	bundle: BundleName;
@@ -75,6 +84,7 @@ export type SniffToolResult = {
 	resolvedPath: string | null;
 	remediation: string;
 	attempts: ProbeAttempt[];
+	version?: string;
 	install?: CommandResult;
 };
 
@@ -84,7 +94,7 @@ type FreshEnvironment = { env: ProcessEnvironment; source: "process" | "mise"; e
 export type SniffInstallRuntime = {
 	resolveCommand(bin: string, cwd: string, env: ProcessEnvironment): string | null;
 	readLauncher(path: string): string;
-	run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes?: number): Promise<CommandResult>;
+  run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes?: number, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult>;
 	freshEnvironment(cwd: string, env: ProcessEnvironment, miseAware: boolean, signal?: AbortSignal): Promise<FreshEnvironment>;
 	resolveOpenGrep(cacheDir?: string): string | null;
 	provisionOpenGrep(options: { cacheDir?: string; signal?: AbortSignal }): Promise<OpenGrepProvisionResult>;
@@ -130,23 +140,14 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 	return { text: Buffer.from(output).toString("utf8"), truncated };
 }
 
-function terminateProcess(proc: { pid: number; kill(signal?: "SIGTERM" | "SIGKILL"): void }, signal: "SIGTERM" | "SIGKILL"): void {
-	try {
-		process.kill(-proc.pid, signal);
-	} catch {
-		try {
-			proc.kill(signal);
-		} catch {
-			// The child may have exited between timeout/cancellation and cleanup.
-		}
-	}
-}
 
-async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<CommandResult> {
+
+async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult> {
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
 	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
 	let timedOut = false;
 	let aborted = false;
 	let forceKill: ReturnType<typeof setTimeout> | undefined;
@@ -154,7 +155,7 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 		if (reason === "timeout") timedOut = true;
 		if (reason === "abort") aborted = true;
 		terminateProcess(proc, "SIGTERM");
-		forceKill = setTimeout(() => terminateProcess(proc, "SIGKILL"), 100);
+		forceKill = setTimeout(() => terminateProcess(proc, "SIGKILL"), TERMINATION_GRACE_MS);
 	};
 	const timeout = setTimeout(() => stop("timeout"), timeoutMs);
 	const onAbort = () => stop("abort");
@@ -326,13 +327,19 @@ async function inspectTool(
   const executionCwd = allowAuthorizedProjectLocalProbe && (rec.key === "npm-local" || rec.key === "rustup" || rec.key === "cargo") ? cwd : tmpdir();
   for (const args of probeArgs) {
     const result = await runtime.run([resolvedPath, ...args], executionCwd, effectiveEnv, probeTimeoutMs, signal);
-    attempts.push({ argv: result.argv, exitCode: result.exitCode, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
+    attempts.push({ argv: result.argv, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr, timedOut: result.timedOut, error: result.error, timeoutMs: result.timeoutMs });
     if (result.exitCode === 0 && !result.timedOut && !result.error) {
-      return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts };
+      const version = extractVersion(result.stdout);
+      return { bundle, tool: rec.name, bin: rec.bin, required, status: "usable", resolvedPath, remediation: "", attempts, ...(version ? { version } : {}) };
     }
   }
   const status: SniffToolStatus = attempts.some((attempt) => attempt.timedOut) ? "timed-out" : "unrunnable";
   return { bundle, tool: rec.name, bin: rec.bin, required, status, resolvedPath, remediation: rec.hint, attempts };
+}
+
+function extractVersion(stdout: string): string | undefined {
+  const match = stdout.match(/\b(?:v?\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?|\d+\.\d+)\b/);
+  return match?.[0];
 }
 
 function isMiseManaged(rec: ToolRec): boolean {
@@ -693,20 +700,20 @@ async function prepareRustTargetToolchain(
 }
 
 type MiseBundleInstallResult = {
-	results: SniffToolResult[];
-	preparationFailure?: RustPreparationResult;
+  results: SniffToolResult[];
+  preparationFailure?: RustPreparationResult;
 };
 
-async function installMiseBundle(
-	bundle: BundleName,
-	records: ToolRec[],
-	probeCwd: string,
-	dryRun: boolean,
-	env: ProcessEnvironment,
-	runtime: SniffInstallRuntime,
-	lines: string[],
-	signal?: AbortSignal,
-	prepareVerification?: () => Promise<void>,
+async function installMiseBundleUnlocked(
+  bundle: BundleName,
+  records: ToolRec[],
+  probeCwd: string,
+  dryRun: boolean,
+  env: ProcessEnvironment,
+  runtime: SniffInstallRuntime,
+  lines: string[],
+  signal?: AbortSignal,
+  prepareVerification?: () => Promise<void>,
 ): Promise<MiseBundleInstallResult> {
 	const miseInstallTimeoutMs = bundle === "rust" ? RUST_MISE_INSTALL_TIMEOUT_MS : INSTALL_TIMEOUT_MS;
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
@@ -714,6 +721,7 @@ async function installMiseBundle(
 	for (const rec of records) {
 		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime));
 	}
+  if (!dryRun && initial.every((result) => result.status === "usable") && existsSync(toolkitConfigPath(bundle, env, runtime))) return { results: initial };
 	const directory = toolkitDirectory(bundle, env, runtime);
 	lines.push(`  + Sniff mise toolkit ${directory}`);
 	if (dryRun) {
@@ -800,6 +808,80 @@ async function installMiseBundle(
 	return { results: verified };
 }
 
+/** A lock is only stealable once it outlives an install plus its probing and its owner is gone. */
+export const TOOLKIT_LOCK_STALE_MS = 20 * 60_000;
+const TOOLKIT_LOCK_POLL_MS = 250;
+
+type ToolkitLockOwner = { readonly pid: number; readonly token: string; readonly startedAt: number };
+
+function readToolkitLockOwner(ownerPath: string): ToolkitLockOwner | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(readFileSync(ownerPath)).toString("utf8")) as Partial<ToolkitLockOwner>;
+    if (typeof parsed.pid !== "number" || typeof parsed.token !== "string" || typeof parsed.startedAt !== "number") return null;
+    return { pid: parsed.pid, token: parsed.token, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number } = {}): Promise<T> {
+  const directory = toolkitDirectory(bundle, env, runtime);
+  mkdirSync(directory, { recursive: true });
+  const lockPath = join(directory, ".lock");
+  const ownerPath = join(lockPath, "owner.json");
+  const owner: ToolkitLockOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), startedAt: Date.now() };
+  const deadline = Date.now() + (options.waitMs ?? TOOLKIT_LOCK_STALE_MS);
+  for (;;) {
+    try {
+      mkdirSync(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      // Only a lock whose owner process is gone may be stolen; a slow live owner keeps its lock.
+      const held = readToolkitLockOwner(ownerPath);
+      const heldSince = held?.startedAt ?? (existsSync(lockPath) ? statSync(lockPath).mtimeMs : null);
+      const abandoned = heldSince !== null && Date.now() - heldSince > TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid));
+      if (abandoned) {
+        rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
+      const poll = Promise.withResolvers<void>();
+      setTimeout(poll.resolve, TOOLKIT_LOCK_POLL_MS);
+      await poll.promise;
+      continue;
+    }
+    try {
+      writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
+      break;
+    } catch (error) {
+      // An ownerless lock directory would block every later installer, so never leave one behind.
+      rmSync(lockPath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    // Never delete a lock a later owner acquired after this one was stolen as stale.
+    if (readToolkitLockOwner(ownerPath)?.token === owner.token) rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
+
+async function installMiseBundle(
+  bundle: BundleName,
+  records: ToolRec[],
+  probeCwd: string,
+  dryRun: boolean,
+  env: ProcessEnvironment,
+  runtime: SniffInstallRuntime,
+  lines: string[],
+  signal?: AbortSignal,
+  prepareVerification?: () => Promise<void>,
+): Promise<MiseBundleInstallResult> {
+  if (dryRun) return installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification);
+  return withToolkitLock(bundle, env, runtime, () => installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification));
+}
 
 function probeLabel(result: SniffToolResult): string {
 	switch (result.status) {
@@ -849,6 +931,8 @@ export type SniffAnalyzerRunOptions = {
 	analyzer: string;
 	runtime?: SniffInstallRuntime;
 	signal?: AbortSignal;
+	/** Test seam for the shared analyzer wall clock. */
+	now?: () => number;
 };
 
 export type SniffAnalyzerOutcome =
@@ -925,6 +1009,20 @@ function validExitContract(codes: readonly number[]): boolean {
 	return codes.length > 0 && codes.includes(0) && new Set(codes).size === codes.length && codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 255);
 }
 
+/**
+ * Bounds a Gitleaks history scan to a revision range. Only a window that names refs or releases can
+ * bound the walk; a context-aware default carries no refs and stays unbounded on purpose.
+ */
+function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | undefined): { readonly args: string[]; readonly bounded: boolean } {
+  const logOpts = window === undefined ? ""
+    : window.kind === "refs" ? `${window.base}..${window.head}`
+      : window.kind === "since-date" ? `--since=${window.date}${window.head ? ` ${window.head}` : ""}`
+        : window.kind === "last-commits" ? `-${window.count}${window.head ? ` ${window.head}` : ""}`
+          : window.kind === "since-release" ? `${window.release}..${window.head ?? "HEAD"}`
+            : window.kind === "previous-release" ? `${window.release ?? "HEAD~1"}..${window.head ?? "HEAD"}` : "";
+  return logOpts ? { args: [...args, "--log-opts", logOpts], bounded: true } : { args: [...args], bounded: false };
+}
+
 export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<SniffAnalyzerRunResult> {
 	let authorization: AnalyzerRunAuthorization;
 	try {
@@ -967,56 +1065,96 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		abandon();
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
-	const executable = preflight.resolvedPath;
-	try {
-		authorization = prepareAnalyzerSpawn(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
-	} catch (error) {
-		abandon();
-		const message = error instanceof Error ? error.message : String(error);
-		return { ok: false, report: `sniff analyzer launch blocked: ${message}`, preflight, acceptedExitCodes, outcome: "not-run" };
-	}
-	const argv = [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv];
-	const timeoutMs = Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs);
-	const openGrep = authorization.recipe.tool === "opengrep";
-	const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
-	let execution: CommandResult;
-	let completionError: string | undefined;
-	try {
-		execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal, outputLimitBytes);
-	} catch (error) {
-		execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
-	}
-	try {
-		completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
-	} catch (error) {
-		completionError = error instanceof Error ? error.message : String(error);
-	}
-	const parsed = openGrep
-		? parseOpenGrepOutput(execution.stdout, authorization.target.root, execution.stdoutTruncated)
-		: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, execution.stdout, authorization.target.root, execution.stdoutTruncated);
-	const completed = !completionError && !execution.timedOut && !execution.error && execution.exitCode !== null;
-	const incomplete = parsed?.capture.incomplete ?? false;
-	const accepted = completed && !incomplete && acceptedExitCodes.includes(execution.exitCode as number);
+  try {
+    authorization = prepareAnalyzerSpawn(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+  } catch (error) {
+    abandon();
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, report: `sniff analyzer launch blocked: ${message}`, preflight, acceptedExitCodes, outcome: "not-run" };
+  }
+  const executable = preflight.resolvedPath;
+  const history = authorization.recipe.tool === "gitleaks"
+    ? gitleaksHistoryBound(authorization.recipe.args, authorization.target.history?.capturedWindow ?? authorization.target.history?.window)
+    : undefined;
+  const separator = "targetSeparator" in authorization.recipe ? [...(authorization.recipe.targetSeparator ?? [])] : ["--"];
+  const batchSize = Math.max(1, authorization.maxFiles ?? DEFAULT_ANALYZER_SHARD_SIZE);
+  const argvBatches: string[][] = authorization.recipe.scope === "scoped-files" && authorization.operands.length > batchSize
+    ? Array.from({ length: Math.ceil(authorization.operands.length / batchSize) }, (_, index): string[] => [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.recipe.args, ...separator, ...authorization.operands.slice(index * batchSize, (index + 1) * batchSize)])
+    : [[executable, ...(catalog.rec.runPrefix ?? []), ...(history ? history.args : authorization.argv)]];
+  const openGrep = authorization.recipe.tool === "opengrep";
+  const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
+  // One wall clock covers the whole run: every shard draws from the same remaining budget.
+  const clock = opts.now ?? Date.now;
+  const deadlineAt = clock() + Math.min(ANALYZER_TIMEOUT_MS, authorization.remainingBudgetMs);
+  const batches: { readonly result: CommandResult; readonly parsed: AnalyzerParseResult }[] = [];
+  let completionError: string | undefined;
+  let launchError: string | undefined;
+  let budgetExhausted = false;
+  for (const argv of argvBatches) {
+    const remainingMs = deadlineAt - clock();
+    if (remainingMs <= 0) {
+      budgetExhausted = true;
+      break;
+    }
+    let activePid: number | undefined;
+    try {
+      const result = await runtime.run(argv, authorization.target.root, env, remainingMs, opts.signal, outputLimitBytes, (spawned) => {
+        activePid = spawned.pid;
+        registerActiveProcess(opts.capability, opts.manifestId, spawned);
+      });
+      // Each shard is evaluated and parsed alone so no shard can mask another's exit or truncation.
+      batches.push({
+        result,
+        parsed: openGrep
+          ? parseOpenGrepOutput(result.stdout, authorization.target.root, result.stdoutTruncated)
+          : parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated),
+      });
+      if (result.timedOut || result.error || result.exitCode === null || !acceptedExitCodes.includes(result.exitCode)) break;
+    } catch (error) {
+      launchError = error instanceof Error ? error.message : String(error);
+      break;
+    } finally {
+      if (activePid !== undefined) unregisterActiveProcess(opts.capability, opts.manifestId, activePid);
+    }
+  }
+  try {
+    completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+  } catch (error) {
+    completionError = error instanceof Error ? error.message : String(error);
+  }
+  const parsed = batches.length > 0 ? mergeAnalyzerResults(batches.map((batch) => batch.parsed)) : null;
+  const timedOut = budgetExhausted || batches.some((batch) => batch.result.timedOut);
+  const runError = launchError ?? batches.find((batch) => batch.result.error)?.result.error;
+  const rejected = batches.find((batch) => batch.result.exitCode === null || !acceptedExitCodes.includes(batch.result.exitCode));
+  const exitCode = rejected?.result.exitCode ?? batches.at(-1)?.result.exitCode ?? null;
+  const completed = !completionError
+    && !timedOut
+    && runError === undefined
+    && exitCode !== null
+    && (batches.length === argvBatches.length || rejected !== undefined);
+  const incomplete = parsed?.capture.incomplete ?? false;
+  const accepted = completed && !incomplete && rejected === undefined;
   const outcome: SniffAnalyzerOutcome = !completed
     ? "not-run"
     : incomplete
       ? "incomplete-output"
       : accepted
-        ? execution.exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
+        ? exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
         : "rejected-exit";
   const artifacts = accepted && parsed ? createAnalyzerArtifacts(authorization.recipe.id, parsed.observations) : undefined;
   const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
-    const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
+  const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
   const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
+  const historyNote = history && !history.bounded ? " (unbounded history scan)" : "";
   return {
     ok: accepted,
     report: !completed
-      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? execution.error ?? (execution.timedOut ? "timed out" : "no exit status")}`
+      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? runError ?? (timedOut ? `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock` : "no exit status")}`
       : incomplete
         ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
         : accepted
-          ? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${execution.exitCode})`
-          : `sniff analyzer rejected ${opts.analyzer}: exit ${execution.exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
+          ? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${exitCode})${historyNote}`
+          : `sniff analyzer rejected ${opts.analyzer}: exit ${exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
     preflight,
     acceptedExitCodes,
     outcome,

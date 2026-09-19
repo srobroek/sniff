@@ -58,7 +58,7 @@ function fakeRuntime(overrides: Partial<SniffInstallRuntime> = {}): SniffInstall
 		resolveCommand: (bin) => `/fake/bin/${bin}`,
 		toolkitCacheRoot: tempDir("sniff-toolkit-"),
 		readLauncher: () => "",
-		run: async (argv, _cwd, _env, timeoutMs) => commandResult(argv, timeoutMs),
+    run: async (argv, _cwd, _env, timeoutMs, _signal, _outputLimitBytes, _onSpawn) => commandResult(argv, timeoutMs),
 		freshEnvironment: async (_cwd, env, miseAware) => ({
 			env: { ...env, FRESH: "1" },
 			source: miseAware ? "mise" : "process",

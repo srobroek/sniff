@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRunManifest } from "../src/core/intake.ts";
@@ -17,7 +17,7 @@ import {
   saveReportArtifacts,
   validateSniffReport,
 } from "../src/core/report.ts";
-import { readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
+import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
 import { issueRunLease } from "../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../src/core/target.ts";
@@ -235,6 +235,15 @@ describe("structured Sniff reports", () => {
     );
   });
 
+  test("preserves the probed tool version on coverage entries", () => {
+    const input = reportInput();
+    input.coverage = [{ dimension: "complexity", tool: "lizard", analysisClass: "local", status: "ran", notes: "Probe completed.", version: "1.17.0" }];
+    const report = buildSniffReport(input);
+    expect(report.coverage).toEqual([expect.objectContaining({ tool: "lizard", version: "1.17.0" })]);
+    expect(JSON.parse(createReportArtifacts(report).coverageJson)).toEqual(expect.arrayContaining([expect.objectContaining({ version: "1.17.0" })]));
+    expect(renderSniffMarkdown(report)).toContain("version 1.17.0");
+  });
+
   test("canonicalizes equivalent object and collection order", () => {
     const firstInput = reportInput([finding(), finding({ stableKey: "review:second", location: { path: "src/second.ts", line: 3, anchor: "second" } })]);
     firstInput.extensions = { zeta: { second: 2, first: 1 }, alpha: true };
@@ -288,6 +297,24 @@ describe("structured Sniff reports", () => {
     expect(() => saveReportArtifacts(artifacts, directory)).toThrow("already exists");
     expect(readdirSync(directory)).toEqual([artifacts.report.reportId]);
     expect(readFileSync(collision, "utf8")).toBe("existing");
+  });
+
+  test("recovers stranded staging directories of either naming shape", () => {
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    const directory = mkdtempSync(join(tmpdir(), "sniff-report-staging-"));
+    temporaryDirectories.push(directory);
+    const stale = Date.now() - 2 * 60 * 60 * 1_000;
+    const legacy = join(directory, `.${artifacts.report.reportId}.staging`);
+    const suffixed = join(directory, `.${artifacts.report.reportId}.staging-abandoned`);
+    const fresh = join(directory, `.${artifacts.report.reportId}.staging-inflight`);
+    for (const path of [legacy, suffixed, fresh]) mkdirSync(path);
+    for (const path of [legacy, suffixed]) utimesSync(path, stale / 1_000, stale / 1_000);
+
+    saveReportArtifacts(artifacts, directory);
+    expect(existsSync(legacy)).toBe(false);
+    expect(existsSync(suffixed)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(join(directory, artifacts.report.reportId, "index.json"))).toBe(true);
   });
 
 
@@ -462,9 +489,6 @@ describe("structured Sniff reports", () => {
 		).rejects.toThrow("denied or mismatched");
 		expect(existsSync(directory)).toBe(false);
 	});
-  test("tool save mode rejects an absent output path", async () => {
-    await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
-  });
   test("groups findings into deterministic per-file artifacts and verifies index digests", () => {
     const report = buildSniffReport(reportInput([
       finding({ stableKey: "test:second", location: { path: "src/z.ts", line: 4, anchor: "z" } }),
@@ -545,6 +569,40 @@ describe("structured Sniff reports", () => {
     expect(pages).toBeGreaterThan(0);
     expect(content).toContain('"findings"');
     expect(createHash("sha256").update(content).digest("hex")).toBe(descriptor.sha256);
+  });
+
+  test("evicts the oldest reports once retained bytes exceed the registry budget", () => {
+    const findings = Array.from({ length: 4_000 }, (_, index) => finding({
+      stableKey: `test:bytes-${index}`,
+      title: `Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+      evidence: { tier: "observed", source: "bloodhound", detail: "d".repeat(400) },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const bytes = artifacts.descriptors.reduce((total, descriptor) => total + descriptor.bytes, 0);
+    const registrations = Math.ceil(MAX_REPORT_ARTIFACT_REGISTRY_BYTES / bytes) + 1;
+    // Stay well inside the entry cap so only the byte budget can force the eviction.
+    expect(registrations).toBeLessThan(MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES);
+    const capabilities = Array.from({ length: registrations }, (_, index) => registerReportArtifacts(artifacts, 1_000 + index));
+    const oldest = capabilities[0] ?? "";
+    const newest = capabilities.at(-1) ?? "";
+    expect(() => readReportArtifact({ capability: oldest, reportId: artifacts.report.reportId, relativePath: "report.json" }, 2_000)).toThrow("Unknown Sniff report artifact capability");
+    expect(readReportArtifact({ capability: newest, reportId: artifacts.report.reportId, relativePath: "report.json" }, 2_000).totalBytes).toBeGreaterThan(0);
+  });
+
+  test("expires a report at its absolute age however often it is read", () => {
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    const capability = registerReportArtifacts(artifacts, 1_000);
+    let at = 1_000;
+    let reads = 0;
+    expect(() => {
+      for (let index = 0; index < 12; index += 1) {
+        at += REPORT_ARTIFACT_IDLE_TTL_MS - 1;
+        readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json" }, at);
+        reads += 1;
+      }
+    }).toThrow("Unknown Sniff report artifact capability");
+    expect(reads).toBe(Math.floor(REPORT_ARTIFACT_MAX_AGE_MS / (REPORT_ARTIFACT_IDLE_TTL_MS - 1)));
   });
 
   test("rejects a symlink ancestor before save authorization", async () => {

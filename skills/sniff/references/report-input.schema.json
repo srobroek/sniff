@@ -39,7 +39,8 @@
         "analysisClass": { "enum": ["local", "relational", "global", "baseline"] },
         "status": { "enum": ["ran", "skipped", "gap", "not-applicable"] },
         "notes": { "type": "string", "minLength": 1 },
-        "config": { "type": "string", "minLength": 1 }
+        "config": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
       }
     },
     "findingInput": {
