@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./catalog.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
+import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
 
 const LEASE_TTL_MS = 60 * 60 * 1_000;
@@ -33,7 +34,8 @@ type LeaseRecord = {
   readonly sandboxGrant?: string;
   readonly releaseTarget: () => void;
   readonly reservations: Map<string, AnalyzerReservation>;
-  readonly activePids: Set<number>;
+  readonly activeProcesses: Map<number, SpawnedProcess>;
+  pendingRelease?: Promise<void>;
   expiryTimer?: NodeJS.Timeout;
 };
 
@@ -80,28 +82,35 @@ function rememberTerminal(capability: string, state: TerminalState, reason?: str
 
 const boundedReason = (reason: string): string => reason.trim().slice(0, 256) || "process shutdown";
 
-function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: string): void {
-  if (activeLeases.get(record.capability) !== record) return;
-  activeLeases.delete(record.capability);
-  clearTimeout(record.expiryTimer);
-  for (const pid of record.activePids) {
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch {
-        // The child may have exited between expiry/cancellation and cleanup.
-      }
-    }
-  }
-  record.activePids.clear();
+function finishRelease(record: LeaseRecord): void {
   try {
     record.releaseTarget();
   } finally {
     rmSync(record.home, { recursive: true, force: true });
-    rememberTerminal(record.capability, state, reason);
   }
+}
+
+/**
+ * Detaches a lease, then terminates every child it spawned and waits for their exits before
+ * releasing the target and deleting the home, so no analyzer can write into a released tree.
+ * Leases with no live child release synchronously; the returned promise settles once cleanup ran.
+ */
+function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: string): Promise<void> {
+  if (activeLeases.get(record.capability) !== record) return record.pendingRelease ?? Promise.resolve();
+  activeLeases.delete(record.capability);
+  clearTimeout(record.expiryTimer);
+  rememberTerminal(record.capability, state, reason);
+  const tracked = [...record.activeProcesses.values()];
+  record.activeProcesses.clear();
+  if (tracked.length === 0) {
+    finishRelease(record);
+    return Promise.resolve();
+  }
+  const pending = Promise.all(tracked.map((spawned) => terminateAndAwait(spawned))).then(() => {
+    finishRelease(record);
+  });
+  record.pendingRelease = pending;
+  return pending;
 }
 
 function activeLease(capability: string, manifestId: string): LeaseRecord {
@@ -112,7 +121,7 @@ function activeLease(capability: string, manifestId: string): LeaseRecord {
   }
   if (record.manifestId !== manifestId) throw new Error("Sniff run capability does not match the manifest ID");
   if (record.now() >= record.expiresAt) {
-    releaseRecord(record, "expired");
+    void releaseRecord(record, "expired");
     throw new Error("Sniff run capability expired");
   }
   return record;
@@ -203,12 +212,12 @@ export function issueRunLease(
     ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
     releaseTarget: targetLease.release,
     reservations: new Map(),
-    activePids: new Set(),
+    activeProcesses: new Map(),
   };
   activeLeases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
     try {
-      if (activeLeases.get(capability) === record) releaseRecord(record, "expired");
+      if (activeLeases.get(capability) === record) void releaseRecord(record, "expired");
     } catch {
       // Expiry is best-effort cleanup and must never crash the extension host.
     }
@@ -228,13 +237,24 @@ export function authorizeAnalyzerRun(capability: string, manifestId: string, ana
   return authorization;
 }
 
-export function registerActiveProcess(capability: string, manifestId: string, pid: number): void {
-  activeLease(capability, manifestId).activePids.add(pid);
+/**
+ * Adopts a spawned analyzer child. A lease that expired between the spawn decision and this call
+ * would otherwise orphan the child, so it is terminated before the expiry error propagates.
+ */
+export function registerActiveProcess(capability: string, manifestId: string, spawned: SpawnedProcess): void {
+  let record: LeaseRecord;
+  try {
+    record = activeLease(capability, manifestId);
+  } catch (error) {
+    void terminateAndAwait(spawned);
+    throw error;
+  }
+  record.activeProcesses.set(spawned.pid, spawned);
 }
 
 export function unregisterActiveProcess(capability: string, manifestId: string, pid: number): void {
   const record = activeLeases.get(capability);
-  if (record?.manifestId === manifestId) record.activePids.delete(pid);
+  if (record?.manifestId === manifestId) record.activeProcesses.delete(pid);
 }
 
 export function prepareAnalyzerSpawn(capability: string, manifestId: string, analyzer: string, reservationId: string): AnalyzerRunAuthorization {
@@ -290,26 +310,29 @@ export function validateReportCoverage(capability: string, manifestId: string, c
   }
 }
 
-export function releaseRunLease(capability: string, manifestId: string): void {
-  releaseRecord(activeLease(capability, manifestId), "released");
+/** Resolves once spawned analyzers have exited and the target and home were cleaned up. */
+export function releaseRunLease(capability: string, manifestId: string): Promise<void> {
+  return releaseRecord(activeLease(capability, manifestId), "released");
 }
 
-export function cancelRunLease(capability: string, manifestId: string): void {
-  releaseRecord(activeLease(capability, manifestId), "cancelled");
+export function cancelRunLease(capability: string, manifestId: string): Promise<void> {
+  return releaseRecord(activeLease(capability, manifestId), "cancelled");
 }
 
-export function finalizeRunLease(capability: string, manifestId: string): void {
+export function finalizeRunLease(capability: string, manifestId: string): Promise<void> {
   const record = activeLeases.get(capability);
-  if (record?.manifestId === manifestId) releaseRecord(record, "released");
+  return record?.manifestId === manifestId ? releaseRecord(record, "released") : Promise.resolve();
 }
 
-export function releaseAllRunLeases(reason: string): void {
+export function releaseAllRunLeases(reason: string): Promise<void> {
   const bounded = boundedReason(reason);
+  const pending: Promise<void>[] = [];
   for (const record of [...activeLeases.values()]) {
     try {
-      releaseRecord(record, "cancelled", bounded);
+      pending.push(releaseRecord(record, "cancelled", bounded));
     } catch {
       // Shutdown cleanup is best-effort; continue releasing every active lease.
     }
   }
+  return Promise.all(pending).then(() => undefined);
 }

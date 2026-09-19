@@ -270,6 +270,8 @@ export function saveReportEntriesAt(
   directory.ensureDirectory();
   const parentFd = directory.directoryFd;
   const stagingPrefix = `.${reportId}.staging-`;
+  // A pre-suffix build stranded `.<id>.staging`; recover those alongside this build's own strays.
+  const legacyStagingName = `.${reportId}.staging`;
   const staleBefore = Date.now() - 60 * 60 * 1_000;
   let stagingEntries: string[] = [];
   try {
@@ -278,7 +280,7 @@ export function saveReportEntriesAt(
     // The approved parent may have been renamed; the open directory fd remains authoritative.
   }
   for (const name of stagingEntries) {
-    if (!name.startsWith(stagingPrefix)) continue;
+    if (!name.startsWith(stagingPrefix) && name !== legacyStagingName) continue;
     const candidate = resolve(directory.path, name);
     try {
       const stat = statSync(candidate);

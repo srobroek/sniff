@@ -17,7 +17,7 @@ import {
   saveReportArtifacts,
   validateSniffReport,
 } from "../src/core/report.ts";
-import { readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
+import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
 import { issueRunLease } from "../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../src/core/target.ts";
@@ -551,6 +551,40 @@ describe("structured Sniff reports", () => {
     expect(pages).toBeGreaterThan(0);
     expect(content).toContain('"findings"');
     expect(createHash("sha256").update(content).digest("hex")).toBe(descriptor.sha256);
+  });
+
+  test("evicts the oldest reports once retained bytes exceed the registry budget", () => {
+    const findings = Array.from({ length: 4_000 }, (_, index) => finding({
+      stableKey: `test:bytes-${index}`,
+      title: `Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+      evidence: { tier: "observed", source: "bloodhound", detail: "d".repeat(400) },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const bytes = artifacts.descriptors.reduce((total, descriptor) => total + descriptor.bytes, 0);
+    const registrations = Math.ceil(MAX_REPORT_ARTIFACT_REGISTRY_BYTES / bytes) + 1;
+    // Stay well inside the entry cap so only the byte budget can force the eviction.
+    expect(registrations).toBeLessThan(MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES);
+    const capabilities = Array.from({ length: registrations }, (_, index) => registerReportArtifacts(artifacts, 1_000 + index));
+    const oldest = capabilities[0] ?? "";
+    const newest = capabilities.at(-1) ?? "";
+    expect(() => readReportArtifact({ capability: oldest, reportId: artifacts.report.reportId, relativePath: "report.json" }, 2_000)).toThrow("Unknown Sniff report artifact capability");
+    expect(readReportArtifact({ capability: newest, reportId: artifacts.report.reportId, relativePath: "report.json" }, 2_000).totalBytes).toBeGreaterThan(0);
+  });
+
+  test("expires a report at its absolute age however often it is read", () => {
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    const capability = registerReportArtifacts(artifacts, 1_000);
+    let at = 1_000;
+    let reads = 0;
+    expect(() => {
+      for (let index = 0; index < 12; index += 1) {
+        at += REPORT_ARTIFACT_IDLE_TTL_MS - 1;
+        readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json" }, at);
+        reads += 1;
+      }
+    }).toThrow("Unknown Sniff report artifact capability");
+    expect(reads).toBe(Math.floor(REPORT_ARTIFACT_MAX_AGE_MS / (REPORT_ARTIFACT_IDLE_TTL_MS - 1)));
   });
 
   test("rejects a symlink ancestor before save authorization", async () => {
