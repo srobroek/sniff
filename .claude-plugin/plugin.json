@@ -1,6 +1,6 @@
 {
   "name": "sniff",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
   "author": {
     "name": "srobroek"
