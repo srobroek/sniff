@@ -9,7 +9,7 @@ import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePubl
 import { processAlive } from "../src/core/process-control.ts";
 import type { ReportInput } from "../src/core/report.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
-import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, releaseAllRunLeases, validateReportCoverage } from "../src/core/run-registry.ts";
+import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../src/core/run-registry.ts";
 import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../src/core/target.ts";
 import { detectProvider, withResolvedTarget } from "../src/core/target-provider.ts";
 import sniffIntakeExtension from "./sniff-intake-tool.ts";
@@ -611,37 +611,69 @@ describe("adaptive runtime boundaries", () => {
     }
   });
 
-  test("terminates a child whose lease expired between the spawn and its registration", async () => {
+  test("terminates a child whose lease expired between the spawn and its registration before releasing", async () => {
     const startedAt = Date.parse("2026-09-11T00:00:00Z");
     let now = startedAt;
-    const leaseFixture = localLease({ ttlMs: 50, now: () => now, removeRootOnRelease: true });
+    const order: string[] = [];
+    const released = Promise.withResolvers<void>();
+    const leaseFixture = localLease({ ttlMs: 50, now: () => now, removeRootOnRelease: true, onRelease: () => {
+      order.push("releaseTarget");
+      released.resolve();
+    } });
     const calls: AnalyzerCall[] = [];
     const exit = Promise.withResolvers<number>();
-    const killed: number[] = [];
     const base = analyzerRuntime(calls);
     const runtime = analyzerRuntime(calls, {
       resolveCommand: base.resolveCommand,
       run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
         if (argv.includes("--csv")) {
           now = startedAt + 51;
-          onSpawn?.({ pid: 4242, exited: exit.promise, kill: () => exit.resolve(0) });
+          onSpawn?.({ pid: 4242, exited: exit.promise });
         }
         return { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
-      killed.push(pid);
-      exit.resolve(0);
+      if (pid === -4242 || pid === 4242) {
+        order.push("kill");
+        expect(existsSync(leaseFixture.root)).toBe(true);
+      }
       return true;
     }) as typeof process.kill);
     try {
       const result = await runSniffAnalyzer({ capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
       expect(result).toMatchObject({ ok: false, outcome: "not-run" });
       expect(result.report).toContain("expired");
-      expect(killed).toContain(-4242);
+      expect(order).toEqual(["kill"]);
+      expect(existsSync(leaseFixture.root)).toBe(true);
+      exit.resolve(0);
+      await released.promise;
+      expect(order).toEqual(["kill", "releaseTarget"]);
+      expect(existsSync(leaseFixture.root)).toBe(false);
     } finally {
       kill.mockRestore();
       exit.resolve(0);
+    }
+  });
+
+  test("terminates a child registered against a foreign manifest and keeps the lease intact", async () => {
+    const leaseFixture = localLease();
+    const exited = Promise.withResolvers<number>();
+    const killed: number[] = [];
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
+      killed.push(pid);
+      exited.resolve(0);
+      return true;
+    }) as typeof process.kill);
+    try {
+      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", { pid: 777, exited: exited.promise })).toThrow("does not match the manifest ID");
+      await exited.promise;
+      expect(killed).toContain(-777);
+      expect(existsSync(leaseFixture.root)).toBe(true);
+      await cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+    } finally {
+      kill.mockRestore();
+      exited.resolve(0);
     }
   });
 

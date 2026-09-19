@@ -238,18 +238,25 @@ export function authorizeAnalyzerRun(capability: string, manifestId: string, ana
 }
 
 /**
- * Adopts a spawned analyzer child. A lease that expired between the spawn decision and this call
- * would otherwise orphan the child, so it is terminated before the expiry error propagates.
+ * Adopts a spawned analyzer child. The handle joins the lease's tracked set before the expiry
+ * check so that a lease which expired between the spawn decision and this call releases through
+ * the ordinary path: the child is terminated and awaited before the target and home go away.
  */
 export function registerActiveProcess(capability: string, manifestId: string, spawned: SpawnedProcess): void {
-  let record: LeaseRecord;
+  const record = activeLeases.get(capability);
+  const owned = record !== undefined && record.manifestId === manifestId;
+  if (owned) record.activeProcesses.set(spawned.pid, spawned);
   try {
-    record = activeLease(capability, manifestId);
+    activeLease(capability, manifestId);
   } catch (error) {
-    void terminateAndAwait(spawned);
+    // An owned record that expired released through releaseRecord, which adopted and cleared the
+    // handle; any other failure leaves the child untracked, so terminate it here.
+    if (!owned || record.activeProcesses.has(spawned.pid)) {
+      record?.activeProcesses.delete(spawned.pid);
+      void terminateAndAwait(spawned);
+    }
     throw error;
   }
-  record.activeProcesses.set(spawned.pid, spawned);
 }
 
 export function unregisterActiveProcess(capability: string, manifestId: string, pid: number): void {

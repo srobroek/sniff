@@ -640,10 +640,10 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
   );
   const result = await raceWithAbort(resultPromise, signal).catch((error) => {
     void resultPromise.then(
-      (late) => {
+      async (late) => {
         if (!late.lease) return;
         try {
-          cancelRunLease(late.lease.capability, late.lease.manifestId);
+          await cancelRunLease(late.lease.capability, late.lease.manifestId);
         } catch {
           // The request was already cancelled or expired.
         }
@@ -658,7 +658,7 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
   if (signal.aborted) {
     if (result.lease) {
       try {
-        cancelRunLease(result.lease.capability, result.lease.manifestId);
+        await cancelRunLease(result.lease.capability, result.lease.manifestId);
       } catch {
         // The lease was already finalized or expired.
       }
@@ -754,7 +754,7 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     // only for validation failures before entering the core use case.
     if (!delegatedToCore) {
       try {
-        finalizeRunLease(capability, manifestId);
+        await finalizeRunLease(capability, manifestId);
       } catch {
         // Expiry, cancellation, or an already-finalized lease is terminal.
       }
@@ -799,7 +799,7 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
     case "sniff_cancel": {
       const capability = requiredString(args.capability, "capability");
       const manifestId = requiredString(args.manifestId, "manifestId");
-      cancelRunLease(capability, manifestId);
+      await cancelRunLease(capability, manifestId);
       activeLeases.delete(leaseKey(capability, manifestId));
       return toolSuccess({ ok: true, capability, manifestId, released: true }, "Sniff run cancelled and materialization released.");
     }
@@ -825,46 +825,44 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   }
 });
 
-function cleanup(reason: string): void {
-  if (shuttingDown) return;
+let cleanupDone: Promise<void> | undefined;
+/** Releases every lease once; the returned promise settles after spawned analyzers exited and their trees were removed. */
+function cleanup(reason: string): Promise<void> {
+  if (cleanupDone) return cleanupDone;
   shuttingDown = true;
   semaphore.close(reason);
-  try {
-    releaseAllRunLeases(reason);
-  } finally {
+  cleanupDone = releaseAllRunLeases(reason).finally(() => {
     activeLeases.clear();
-  }
+  });
+  return cleanupDone;
 }
 export async function serve(): Promise<void> {
   const transport = new BoundedStdioTransport();
   let closedResolve: (() => void) | undefined;
   const closed = new Promise<void>((resolve) => { closedResolve = resolve; });
   transport.onclose = () => {
-    cleanup("stdin-closed");
-    closedResolve?.();
+    void cleanup("stdin-closed").finally(() => closedResolve?.());
   };
   transport.onerror = () => {
-    cleanup("stdio-error");
+    void cleanup("stdio-error");
   };
   server.onclose = () => {
-    cleanup("server-closed");
+    void cleanup("server-closed");
   };
   process.once("SIGINT", () => {
-    cleanup("SIGINT");
-    void transport.close();
+    void cleanup("SIGINT").finally(() => transport.close());
   });
   process.once("SIGTERM", () => {
-    cleanup("SIGTERM");
-    void transport.close();
+    void cleanup("SIGTERM").finally(() => transport.close());
   });
-  process.once("exit", () => cleanup("process-exit"));
+  process.once("exit", () => void cleanup("process-exit"));
   await server.connect(transport);
   await closed;
 }
 
 if (import.meta.main) {
   void serve().catch((error: unknown) => {
-    cleanup("serve-error");
+    void cleanup("serve-error");
     console.error(error instanceof Error ? error.message : "MCP server failed");
     process.exitCode = 1;
   });
