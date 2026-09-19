@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { SNIFF_ANALYZER_RECIPES } from "./analyzer-recipes.ts";
+import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipeId } from "./analyzer-recipes.ts";
 import { parseOpenGrepOutput } from "./opengrep.ts";
 
 /** Maximum number of normalized observations retained from one analyzer run. */
@@ -358,13 +358,19 @@ export function parseSarifOutput(stdout: string, targetRoot: string, truncated =
   return { observations, capture: capture(stdout, false, Boolean(reason), reason) };
 }
 
+function isSniffAnalyzerRecipeId(value: string): value is SniffAnalyzerRecipeId {
+  return value in SNIFF_ANALYZER_RECIPES;
+}
+
 export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false): AnalyzerParseResult {
+  if (!isSniffAnalyzerRecipeId(recipeId)) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
   const recipe = SNIFF_ANALYZER_RECIPES[recipeId];
-  if (!recipe || recipe.tool !== tool) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
+  if (recipe.tool !== tool) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
   switch (recipe.output) {
     case "lizard-csv": return parseLizardOutput(stdout, targetRoot, truncated, recipeId);
     case "gitleaks-json": return parseGitleaksOutput(stdout, targetRoot, truncated, recipeId);
     case "sarif": return parseSarifOutput(stdout, targetRoot, truncated, recipeId);
     case "opengrep-json": return parseOpenGrepOutput(stdout, targetRoot, truncated);
+    default: return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
   }
 }
