@@ -118,7 +118,6 @@ test("generated skills preserve the seven-tool workflow and security gates", () 
 test("generated Codex trees are OMP-free and byte-identical", () => {
 	const markdown = generatedMarkdown();
 	expect(markdown).not.toMatch(/skill:\/\//);
-	expect(markdown).not.toContain("OMP_SNIFF_ACTIVE=1");
 	expect(markdown).not.toMatch(/\b(?:bloodhound|refactor-challenger|TTSR)\b/i);
 
 	const paths = filesUnder(generatedRoots[1]);
@@ -133,7 +132,6 @@ test("generated Codex trees are OMP-free and byte-identical", () => {
 test("generated OMP output preserves its native skill references", () => {
 	const skill = readFileSync(join(ompRoot, "SKILL.md"), "utf8");
 	expect(skill).toContain("skill://sniff/references/approval-gates.md");
-	expect(skill).toContain("OMP_SNIFF_ACTIVE=1");
 });
 
 test("check mode rejects stale temporary output without rewriting it", () => {

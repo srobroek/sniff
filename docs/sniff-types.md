@@ -1,14 +1,6 @@
 # Sniff types
 
-Sniff keeps intake and report axes separate in one portable core. Native and MCP adapters expose the same seven tools:
-
-- `sniff_intake`
-- `sniff_install_tools`
-- `sniff_run_analyzer`
-- `sniff_report`
-- `sniff_read_analyzer_artifact`
-- `sniff_read_report_artifact`
-- `sniff_cancel`
+The canonical seven-tool contract is defined in [Capabilities](capabilities.md). This document defines the structured intake, target, security, and analyzer values consumed by those tools.
 
 Use these values in structured intake. Natural-language requests describe interaction. They are not shell commands.
 

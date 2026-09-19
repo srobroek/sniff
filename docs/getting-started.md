@@ -1,6 +1,6 @@
 # Getting started
 
-Sniff exposes one portable workflow through native and MCP adapters. Every adapter provides the same seven tools.
+The canonical seven-tool contract is defined in [Capabilities](capabilities.md).
 
 ## Requirements
 
@@ -64,17 +64,7 @@ Read [Interviewing](interviewing.md) for request patterns and noninteractive def
 
 Plan confirmation issues a capability bound to the manifest. Installation needs separate approval. Analyzer execution uses the live capability. Report saving needs separate approval. Refactoring needs separate approval.
 
-The seven tools follow this sequence:
-
-1. `sniff_intake` resolves the frontier and obtains host approval or denial.
-2. `sniff_install_tools` checks analyzer bundles and installs approved bundles.
-3. `sniff_run_analyzer` revalidates the target and runs one selected recipe.
-4. Use `sniff_read_analyzer_artifact` to page analyzer observations with the capability from `sniff_run_analyzer`.
-5. `sniff_report` validates and renders a report or saves its artifact set.
-6. `sniff_read_report_artifact` pages a complete report artifact with the opaque read capability returned by `sniff_report`.
-7. `sniff_cancel` closes an unfinished run and removes temporary materialization.
-
-Pass each reader's `nextOffset` as the next `offset` until `eof`. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Registry expiry or eviction ends a read capability. Saving to a repository still needs separate approval.
+Read [Workflow](workflow.md) for the operational lifecycle and approval boundaries. The lifecycle pages analyzer and report artifacts with UTF-8-safe pages of at most 64 KiB, and each reader continues with `nextOffset` until `eof`.
 
 Before installation, Sniff needs explicit approval. Remote targets use config-free, remote-safe recipes. Remote targets do not load project executable configuration.
 

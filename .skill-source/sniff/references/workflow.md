@@ -1,196 +1,21 @@
 # Workflow
 
-- Intake runs first.
-- Before analysis, scope and plan confirmation must exist.
+The operational sequence lives in `../SKILL.md`. Read that skill before every run.
 
-## Step 0: intake
+## Concepts
 
-- Load `references/intake.md`.
-- Use the decision frontier.
-- Ask no question for a complete request.
-- Ask one question for an incomplete request.
-- Ask the highest-impact unresolved question.
-- Present one plan after the answer.
-- Need explicit authorization for noninteractive runs.
-- Record defaults and gaps in the run manifest.
-- Pass the manifest to reports through the `sniff.intake` extensions namespace.
+- Intake resolves `target`, `intent`, `scopeMode`, `objectives`, and `budget`, then gets confirmation and an authenticated lease.
+- Target resolution produces an exact file set, immutable refs where applicable, and a trust route. Non-Git trees use `files` or `directory`, not `whole-repo` or `working-tree`.
+- Detection maps the resolved files to language references. Tool probing reports availability and versions; installation and analysis require their own approvals.
+- Each analyzer runs once through its issued capability and fixed recipe. The host revalidates the lease root, files, executable, scope, budget, and recipe before spawning.
+- Analyzer previews and report artifacts are paged with `nextOffset` until `eof`; each UTF-8-safe page is at most 64 KiB.
+- Full mode includes a separate challenge pass. Quick mode skips the full sweep and challenge. Plan-only mode never applies changes.
+- Reporting validates the authenticated manifest, renders or saves artifacts, and releases the lease. Cancellation releases unfinished runs.
 
-## Step 0.5: target
+## Safety boundaries
 
-- Offer the full target taxonomy:
+- Remote targets use host-owned, config-free recipes and never load target executable configuration or dependencies.
+- Credentials, caller-controlled analyzer execution, out-of-root files, and replayed capabilities are rejected.
+- Save, install, analysis, and refactor actions retain separate approval boundaries.
 
-- whole repo
-- language or area filter
-- directory or module
-- file or files
-- working tree
-- commit
-- range
-- branch comparison
-- exact ref
-- repository
-- PR or MR
-- release or tag
-- change history
-
-- Do not infer whole-repository scope from a bare request.
-- Resolve the target to an explicit file list.
-- Before analysis, resolve a branch name to a full commit ID.
-- Before analysis, resolve a tag name to a full commit ID.
-- Before analysis, resolve a symbolic ref to a full commit ID.
-- Record the base ID.
-- Record the head ID.
-- Choose in-place work for mutable local files and working-tree changes.
-- Choose a host-owned lease for every immutable local or remote target.
-- Keep it alive until reporting ends.
-- Release it exactly once after terminal report success or failure, or through `sniff_cancel`.
-
-## Step 1: reduce scope
-
-- Drop vendor directories.
-- Drop build directories.
-- Drop tool directories.
-- Drop scaffolding directories.
-- Drop lockfiles.
-- Drop generated files by header marker.
-- Drop generated files by lockfile name.
-- Drop paths marked `linguist-generated`.
-- Drop binaries.
-- Drop data blobs.
-- Drop images.
-- Drop `.onnx` files.
-- Drop archives.
-- Echo first-party counts.
-
-- Apply reduction on every path.
-- `.gitignore` does not cover committed vendor or generated trees.
-- A language filter can span directories and crates.
-- Detect languages from the reduced file set.
-
-
-## Step 2: detect stack
-
-- Load `references/languages/index.md` for each language and format in the reduced set.
-- Treat configuration and data as targets.
-- Treat contracts and infrastructure as targets.
-- Treat Markdown as a target.
-- For a trusted local target, inventory project config that can execute code.
-- Do not execute or import repository-controlled configuration from an untrusted remote target.
-
-- When these files are present, check them:
-
-- `Cargo.toml`
-- `go.mod`
-- `tsconfig.json`
-- `pyproject.toml`
-- `.eslintrc*`
-- `.golangci.yml`
-- `.tflint.hcl`
-- `.editorconfig`
-- `clippy.toml`
-- `rust-toolchain.toml`
-- `mypy.ini`
-- `setup.cfg`
-- `.flake8`
-- `eslint.config.*`
-- `biome.json`
-- `.prettierrc`
-- `.shellcheckrc`
-- `.stylelintrc*`
-- `.yamllint`
-- `.markdownlint*`
-
-## Step 3: propose tools
-
-- Inventory tools for every detected language.
-- Respect project configuration only for trusted local targets.
-- For untrusted remote targets, select config-free offline analyzers with bundled rules.
-- Show analyzer names, versions, and dispositions.
-- Record each recipe as scoped-files, bounded-history, or repository-wide.
-- Mark a recipe skipped when its scope class or supported file types do not match the resolved target.
-- Ask for confirmation before installation or analysis.
-
-- A plugin hosted by a framework remains part of its host analyzer. An installed but unconfigured plugin is a coverage gap.
-
-## Step 4: run tools
-
-- Pass the issued capability, manifest ID, and selected recipe ID to `sniff_run_analyzer`.
-- Run each selected recipe once. A concurrent or sequential replay is invalid.
-- Pass only compatible files from the resolved target to an analyzer. Never substitute `.` for an empty set.
-- Use a canonical host executable outside the target root for every probe and execution.
-- Revalidate the canonical lease root and files after preflight, immediately before spawn.
-- Bound the process timeout by the remaining `maxMinutes` budget.
-- Let the tool revalidate the canonical root and every file immediately before execution.
-- Reject caller control over analyzer execution.
-- Treat missing dependencies as coverage gaps.
-- For remote targets, use only host-owned fixed recipes.
-- Strip credentials and reject project configuration.
-- Do not bootstrap dependencies.
-- Project code requires a host-issued sandbox grant.
-- The sandbox must have no credentials or network access.
-- Do not fall back from an untrusted checkout to in-place execution.
-
-## Step 5: inspect changes
-
-- Compare base and head contracts for a range.
-- Compare exported signatures.
-- Compare model fields.
-- Run breaking-change tools for Protobuf.
-- Run breaking-change tools for GraphQL.
-- Run breaking-change tools for OpenAPI.
-- Report compatibility risk.
-- Keep findings inside the resolved target.
-
-## Step 6: adversarial pass
-
-- Run this pass in full mode.
-- Skip this pass in quick mode.
-- Use bounded security rules from `references/security-scope.md`.
-- Do not fuzz.
-- Do not exploit.
-- Do not run DAST.
-- Do not validate live secrets.
-- Do not run a threat campaign.
-
-## Step 7: report
-
-- Group findings by objective.
-- Include the target.
-- Include the intent.
-- Include exclusions.
-- Include analyzers.
-- Include the budget.
-- Include defaults.
-- Include gaps.
-- Include authorization.
-- Include confirmation.
-- Include the route.
-- Include the exact issued run manifest under `extensions["sniff.intake"]` only when convenient; `sniff_report` authenticates the capability and manifest ID, injects the host-stored manifest when omitted, and rejects any supplied mismatch.
-- Pass the capability and manifest ID to `sniff_report`.
-- Pass the returned `readCapability`, report ID, and descriptor `relativePath` to `sniff_read_report_artifact`. Continue through `nextOffset` until `eof`; each UTF-8-safe page is at most 64 KiB.
-- Treat `sniff_run_analyzer` observations as a bounded preview. When `observationPreview.truncated` is true, use its `readCapability` and `analyzerResultId` with `sniff_read_analyzer_artifact`.
-- Read `index.json` first, then page a descriptor `relativePath` through `nextOffset` until `eof`; use `sourcePath` for direct complete observations for one normalized source file.
-- Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
-- Do not add root, paths, materialization, immutable ref, or head ref fields.
-- Let the tool validate the manifest and release the lease.
-- Keep other report extensions unchanged.
-- Save only after explicit confirmation.
-
-## Modes
-
-- In quick mode, check errors.
-- In quick mode, check smells.
-- In quick mode, check hardcoded values.
-- In quick mode, check names.
-- Full mode runs every step.
-- Plan-only mode runs planning and inspection but never applies changes.
-- Debug mode combines with any mode and adds evidence capture.
-
-## Apply boundary
-
-- Plan-only mode never changes files.
-- Apply mode needs explicit confirmation.
-- Install tools only with confirmation.
-- Edit source only with confirmation.
-- Push remotes only with confirmation.
-- Mutate a remote repository only with confirmation.
+See `intake.md`, `targeting.md`, `security-scope.md`, `report-template.md`, and `report-input.schema.json` for exact contracts.

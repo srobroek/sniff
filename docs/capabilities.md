@@ -57,12 +57,13 @@ MCP registration lives in these files:
 - `claude-mcp.json`
 - `dist/claude/server.js`
 - `dist/codex/server.js`
-
+- `dist/codex/mcp.json`
 Plugin manifests live in these files:
 
 - `.omp-plugin/plugin.json`
 - `.claude-plugin/plugin.json`
 - `.agents/plugins/marketplace.json`
+- `dist/codex/plugin.json`
 
 Generated skill evidence uses these paths:
 
@@ -73,51 +74,17 @@ Generated skill evidence uses these paths:
 - `.agents/skills/sniff/`
 - `dist/codex/skills/sniff/`
 
-Bundle evidence uses `scripts/build-harness-bundles.ts` and `scripts/packaging-shape.test.ts`.
-
 Run the focused protocol suite with this command:
 
 ```sh
-bun test extensions/sniff-adaptive-intake.test.ts extensions/sniff-install-tool.test.ts extensions/sniff-runtime-boundaries.test.ts extensions/sniff-report.test.ts extensions/sniff-ttsr-rule.test.ts adapters/mcp/server.test.ts scripts/generate-harness-skills.test.ts scripts/packaging-shape.test.ts
+bun test extensions/sniff-adaptive-intake.test.ts extensions/sniff-install-tool.test.ts extensions/sniff-runtime-boundaries.test.ts extensions/sniff-report.test.ts adapters/mcp/server.test.ts scripts/generate-harness-skills.test.ts scripts/packaging-shape.test.ts
 ```
-
-The suite covers these paths:
-
-- approval and denial
-- analyzer cancellation
-- report render and save validation
-- expiry and replay
-- MCP dispatch
-- generated skills
-- bundle shape
-
-
+The suite covers approval, cancellation, expiry, replay, MCP dispatch, generated skills, and bundle shape.
 ## Cross-harness verification
 
-The runtime matrix ran from commit `12e10cab52444dff2963043e0e5ad719dcd868ef` on 2026-09-12.
+Run `bun run bundles:check` to verify generated harness bundles and the OpenGrep rule copy. Run `bun run check` before publishing an adapter or portable-core change.
 
-It exercised three adapters against these repositories:
-
-- KiroCrew with a Python fixture
-- chezmoi with a shell fixture
-- platevault with a TypeScript fixture
-
-All nine adapter-target runs passed. Each run:
-
-- exposed exactly seven Sniff tools
-- selected only `opengrep:hardcoded-values`
-- found the three planted observations
-- paged analyzer artifacts until EOF
-- rendered a validated report and paged it to EOF
-- rejected capability replay
-- canceled a second active lease
-- left the target repository unchanged
-
-The native adapter bundle had SHA-256 `789d1ca8b1a748794b8de97c8bac53a8071d9ea41783bdbb6ae2ee965f186261`.
-
-The MCP server bundle had SHA-256 `10b6904427c9be31a52ea1e4790c81634ed94650bd151750ca104aa504d6bc86`.
-
-The external matrix directory holds the evidence because it contains temporary target paths and session records.
+The external matrix directory holds cross-harness evidence because it contains temporary target paths and session records.
 
 ## Regression checklist
 
