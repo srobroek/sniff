@@ -11,7 +11,7 @@ const TERMINAL_LIMIT = 1_024;
 
 type TerminalState = "cancelled" | "expired" | "released";
 type TerminalRecord = { readonly state: TerminalState; readonly reason?: string };
-type ReservationState = "reserved" | "running" | "completed";
+type ReservationState = "reserved" | "running" | "completed" | "failed";
 
 type AnalyzerReservation = {
   readonly id: string;
@@ -33,8 +33,11 @@ type LeaseRecord = {
   readonly sandboxGrant?: string;
   readonly releaseTarget: () => void;
   readonly reservations: Map<string, AnalyzerReservation>;
+  readonly activePids: Set<number>;
   expiryTimer?: NodeJS.Timeout;
 };
+
+
 
 export type RunLeaseReceipt = {
   readonly capability: string;
@@ -79,6 +82,18 @@ function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: strin
   if (activeLeases.get(record.capability) !== record) return;
   activeLeases.delete(record.capability);
   clearTimeout(record.expiryTimer);
+  for (const pid of record.activePids) {
+    try {
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // The child may have exited between expiry/cancellation and cleanup.
+      }
+    }
+  }
+  record.activePids.clear();
   try {
     record.releaseTarget();
   } finally {
@@ -184,6 +199,7 @@ export function issueRunLease(
     ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
     releaseTarget: targetLease.release,
     reservations: new Map(),
+    activePids: new Set(),
   };
   activeLeases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
@@ -208,6 +224,15 @@ export function authorizeAnalyzerRun(capability: string, manifestId: string, ana
   return authorization;
 }
 
+export function registerActiveProcess(capability: string, manifestId: string, pid: number): void {
+  activeLease(capability, manifestId).activePids.add(pid);
+}
+
+export function unregisterActiveProcess(capability: string, manifestId: string, pid: number): void {
+  const record = activeLeases.get(capability);
+  if (record?.manifestId === manifestId) record.activePids.delete(pid);
+}
+
 export function prepareAnalyzerSpawn(capability: string, manifestId: string, analyzer: string, reservationId: string): AnalyzerRunAuthorization {
   const record = activeLease(capability, manifestId);
   const reservation = record.reservations.get(analyzer);
@@ -227,9 +252,14 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
   const record = activeLease(capability, manifestId);
   const reservation = record.reservations.get(analyzer);
   if (!reservation || reservation.id !== reservationId || reservation.state !== "running") throw new Error(`Analyzer ${analyzer} reservation cannot be completed`);
+  try {
+    authorizedTarget(record, SNIFF_ANALYZER_RECIPES[analyzer as keyof typeof SNIFF_ANALYZER_RECIPES]);
+    if (record.now() > analyzerDeadline(record)) throw new Error("Sniff analyzer exceeded the manifest maxMinutes budget");
+  } catch (error) {
+    reservation.state = "failed";
+    throw error;
+  }
   reservation.state = "completed";
-  authorizedTarget(record, SNIFF_ANALYZER_RECIPES[analyzer as keyof typeof SNIFF_ANALYZER_RECIPES]);
-  if (record.now() > analyzerDeadline(record)) throw new Error("Sniff analyzer exceeded the manifest maxMinutes budget");
 }
 
 export function readRunManifest(capability: string, manifestId: string): RunManifest {

@@ -25,11 +25,13 @@ import {
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
 import {
-	type AnalyzerRunAuthorization,
-	abandonAnalyzerReservation,
-	authorizeAnalyzerRun,
-	completeAnalyzerReservation,
-	prepareAnalyzerSpawn,
+  type AnalyzerRunAuthorization,
+  abandonAnalyzerReservation,
+  authorizeAnalyzerRun,
+  completeAnalyzerReservation,
+  prepareAnalyzerSpawn,
+  registerActiveProcess,
+  unregisterActiveProcess,
 } from "./run-registry.ts";
 
 const PROBE_TIMEOUT_MS = 1_500;
@@ -84,7 +86,7 @@ type FreshEnvironment = { env: ProcessEnvironment; source: "process" | "mise"; e
 export type SniffInstallRuntime = {
 	resolveCommand(bin: string, cwd: string, env: ProcessEnvironment): string | null;
 	readLauncher(path: string): string;
-	run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes?: number): Promise<CommandResult>;
+  run(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes?: number, onSpawn?: (pid: number) => void): Promise<CommandResult>;
 	freshEnvironment(cwd: string, env: ProcessEnvironment, miseAware: boolean, signal?: AbortSignal): Promise<FreshEnvironment>;
 	resolveOpenGrep(cacheDir?: string): string | null;
 	provisionOpenGrep(options: { cacheDir?: string; signal?: AbortSignal }): Promise<OpenGrepProvisionResult>;
@@ -142,11 +144,12 @@ function terminateProcess(proc: { pid: number; kill(signal?: "SIGTERM" | "SIGKIL
 	}
 }
 
-async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<CommandResult> {
+async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (pid: number) => void): Promise<CommandResult> {
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
 	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
+  onSpawn?.(proc.pid);
 	let timedOut = false;
 	let aborted = false;
 	let forceKill: ReturnType<typeof setTimeout> | undefined;
@@ -975,17 +978,22 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		const message = error instanceof Error ? error.message : String(error);
 		return { ok: false, report: `sniff analyzer launch blocked: ${message}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
-	const argv = [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv];
-	const timeoutMs = Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs);
-	const openGrep = authorization.recipe.tool === "opengrep";
-	const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
-	let execution: CommandResult;
-	let completionError: string | undefined;
-	try {
-		execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal, outputLimitBytes);
-	} catch (error) {
-		execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
-	}
+  const argv = [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.argv];
+  const timeoutMs = Math.min(INSTALL_TIMEOUT_MS, authorization.remainingBudgetMs);
+  const openGrep = authorization.recipe.tool === "opengrep";
+  const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
+  let execution: CommandResult;
+  let activePid: number | undefined;
+  try {
+    execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal, outputLimitBytes, (pid) => {
+      activePid = pid;
+      registerActiveProcess(opts.capability, opts.manifestId, pid);
+    });
+  } catch (error) {
+    execution = { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: error instanceof Error ? error.message : String(error), timeoutMs };
+  } finally {
+    if (activePid !== undefined) unregisterActiveProcess(opts.capability, opts.manifestId, activePid);
+  }
 	try {
 		completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
 	} catch (error) {

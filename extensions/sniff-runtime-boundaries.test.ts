@@ -97,7 +97,8 @@ function analyzerRuntime(calls: AnalyzerCall[], overrides: Partial<SniffInstallR
     resolveOpenGrep: () => resolveHostCommand("opengrep"),
     provisionOpenGrep: async () => { throw new Error("unexpected OpenGrep provisioning"); },
     readLauncher: () => "",
-    run: async (argv, cwd, env, timeoutMs) => {
+    run: async (argv, cwd, env, timeoutMs, _signal, _outputLimitBytes, onSpawn) => {
+      onSpawn?.(12345);
       calls.push({ argv, cwd, env: { ...env }, timeoutMs });
       const stdout = argv[0]?.endsWith("opengrep") && !argv.includes("--version")
         ? '{"results":[]}'
