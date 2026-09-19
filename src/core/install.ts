@@ -313,7 +313,7 @@ async function inspectTool(
       required,
       status: "policy-blocked",
       resolvedPath,
-      remediation: `project-local launcher found at ${resolvedPath}; inventory does not execute project code. Run sniff_run_analyzer after capability authorization, or ${rec.hint}`,
+      remediation: `project-local launcher found at ${resolvedPath}; this is inventory only. Sniff never runs project-local executables, so no Sniff analyzer covers this tool. The operator may run it directly, or ${rec.hint}`,
       attempts: [],
     };
   }
