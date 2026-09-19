@@ -22,9 +22,9 @@ Primary first. Exact invocation + machine-readable flag. Canonical detail in
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| actionlint | **Run recipe:** from repo root, `actionlint -format '{{json .}}' -no-color`. **Flags are single-dash (Go flag pkg) -- `-format`, NOT `--format`; `--format` is the "bad flag" that errors.** The `{{json .}}` arg must be quoted exactly as shown. With no path args it auto-discovers `.github/workflows/`; or pass explicit workflow files. **Exit:** 0 clean · 1 = problems (parse JSON) · 3 = usage error (bad flag) → INVALID, fix the flag. | workflow AST: bad syntax, invalid `needs`/`if`, expr typos; **embeds shellcheck** for `run:` steps | default-on | `sniff_install_tools` with `{"mode":"install","bundles":["infra"]}` |
-| zizmor | `zizmor --format json <workflow>` | GHA security dataflow: `pull_request_target` injection, `persist-credentials`, template injection | opt-in (security-only) | `sniff_install_tools` with `{"mode":"install","bundles":["infra"]}` |
-| pinact | `pinact run --check` | verifies every `uses:` is pinned to a full commit SHA | opt-in (mutating fixer + needs a token) | `sniff_install_tools` with `{"mode":"install","bundles":["infra"]}` |
+| actionlint | **Run recipe:** from repo root, `actionlint -format '{{json .}}' -no-color`. **Flags are single-dash (Go flag pkg) -- `-format`, NOT `--format`; `--format` is the "bad flag" that errors.** The `{{json .}}` arg must be quoted exactly as shown. With no path args it auto-discovers `.github/workflows/`; or pass explicit workflow files. **Exit:** 0 clean · 1 = problems (parse JSON) · 3 = usage error (bad flag) → INVALID, fix the flag. | workflow AST: bad syntax, invalid `needs`/`if`, expr typos; **embeds shellcheck** for `run:` steps | default-on | operator-direct (run documented command; output is not Sniff coverage) |
+| zizmor | `zizmor --format json <workflow>` | GHA security dataflow: `pull_request_target` injection, `persist-credentials`, template injection | opt-in (security-only) | operator-direct (run documented command; output is not Sniff coverage) |
+| pinact | `pinact run --check` | verifies every `uses:` is pinned to a full commit SHA | opt-in (mutating fixer + needs a token) | operator-direct (run documented command; output is not Sniff coverage) |
 
 Notes: `actionlint` is the primary AST linter and already runs `shellcheck` over
 every `run:` body, so do not separately shellcheck a workflow. `zizmor` is the
@@ -89,4 +89,4 @@ the GitHub security-hardening URL as the authority over forcing an OO mapping.
   checkout, script injection via `${{ }}` into `run:`, and over-broad `permissions:`
   enable real supply-chain compromise. **Weight them high; do not soften them.**
 
-**Execution routing:** `actionlint` is operator-direct because it has no `sniff_install_tools` registry entry; invoke its documented command directly. Keep registry-backed rows on `sniff_run_analyzer`.
+**Execution routing:** all tools in this table are operator-direct: invoke each documented command directly. Their output is not Sniff coverage.

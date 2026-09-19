@@ -110,12 +110,16 @@ test("analyzer recipe registry matches security catalog and documented IDs", () 
 		expect(tool?.key).not.toBe("npm-local");
 		expect(["sarif", "lizard-csv", "gitleaks-json", "opengrep-json"]).toContain(recipe.output);
 	}
+	const documentedRecipeIds = (markdown: string, heading: string) => {
+		const headingStart = markdown.indexOf(`## ${heading}`);
+		const nextHeading = markdown.indexOf("\n## ", headingStart + 1);
+		const section = markdown.slice(headingStart, nextHeading === -1 ? undefined : nextHeading);
+		return [...section.matchAll(/`([a-z0-9-]+:[a-z0-9-]+)`/g)].map((match) => match[1]).sort();
+	};
 	const tooling = readFileSync(join(import.meta.dir, "../skills/sniff/references/tooling.md"), "utf8");
-	const documentedToolingIds = registryIds.filter((id) => tooling.includes(`\`${id}\``)).sort();
-	expect(documentedToolingIds).toEqual(registryIds);
+	expect(documentedRecipeIds(tooling, "Where the tiers live (source of truth)")).toEqual(registryIds);
 	const types = readFileSync(join(import.meta.dir, "../docs/sniff-types.md"), "utf8");
-	const documentedTypeIds = [...types.matchAll(/`([a-z]+:[a-z-]+)`/g)].map((match) => match[1]).filter((id) => registryIds.includes(id ?? "")).sort();
-	expect(documentedTypeIds).toEqual(registryIds);
+	expect(documentedRecipeIds(types, "Analyzer recipes")).toEqual(registryIds);
 });
 
 describe("OpenGrep parser contract", () => {
@@ -206,25 +210,32 @@ describe("bounded analyzer output projections", () => {
 		expect(parsed.capture.incomplete).toBe(true);
 		expect(parsed.capture.reason).toContain("escaped");
 	});
-
-	test("projects SARIF results and rejects escaped paths", () => {
-		const root = tempDir("sniff-sarif-target-");
-		mkdirSync(join(root, "src"), { recursive: true });
-		writeFileSync(join(root, "src", "main.ts"), "const value = 1;\n");
-		const parsed = parseSarifOutput(JSON.stringify({ runs: [{ results: [
-			{ ruleId: "security/rule", level: "error", message: { text: "unsafe value" }, locations: [{ physicalLocation: { artifactLocation: { uri: `file://${join(root, "src", "main.ts")}` }, region: { startLine: 3, startColumn: 5 } } }] },
-			{ rule: { id: "outside" }, level: "note", message: { text: "must not escape" }, locations: [{ physicalLocation: { artifactLocation: { uri: "../outside.ts" } } }] },
-		] }] }), root, false, "semgrep:sarif");
-		expect(parsed.observations).toEqual([{
-			ruleId: "security/rule",
-			path: "src/main.ts",
-			start: { line: 3, column: 5 },
-			message: "unsafe value",
-			severity: "HIGH",
-		}]);
-		expect(parsed.capture.incomplete).toBe(true);
-		expect(parsed.capture.reason).toContain("escaped");
-	});
+ 
+		test("projects SARIF results and rejects escaped paths", () => {
+			const root = tempDir("sniff-sarif-target-");
+			mkdirSync(join(root, "src"), { recursive: true });
+			writeFileSync(join(root, "src", "main.ts"), "const value = 1;\n");
+			const parsed = parseSarifOutput(JSON.stringify({ runs: [{ results: [
+				{ ruleId: "security/rule", level: "error", message: { text: "unsafe value" }, locations: [{ physicalLocation: { artifactLocation: { uri: `file://${join(root, "src", "main.ts")}` }, region: { startLine: 3, startColumn: 5 } } }] },
+				{ ruleId: "style/note", level: "note", message: { text: "style note" }, locations: [{ physicalLocation: { artifactLocation: { uri: "src/main.ts" }, region: { startLine: 1, startColumn: 1 } } }] },
+				{ rule: { id: "outside" }, level: "note", message: { text: "must not escape" }, locations: [{ physicalLocation: { artifactLocation: { uri: "../outside.ts" } } }] },
+			] }] }), root, false, "semgrep:sarif");
+			expect(parsed.observations).toEqual([{
+				ruleId: "security/rule",
+				path: "src/main.ts",
+				start: { line: 3, column: 5 },
+				message: "unsafe value",
+				severity: "HIGH",
+			}, {
+				ruleId: "style/note",
+				path: "src/main.ts",
+				start: { line: 1, column: 1 },
+				message: "style note",
+				severity: "LOW",
+			}]);
+			expect(parsed.capture.incomplete).toBe(true);
+			expect(parsed.capture.reason).toContain("escaped");
+		});
 
 	test("fails closed for malformed or truncated output and caps observations", () => {
 		const root = tempDir("sniff-analyzer-bounds-");

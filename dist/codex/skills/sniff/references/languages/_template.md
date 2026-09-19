@@ -22,7 +22,7 @@ in `../tooling.md` -- don't restate them, add only tool-specific detail.
 
 | Tool | Run recipe | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| <primary> | **exact command** + machine-readable flag + how the file set is passed; **config:** auto-uses project config / needs `--config` / no-config fallback; **exit:** 0 clean · N findings (parse) · usage/crash = INVALID (fix+re-run, never "clean"); any gotcha | <dimensions> | default-on | `sniff_install_tools` with `{"mode":"install","bundles":["<bundle>"]}` |
+| <primary> | **exact command** + machine-readable flag + how the file set is passed; **config:** auto-uses project config / needs `--config` / no-config fallback; **exit:** 0 clean · N findings (parse) · usage/crash = INVALID (fix+re-run, never "clean"); any gotcha | <dimensions> | default-on | operator-direct (run documented command; output is not Sniff coverage) |
 | <secondary> | … | <dimensions> | opt-in (reason) | … |
 
 - **Tier** is `default-on` (pre-selected in the Step-2 proposal) or `opt-in`
@@ -68,4 +68,4 @@ non-idiomatic-but-fine patterns the `independent challenge reviewer` should prot
 
 - ...
 
-**Execution routing:** rows whose **Installed via** cell is not `sniff_install_tools` are **operator-direct**: invoke the documented command directly. Only registry-backed rows that name `sniff_install_tools` are dispatched through `sniff_run_analyzer`.
+**Execution routing:** all tools in this table are operator-direct: invoke each documented command directly. Their output is not Sniff coverage.
