@@ -1,5 +1,6 @@
 import { dlopen, FFIType, read } from "bun:ffi";
-import { closeSync, fchmodSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, fchmodSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { parse, resolve, sep } from "node:path";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
@@ -58,10 +59,14 @@ const constantsByPlatform: Record<string, PlatformConstants> = {
   },
 };
 
-function platformConstants(): PlatformConstants {
-  const constants = constantsByPlatform[process.platform];
+export function platformConstants(platformName: string = process.platform): PlatformConstants {
+  const constants = constantsByPlatform[platformName];
   if (!constants) throw new Error("Sniff report persistence requires Darwin or Linux");
   return constants;
+}
+
+export function reportPersistenceSupported(platformName: string = process.platform): boolean {
+  return constantsByPlatform[platformName] !== undefined;
 }
 
 let nativeSymbols: NativeSymbols | undefined;
@@ -264,7 +269,19 @@ export function saveReportEntriesAt(
   const symbols = loadNativeSymbols();
   directory.ensureDirectory();
   const parentFd = directory.directoryFd;
-  const stagingName = `.${reportId}.staging`;
+  const stagingPrefix = `.${reportId}.staging-`;
+  const staleBefore = Date.now() - 60 * 60 * 1_000;
+  for (const name of readdirSync(directory.path)) {
+    if (!name.startsWith(stagingPrefix)) continue;
+    const candidate = resolve(directory.path, name);
+    try {
+      const stat = statSync(candidate);
+      if (stat.isDirectory() && stat.mtimeMs < staleBefore) rmSync(candidate, { recursive: true, force: true });
+    } catch {
+      // Stale cleanup is best effort and must not hide the save operation.
+    }
+  }
+  const stagingName = `${stagingPrefix}${randomBytes(12).toString("hex")}`;
   if (symbols.mkdirat(parentFd, stagingName, constants.mode) < 0) {
     throw operationError("create staging directory", stagingName, errno(symbols), constants);
   }

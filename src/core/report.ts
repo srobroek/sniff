@@ -34,6 +34,7 @@ export interface ToolCoverage {
   status: CoverageStatus;
   notes: string;
   config?: string;
+  version?: string;
 }
 
 export interface SniffFinding {

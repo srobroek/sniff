@@ -984,6 +984,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
   const outputLimitBytes = openGrep ? OPENGREP_MAX_OUTPUT_BYTES : COMMAND_OUTPUT_LIMIT_BYTES;
   let execution: CommandResult;
   let activePid: number | undefined;
+  let completionError: string | undefined;
   try {
     execution = await runtime.run(argv, authorization.target.root, env, timeoutMs, opts.signal, outputLimitBytes, (pid) => {
       activePid = pid;
