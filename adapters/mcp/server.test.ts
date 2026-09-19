@@ -892,18 +892,35 @@ sleep 1; exit 0
 });
 
 describe("shared tool contracts", () => {
-  test("advertised MCP input schemas are field-for-field shared with extension schemas", async () => {
+  test("shared schemas enforce the complete seven-tool contract", async () => {
+    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
+    const required: Record<string, string[]> = {
+      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"], sniff_install_tools: [],
+      sniff_run_analyzer: ["capability", "manifestId", "analyzer"], sniff_report: ["capability", "manifestId", "report"],
+      sniff_read_report_artifact: ["readCapability", "reportId", "relativePath"], sniff_read_analyzer_artifact: ["analyzerResultId", "readCapability"],
+    };
+    const enums: Record<string, string[]> = {
+      sniff_install_tools: ["probe", "diagnose", "list", "install"], sniff_report: ["render", "save"],
+    };
+    for (const [name, schema] of Object.entries(sniffToolInputSchemas)) {
+      expect((schema as { required?: readonly string[] }).required ?? []).toEqual(required[name] ?? []);
+      expect(schema.additionalProperties).toBe(false);
+      const properties = object(schema.properties);
+      for (const value of Object.values(properties)) {
+        expect(typeof value).toBe("object");
+        expect(typeof object(value).description).toBe("string");
+        expect(String(object(value).description).length).toBeGreaterThan(0);
+      }
+      if (enums[name]) expect(object(properties.mode).enum).toEqual(enums[name]);
+    }
+  });
+
+  test("MCP advertises the shared schema objects and they compile", async () => {
     const { tools } = await import("./server.ts");
     const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
-    const expectedProperties: Record<string, string[]> = {
-      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"], sniff_install_tools: ["all", "bundles", "dryRun", "mode", "path"],
-      sniff_run_analyzer: ["analyzer", "capability", "manifestId"], sniff_report: ["capability", "manifestId", "mode", "path", "report"],
-      sniff_read_report_artifact: ["offset", "readCapability", "relativePath", "reportId"], sniff_read_analyzer_artifact: ["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"],
-    };
     for (const tool of tools) {
-      const schema = sniffToolInputSchemas[tool.name as keyof typeof sniffToolInputSchemas];
-      expect(tool.inputSchema).toEqual(schema);
-      expect(Object.keys(object(schema.properties)).sort()).toEqual(expectedProperties[tool.name]?.sort() ?? []);
+      expect(tool.inputSchema).toEqual(sniffToolInputSchemas[tool.name as keyof typeof sniffToolInputSchemas]);
+      new Ajv2020({ strict: false }).compile(tool.inputSchema as Record<string, unknown>);
     }
   });
 
@@ -922,6 +939,7 @@ describe("shared tool contracts", () => {
     expect(sniffReportApproval({ mode: "invalid" })).toBe("write");
     expect(sniffReportApproval({ mode: 1 })).toBe("write");
     expect(sniffIntakeApproval({ input: { target: { kind: "files" } } })).toBe("read");
+    expect(sniffIntakeApproval({ input: { target: { kind: "whole-repo" } } })).toBe("exec");
     expect(sniffIntakeApproval({ input: { target: { kind: "repository" } } })).toBe("exec");
     expect(sniffIntakeApproval({ input: {} })).toBe("exec");
   });
