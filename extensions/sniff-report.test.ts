@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRunManifest } from "../src/core/intake.ts";
@@ -297,6 +297,24 @@ describe("structured Sniff reports", () => {
     expect(() => saveReportArtifacts(artifacts, directory)).toThrow("already exists");
     expect(readdirSync(directory)).toEqual([artifacts.report.reportId]);
     expect(readFileSync(collision, "utf8")).toBe("existing");
+  });
+
+  test("recovers stranded staging directories of either naming shape", () => {
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput()));
+    const directory = mkdtempSync(join(tmpdir(), "sniff-report-staging-"));
+    temporaryDirectories.push(directory);
+    const stale = Date.now() - 2 * 60 * 60 * 1_000;
+    const legacy = join(directory, `.${artifacts.report.reportId}.staging`);
+    const suffixed = join(directory, `.${artifacts.report.reportId}.staging-abandoned`);
+    const fresh = join(directory, `.${artifacts.report.reportId}.staging-inflight`);
+    for (const path of [legacy, suffixed, fresh]) mkdirSync(path);
+    for (const path of [legacy, suffixed]) utimesSync(path, stale / 1_000, stale / 1_000);
+
+    saveReportArtifacts(artifacts, directory);
+    expect(existsSync(legacy)).toBe(false);
+    expect(existsSync(suffixed)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(join(directory, artifacts.report.reportId, "index.json"))).toBe(true);
   });
 
 
