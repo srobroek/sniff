@@ -62,5 +62,7 @@ function loadRecipe(key: string, value: unknown): SniffAnalyzerRecipe {
 	};
 }
 
-export const SNIFF_ANALYZER_RECIPES = Object.fromEntries(Object.entries(recipes).map(([key, value]) => [key, loadRecipe(key, value)])) as Record<string, SniffAnalyzerRecipe>;
-export type SniffAnalyzerRecipeId = keyof typeof SNIFF_ANALYZER_RECIPES;
+export type SniffAnalyzerRecipeId = keyof typeof rawRecipes;
+export const SNIFF_ANALYZER_RECIPES = Object.fromEntries(Object.entries(recipes).map(([key, value]) => [key, loadRecipe(key, value)])) as {
+	readonly [K in SniffAnalyzerRecipeId]: SniffAnalyzerRecipe;
+};
