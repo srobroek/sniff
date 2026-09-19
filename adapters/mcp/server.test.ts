@@ -287,12 +287,22 @@ describe("MCP Sniff server", () => {
         systemicPatterns: [],
       };
       expect(validate({ capability: "capability", manifestId: "manifest-id", report })).toBe(true);
-      expect(object(schema.$defs).reportInput).toBeDefined();
     } finally {
       await client.close();
     }
   });
 
+  test("rejects caller authorization on incomplete intake", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "auth-test", version: "1" } });
+      const result = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { authorization: { granted: true } } } })).result);
+      expect(result.isError).toBe(true);
+      expect(object(result.structuredContent).error).toMatchObject({ code: "invalid_input" });
+    } finally {
+      await client.close();
+    }
+  });
   test("returns a confirmation requirement without elicitation support", async () => {
     const root = repository();
     const client = startClient();
@@ -878,5 +888,68 @@ sleep 1; exit 0
     expect(await client.close()).toBe(0);
     expect(await client.stderr()).toBe("");
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("shared tool contracts", () => {
+  test("shared schemas enforce the complete seven-tool contract", async () => {
+    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
+    const required: Record<string, string[]> = {
+      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"], sniff_install_tools: [],
+      sniff_run_analyzer: ["capability", "manifestId", "analyzer"], sniff_report: ["capability", "manifestId", "report"],
+      sniff_read_report_artifact: ["readCapability", "reportId", "relativePath"], sniff_read_analyzer_artifact: ["analyzerResultId", "readCapability"],
+    };
+    const enums: Record<string, string[]> = {
+      sniff_install_tools: ["probe", "diagnose", "list", "install"], sniff_report: ["render", "save"],
+    };
+    const propertiesByTool: Record<string, string[]> = {
+      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"],
+      sniff_install_tools: ["all", "bundles", "dryRun", "mode", "path"],
+      sniff_run_analyzer: ["analyzer", "capability", "manifestId"],
+      sniff_report: ["capability", "manifestId", "mode", "path", "report"],
+      sniff_read_report_artifact: ["offset", "readCapability", "relativePath", "reportId"],
+      sniff_read_analyzer_artifact: ["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"],
+    };
+    for (const [name, schema] of Object.entries(sniffToolInputSchemas)) {
+      expect((schema as { required?: readonly string[] }).required ?? []).toEqual(required[name] ?? []);
+      expect(schema.additionalProperties).toBe(false);
+      const properties = object(schema.properties);
+      expect(Object.keys(properties).sort()).toEqual(propertiesByTool[name]?.sort() ?? []);
+      for (const value of Object.values(properties)) {
+        expect(typeof value).toBe("object");
+        expect(typeof object(value).description).toBe("string");
+        expect(String(object(value).description).length).toBeGreaterThan(0);
+      }
+      if (enums[name]) expect(object(properties.mode).enum).toEqual(enums[name]);
+    }
+  });
+
+  test("MCP advertises the shared schema objects and they compile", async () => {
+    const { tools } = await import("./server.ts");
+    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
+    for (const tool of tools) {
+      expect(tool.inputSchema).toEqual(sniffToolInputSchemas[tool.name as keyof typeof sniffToolInputSchemas]);
+      new Ajv2020({ strict: false }).compile(tool.inputSchema as Record<string, unknown>);
+    }
+  });
+
+  test("approval policies select the least-privileged tier for representative arguments", async () => {
+    const { sniffInstallApproval, sniffIntakeApproval, sniffReportApproval } = await import("../../src/core/tool-schemas.ts");
+    expect(sniffInstallApproval({ mode: "probe" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "diagnose" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "list" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "install" })).toBe("exec");
+    expect(sniffInstallApproval({})).toBe("read");
+    expect(sniffInstallApproval({ mode: "invalid" })).toBe("exec");
+    expect(sniffInstallApproval({ mode: 1 })).toBe("exec");
+    expect(sniffReportApproval({ mode: "render" })).toBe("read");
+    expect(sniffReportApproval({ mode: "save" })).toBe("write");
+    expect(sniffReportApproval({})).toBe("read");
+    expect(sniffReportApproval({ mode: "invalid" })).toBe("write");
+    expect(sniffReportApproval({ mode: 1 })).toBe("write");
+    expect(sniffIntakeApproval({ input: { target: { kind: "files" } } })).toBe("read");
+    expect(sniffIntakeApproval({ input: { target: { kind: "whole-repo" } } })).toBe("exec");
+    expect(sniffIntakeApproval({ input: { target: { kind: "repository" } } })).toBe("exec");
+    expect(sniffIntakeApproval({ input: {} })).toBe("exec");
   });
 });

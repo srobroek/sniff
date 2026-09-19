@@ -12,7 +12,6 @@ import {
   type JSONRPCMessage, ListToolsRequestSchema,
   McpError,
 } from "@modelcontextprotocol/sdk/types";
-import reportInputSchema from "../../skills/sniff/references/report-input.schema.json" with { type: "json" };
 import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.ts";
 import {
   cancelRunLease,
@@ -35,6 +34,7 @@ import {
 } from "../../src/core/index.ts";
 import type { ReportInput } from "../../src/core/report.ts";
 import { readReportArtifact } from "../../src/core/report-artifact-registry.ts";
+import { sniffToolInputSchemas } from "../../src/core/tool-schemas.ts";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_FRAME_BYTES = 1_048_576;
@@ -199,18 +199,6 @@ export class BoundedStdioTransport implements Transport {
 
 type JsonObject = Record<string, unknown>;
 type ToolResponse = CallToolResult & { readonly structuredContent: JsonObject };
-const reportInputSchemaForTool = (() => {
-  const schema = structuredClone(reportInputSchema) as JsonObject;
-  delete schema.$schema;
-  delete schema.$id;
-  const definitions = schema.$defs !== null && typeof schema.$defs === "object" && !Array.isArray(schema.$defs) ? schema.$defs as JsonObject : {};
-  delete schema.$defs;
-  if (Array.isArray(schema.required)) schema.required = schema.required.filter((field) => field !== "extensions");
-  return {
-    report: { $ref: "#/$defs/reportInput" },
-    $defs: { ...definitions, reportInput: schema },
-  } as const;
-})();
 
 type DigestRequest = {
   readonly digest: string;
@@ -226,7 +214,6 @@ class SniffMcpError extends Error {
 }
 
 const stringSchema = { type: "string" } as const;
-const positiveIntegerSchema = { type: "integer", minimum: 1 } as const;
 const errorSchema = {
   type: "object",
   required: ["ok", "error"],
@@ -240,89 +227,6 @@ const errorSchema = {
     },
   },
   additionalProperties: true,
-} as const;
-
-const historyWindowSchema = {
-  type: "object",
-  oneOf: [
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "base", "head"],
-      properties: { kind: { const: "refs" }, base: stringSchema, head: stringSchema },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "date"],
-      properties: { kind: { const: "since-date" }, date: stringSchema, head: stringSchema },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "count"],
-      properties: { kind: { const: "last-commits" }, count: { type: "integer", minimum: 1 }, head: stringSchema },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind", "release"],
-      properties: { kind: { const: "since-release" }, release: stringSchema, head: stringSchema },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind"],
-      properties: { kind: { const: "previous-release" }, release: stringSchema, head: stringSchema },
-    },
-    {
-      type: "object",
-      additionalProperties: false,
-      required: ["kind"],
-      properties: { kind: { const: "context-aware-default" }, head: stringSchema },
-    },
-  ],
-} as const;
-
-const targetSchema = {
-  type: "object",
-  oneOf: [
-    { type: "object", additionalProperties: false, required: ["kind", "root"], properties: { kind: { const: "whole-repo" }, root: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root"], properties: { kind: { const: "working-tree" }, root: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "paths"], properties: { kind: { const: "files" }, root: stringSchema, paths: { type: "array", items: stringSchema, maxItems: MAX_INPUT_ARRAY_LENGTH } } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "path"], properties: { kind: { const: "directory" }, root: stringSchema, path: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "path"], properties: { kind: { const: "module" }, root: stringSchema, path: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "commit"], properties: { kind: { const: "commit" }, root: stringSchema, commit: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "base", "head"], properties: { kind: { const: "range" }, root: stringSchema, base: stringSchema, head: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "branch"], properties: { kind: { const: "branch" }, root: stringSchema, branch: stringSchema, base: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "root", "ref"], properties: { kind: { const: "ref" }, root: stringSchema, ref: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "repository"], properties: { kind: { const: "repository" }, repository: stringSchema, ref: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "repository", "tag"], properties: { kind: { const: "release" }, repository: stringSchema, tag: stringSchema, previousTag: stringSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "rootOrRepository", "window"], properties: { kind: { const: "history" }, rootOrRepository: stringSchema, window: historyWindowSchema } },
-    { type: "object", additionalProperties: false, required: ["kind", "repository", "number"], properties: { kind: { const: "pr" }, repository: stringSchema, number: { oneOf: [stringSchema, { type: "integer" }] } } },
-    { type: "object", additionalProperties: false, required: ["kind", "repository", "iid"], properties: { kind: { const: "mr" }, repository: stringSchema, iid: { oneOf: [stringSchema, { type: "integer" }] } } },
-  ],
-} as const;
-
-const intakeInputSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    target: targetSchema,
-    intent: { enum: ["audit", "review-change", "release-risk", "history", "plan-only"] },
-    scopeMode: { enum: ["quick", "full", "plan-only"] },
-    objectives: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
-    exclusions: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
-    budget: {
-      type: "object",
-      additionalProperties: false,
-      properties: { maxMinutes: positiveIntegerSchema, maxAnalyzers: positiveIntegerSchema, maxFiles: positiveIntegerSchema },
-    },
-    security: { type: "object" },
-    interactive: { type: "boolean" },
-    // Deliberately not accepted as authority by the core boundary.
-    authorization: { type: "object" },
-  },
 } as const;
 
 const resultSchema = (successProperties: JsonObject) => ({
@@ -366,12 +270,12 @@ const outputSchemas = {
   analyzerArtifact: resultSchema({ analyzerResultId: stringSchema, relativePath: stringSchema, sourcePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
 } as const;
 
-const tools = [
+export const tools = [
   {
     name: "sniff_intake",
     title: "Sniff adaptive intake",
     description: "Resolve the Sniff intake plan, issue a run lease, and return reportTarget for the matching sniff_report payload.",
-    inputSchema: { type: "object", properties: { input: intakeInputSchema }, required: ["input"], additionalProperties: false },
+    inputSchema: sniffToolInputSchemas.sniff_intake,
     outputSchema: outputSchemas.intake,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -379,33 +283,26 @@ const tools = [
     name: "sniff_cancel",
     title: "Cancel Sniff run",
     description: "Cancel an issued Sniff run and release its host-owned materialization.",
-    inputSchema: { type: "object", properties: { capability: stringSchema, manifestId: stringSchema }, required: ["capability", "manifestId"], additionalProperties: false },
+    inputSchema: sniffToolInputSchemas.sniff_cancel,
     outputSchema: outputSchemas.cancel,
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
   },
   {
     name: "sniff_install_tools",
     title: "Sniff install tools",
-    description: "Probe, diagnose, list, or explicitly authorize installation of Sniff analyzer catalog entries.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        mode: { enum: ["probe", "diagnose", "list", "install"] },
-        bundles: { type: "array", items: stringSchema, uniqueItems: true, maxItems: MAX_INPUT_ARRAY_LENGTH },
-        all: { type: "boolean" },
-        dryRun: { type: "boolean" },
-        path: stringSchema,
-      },
-      additionalProperties: false,
-    },
+    description: "Probe, diagnose, and list are read-only inventory modes; only mode=install writes and requires explicit authorization.",
+    inputSchema: sniffToolInputSchemas.sniff_install_tools,
     outputSchema: outputSchemas.install,
+    // MCP ToolAnnotations are static per tool and cannot vary by argument, so the
+    // hint describes the most consequential mode (install). Per-mode approval
+    // tiers exist only on the OMP extension side (extensions/sniff-install-tool.ts).
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
   {
     name: "sniff_run_analyzer",
     title: "Sniff run analyzer",
     description: "Run one analyzer selected by a live Sniff intake capability and its fixed catalogued recipe.",
-    inputSchema: { type: "object", properties: { capability: stringSchema, manifestId: stringSchema, analyzer: stringSchema }, required: ["capability", "manifestId", "analyzer"], additionalProperties: false },
+    inputSchema: sniffToolInputSchemas.sniff_run_analyzer,
     outputSchema: outputSchemas.analyzer,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -413,19 +310,7 @@ const tools = [
     name: "sniff_report",
     title: "Sniff structured report",
     description: "Validate and render or save a report. Copy reportTarget from sniff_intake into report.target, then add languages.",
-    inputSchema: {
-      type: "object",
-      $defs: reportInputSchemaForTool.$defs,
-      properties: {
-        capability: stringSchema,
-        manifestId: stringSchema,
-        mode: { enum: ["render", "save"] },
-        report: reportInputSchemaForTool.report,
-        path: stringSchema,
-      },
-      required: ["capability", "manifestId", "report"],
-      additionalProperties: false,
-    },
+    inputSchema: sniffToolInputSchemas.sniff_report,
     outputSchema: outputSchemas.report,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
@@ -433,12 +318,7 @@ const tools = [
     name: "sniff_read_report_artifact",
     title: "Read Sniff report artifact",
     description: "Read one bounded UTF-8 page from a complete in-process Sniff report artifact using its opaque read capability.",
-    inputSchema: {
-      type: "object",
-      properties: { readCapability: stringSchema, reportId: stringSchema, relativePath: stringSchema, offset: { type: "integer", minimum: 0 } },
-      required: ["readCapability", "reportId", "relativePath"],
-      additionalProperties: false,
-    },
+    inputSchema: sniffToolInputSchemas.sniff_read_report_artifact,
     outputSchema: outputSchemas.reportArtifact,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -446,19 +326,7 @@ const tools = [
     name: "sniff_read_analyzer_artifact",
     title: "Read Sniff analyzer artifact",
     description: "Read one bounded UTF-8 page from complete analyzer observations using an opaque capability; provide relativePath or sourcePath.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        analyzerResultId: stringSchema,
-        readCapability: stringSchema,
-        relativePath: stringSchema,
-        sourcePath: stringSchema,
-        offset: { type: "integer", minimum: 0 },
-        maxBytes: { type: "integer", minimum: 4, maximum: MAX_OUTPUT_TEXT_BYTES },
-      },
-      required: ["analyzerResultId", "readCapability"],
-      additionalProperties: false,
-    },
+    inputSchema: sniffToolInputSchemas.sniff_read_analyzer_artifact,
     outputSchema: outputSchemas.analyzerArtifact,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
@@ -498,6 +366,7 @@ function errorDetails(error: unknown): { code: string; message: string } {
   if (error instanceof SniffMcpError) return { code: error.code, message: error.message };
   if (error instanceof Error && error.name === "AbortError") return { code: "cancelled", message: "The MCP request was cancelled." };
   const message = error instanceof Error ? error.message : "Sniff operation failed";
+  if (message.includes("Caller-provided authorization")) return { code: "invalid_input", message: "The request does not satisfy the Sniff input contract." };
   if (/confirm|elicitation|denied|authorization/i.test(message)) return { code: "confirmation_required", message: "Trusted MCP confirmation was not accepted." };
   if (/capability|manifest|lease|reservation/i.test(message)) return { code: "invalid_capability", message: "The capability or manifest is invalid, expired, or already finalized." };
   if (/input|target|budget|security|mode|bundles|report|path|schema/i.test(message)) return { code: "invalid_input", message: "The request does not satisfy the Sniff input contract." };
@@ -737,8 +606,8 @@ function publicIntakeInterview(input: IntakeInput): SniffIntakePublicResult["int
 
 async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const input = intakeInput(args.input);
-  if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
   const noninteractive = input.interactive === false;
+  if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
   if (noninteractive) {
     if (!input.target || !input.intent) {
       const interview = publicIntakeInterview(input);

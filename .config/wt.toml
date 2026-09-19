@@ -1,0 +1,3 @@
+[merge]
+# Project verification gate: bun run check
+verify = true

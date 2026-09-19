@@ -69,25 +69,6 @@ function fakeRuntime(overrides: Partial<SniffInstallRuntime> = {}): SniffInstall
 	};
 }
 
-function fakeZod(enumCalls: string[][]): { zod: unknown } {
-	const chain: Record<string, unknown> = {};
-	const self = () => chain;
-	chain.string = self;
-	chain.optional = self;
-	chain.describe = self;
-	chain.object = self;
-	chain.array = self;
-	chain.number = self;
-	chain.int = self;
-	chain.nonnegative = self;
-	chain.boolean = self;
-	chain.enum = (values: string[]) => {
-		enumCalls.push(values);
-		return chain;
-	};
-	return { zod: chain };
-}
-
 describe("sniff tool catalog", () => {
 	test("runtime identities are unique and hosted plugins stay metadata", () => {
 		const tools = Object.values(TOOLS).flat();
@@ -1091,10 +1072,10 @@ describe("runSniffInstall", () => {
 
 describe("sniff tools integration", () => {
 	test("registration exposes catalog preflight and atomic analyzer runner", async () => {
-		const enumCalls: string[][] = [];
 		type RegisteredTool = {
 			name: string;
 			description: string;
+			parameters: unknown;
 			execute: (
 				id: string,
 				params: Record<string, unknown>,
@@ -1109,7 +1090,6 @@ describe("sniff tools integration", () => {
 		};
 		const captured = new Map<string, RegisteredTool>();
 		const fakePi = {
-			...fakeZod(enumCalls),
 			registerTool: (definition: RegisteredTool) => {
 				captured.set(definition.name, definition);
 			},
@@ -1120,7 +1100,7 @@ describe("sniff tools integration", () => {
 		expect(captured.get("sniff_run_analyzer")?.description).toContain(
 			"immediately before execution",
 		);
-		expect(enumCalls).toContainEqual(["probe", "diagnose", "list", "install"]);
+		expect((captured.get("sniff_install_tools") as unknown as { parameters: { properties: { mode: { enum: string[] } } } }).parameters.properties.mode.enum).toEqual(["probe", "diagnose", "list", "install"]);
 
 		const dir = tempDir("sniff-int-");
 		const registeredTool = captured.get("sniff_install_tools");
@@ -1145,6 +1125,7 @@ describe("sniff tools integration", () => {
 		type RegisteredTool = {
 			name: string;
 			description: string;
+			parameters: unknown;
 			execute: (
 				id: string,
 				params: Record<string, unknown>,
@@ -1170,10 +1151,8 @@ describe("sniff tools integration", () => {
 			"analyzer-result-test",
 		);
 		const capability = registerAnalyzerArtifacts(artifacts);
-		const enumCalls: string[][] = [];
 		const captured = new Map<string, RegisteredTool>();
 		const fakePi = {
-			...fakeZod(enumCalls),
 			registerTool: (definition: RegisteredTool) => {
 				captured.set(definition.name, definition);
 			},

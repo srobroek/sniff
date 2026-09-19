@@ -9,6 +9,7 @@ import {
   type SniffInstallMode,
   type SniffToolResult,
 } from "../src/core/install.ts";
+import { sniffInstallApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
 function publicPreflight(value: SniffToolResult | null): SniffToolResult | null {
   if (!value) return null;
@@ -156,18 +157,12 @@ type SniffReadAnalyzerArtifactParams = Omit<AnalyzerArtifactReadOptions, "capabi
 };
 
 function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
-  const z = pi.zod;
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_read_analyzer_artifact",
     label: "Read Sniff analyzer artifact",
     description: "Read one UTF-8-safe page from complete analyzer observations using the readCapability returned by sniff_run_analyzer. Provide relativePath or sourcePath.",
-    parameters: z.object({
-      readCapability: z.string().describe("Opaque analyzer artifact read capability returned by sniff_run_analyzer"),
-      analyzerResultId: z.string().describe("Analyzer result ID returned by sniff_run_analyzer"),
-      relativePath: z.string().optional().describe("Artifact relative path from the analyzer result index"),
-      sourcePath: z.string().optional().describe("Normalized source path for direct lookup"),
-      offset: z.number().int().nonnegative().optional().describe("UTF-8 byte offset returned as nextOffset; defaults to zero"),
-    }) as unknown as TSchema,
+    approval: "read",
+    parameters: sniffToolInputSchemas.sniff_read_analyzer_artifact as unknown as TSchema,
     execute: async (_id, params: SniffReadAnalyzerArtifactParams) => {
       try {
         const { readCapability, ...options } = params;
@@ -182,18 +177,12 @@ function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
 }
 
 export default function sniffInstallTool(pi: ExtensionAPI): void {
-  const z = pi.zod;
   pi.registerTool({
     name: "sniff_install_tools",
     label: "Sniff install tools",
     description: "Probe, diagnose, list, or install sniff analyzer catalog entries. Diagnose is inventory-only and never authorizes execution. Managed installs require mise and are re-probed from a Sniff-owned toolkit. Never sudo or bypass trust policy. Default mode is probe.",
-    parameters: z.object({
-      mode: z.enum(["probe", "diagnose", "list", "install"]).optional().describe("probe (default), inventory-only diagnose, list, or install"),
-      bundles: z.array(z.string()).optional().describe("Required/install bundle names: core dup security rust go python js-ts shell sql css data api infra docs"),
-      all: z.boolean().optional().describe("Select every bundle"),
-      dryRun: z.boolean().optional().describe("Print install commands without running them"),
-      path: z.string().optional().describe("Repo cwd for project-local tools"),
-    }) as unknown as TSchema,
+    approval: sniffInstallApproval,
+    parameters: sniffToolInputSchemas.sniff_install_tools as unknown as TSchema,
     execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; path?: string }, signal, _onUpdate, ctx) => {
       try {
         const result = await runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd(), signal });
@@ -209,11 +198,8 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
     name: "sniff_run_analyzer",
     label: "Sniff run analyzer",
     description: "Run one analyzer selected by a live sniff_intake capability. The host revalidates the materialized target and enforces the catalogued fixed recipe immediately before execution.",
-    parameters: z.object({
-      capability: z.string().describe("Opaque capability returned by sniff_intake"),
-      manifestId: z.string().describe("Manifest ID returned by sniff_intake"),
-      analyzer: z.string().describe("Selected analyzer recipe ID from the issued manifest"),
-    }) as unknown as TSchema,
+    approval: "exec",
+    parameters: sniffToolInputSchemas.sniff_run_analyzer as unknown as TSchema,
     execute: async (_id, params: { capability: string; manifestId: string; analyzer: string }, signal) => {
       try {
         const result = await runSniffAnalyzer({ ...params, signal });
