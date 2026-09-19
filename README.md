@@ -80,27 +80,11 @@ Example requests:
 - `Plan a refactor of the payment module, but do not apply it.`
 - `Check these files for hardcoded credentials and configuration values.`
 
-A confirmed run follows this flow:
+The operational sequence and approval contract live in the [Sniff skill](.skill-source/sniff/SKILL.md). It covers intake, target resolution, probing, fixed-recipe analysis, challenge, reporting, artifact paging, and cancellation.
 
-1. Resolve the target and file set.
-2. Detect languages.
-3. Select analyzer recipes.
-4. Probe analyzer availability.
-5. Approve installation.
-6. Run approved analyzers.
-7. If the preview omits observations, page them with `sniff_read_analyzer_artifact`.
-8. Challenge findings in `full` mode.
-9. Render a validated report.
-10. Use `sniff_read_report_artifact` to page complete findings.
-11. Before saving report files, get approval.
+Each artifact page is UTF-8 safe and at most 64 KiB. Continue with `nextOffset` until `eof`. Save approval remains separate from plan, installation, analysis, and refactoring approval.
 
-Each approval has a separate boundary. A denied intake issues no lease. Installation approval does not authorize analysis. Save approval does not authorize a refactor. Use `sniff_cancel` to stop an unfinished run. Expiry and terminal report events also release the host-owned materialization.
-
-If observations are absent from the preview, call `sniff_read_analyzer_artifact`. Pass `readCapability`, `analyzerResultId`, and one `relativePath` or `sourcePath`. Continue from `nextOffset` until `eof`.
-
-After `sniff_report`, call `sniff_read_report_artifact`. Pass its `readCapability`, `reportId`, and descriptor `relativePath`. Continue with the returned `nextOffset` until `eof`.
-
-Registry expiry or eviction ends a read capability. Each page is UTF-8 safe and at most 64 KiB. Responses include `totalBytes` and a SHA-256 digest. Saving to a repository still needs separate approval.
+Read [Getting started](docs/getting-started.md) for installation and the first run. Read [Interviewing](docs/interviewing.md) for adaptive intake. Read [Sniff types](docs/sniff-types.md) for the structured contract. Read [Capabilities](docs/capabilities.md) for implementation and clean-room evidence.
 
 `quick` skips the full sweep and challenge pass. `full` runs every skill step. `plan-only` keeps proposals read-only.
 

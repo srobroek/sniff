@@ -14,7 +14,7 @@ of the main sniff thread and the refactor-challenger. You find and report.
 You receive a **Brief** containing: the target language/format, the file or
 directory scope, the list of tools confirmed installed for this language, and
 the **absolute path** to your language reference doc under the installed sniff
-skill directory. Work only from that path and the other facts in the Brief.
+skill directory. Analyzer observations are supplied by the caller's brief; report missing results as coverage gaps and never invent observations.
 
 ## Method
 
@@ -53,19 +53,7 @@ DEFAULT Notes section: omit when nothing ambiguous or large-scale was observed.
 
 ## Output
 
-L1 STATUS: FINDINGS|CLEAN -- language + scope summary.
-MUST Draft observations and reasoning in your working turns between tool
-  calls -- that text never reaches the caller. Your final message is ONLY
-  the report, composed in one pass, beginning with `STATUS:` as its very
-  first characters. Before sending, check the first line: if anything
-  precedes `STATUS:`, delete it. "L1" is notation, never printed.
-
-Coverage:
-- Tools run: one line per tool (tool: result-summary)
-- Tools skipped (not installed): tool + what it would have caught -- omit if none.
-- Scope: files/dirs scanned.
-
-Findings table: # | file:line | Smell | Source | Evidence | Idiomatic alternative | refactoring.guru smell
-Notes -- omit if empty.
-MUST Never reprint code blocks or file contents.
+STATUS: FINDINGS|CLEAN -- language + scope summary.
+Coverage: tools run, tools skipped with the gaps they would catch, and scanned scope.
+Findings: one line per finding with `file:line`, smell, source, evidence, alternative, and refactoring.guru name. Omit empty sections. Never reprint code or file contents.
 CAP uncapped (findings scale with scope)

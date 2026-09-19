@@ -1,15 +1,14 @@
-# Sniff — hardcoded-value smell rules for opengrep.
+# Sniff hardcoded-value heuristics for OpenGrep.
 #
-# AST-aware replacement for a grep pattern bank: these match string/number
-# LITERALS in code positions that signal a hardcoded value, while ignoring
-# constants, enums, and test files (where fixed values are expected). Run with:
+# These rules inspect string and number literals with regular expressions, plus
+# one structural rule for debug prints. Test-path exclusions are defined per
+# rule; tracked-tech-debt-marker intentionally scans tests.
 #
+# Run with:
 #   opengrep --config "$SNIFF_SKILL_DIR/references/opengrep-rules/hardcoded-values.yml" --json <files>
 #
-# Tune per repo: add paths to `paths.exclude` for generated/vendored trees.
-# These are heuristics surfaced for human judgment, not auto-fixes. Credential
-# detection is intentionally NOT here — use the secrets-scan package (gitleaks/
-# trufflehog) for that; these rules only flag obvious connection-string shapes.
+# These heuristics require human judgment. Credential detection belongs to
+# gitleaks or trufflehog; these rules flag obvious connection-string shapes.
 
 rules:
   - id: hardcoded-ip-address

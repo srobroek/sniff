@@ -24,9 +24,10 @@ const OPENGREP_RULE_SOURCE = join(
 	"hardcoded-values.yml",
 );
 const OPENGREP_RULE_OUTPUTS = [
-	join("dist", "omp", OPENGREP_RULE_NAME),
-	join("dist", "claude", OPENGREP_RULE_NAME),
-	join("dist", "codex", OPENGREP_RULE_NAME),
+  join("src", "core", OPENGREP_RULE_NAME),
+  join("dist", "omp", OPENGREP_RULE_NAME),
+  join("dist", "claude", OPENGREP_RULE_NAME),
+  join("dist", "codex", OPENGREP_RULE_NAME),
 ] as const;
 
 const BUILTIN_MODULES: Record<string, true> = {

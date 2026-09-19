@@ -19,13 +19,15 @@ Read `./references/workflow.md` first. Follow these steps in order:
    - Confirm one resolved plan.
    - Keep the issued capability and manifest ID.
    - Treat remote targets as untrusted.
+
+The intake response issues a capability and manifest ID for one lease-backed materialization. The lease owns the materialization until reporting or cancellation releases it. The report target identifies the persisted report artifact route. Expired or replayed recipes require a new intake and must never be replayed.
 2. Detect the stack.
    - Detect every language and format in the resolved target.
    - Map each one through `./references/languages/index.md`.
 3. Probe tools.
    - Run `sniff_install_tools` in `probe` mode.
    - Show viable tools by language and tier.
-   - Stop unless the brief already authorizes that set.
+   - Probing is safe. Installing needs host confirmation. Without authorization, report the plan and stop.
    - Read `./references/tooling.md` and `./references/installer.md`.
    - For trusted local work, read each governing configuration file.
    - For remote work, do not load executable configuration or install dependencies.
@@ -54,10 +56,11 @@ Read `./references/workflow.md` first. Follow these steps in order:
 - MUST resolve shipped assets through this skill's `references/` directory.
 - MUST run each selected analyzer only through `sniff_run_analyzer`.
 - MUST pass only the issued capability, manifest ID, and recipe ID.
-- MUST run Sniff Bash commands only after the issued capability and one-shot recipe authorization are verified.
 - MUST keep evidence tier separate from impact.
 - MUST preserve challenged findings and coverage data.
 - MUST save only with explicit intent and a path.
+- MUST use `files` or `directory` scope when a non-Git tree cannot support `whole-repo` or `working-tree`; never fall back silently.
+- Artifact pages are UTF-8 safe and at most 64 KiB; continue with `nextOffset` until `eof`.
 - DEFAULT load only references needed by the detected stack.
 
 Modes:

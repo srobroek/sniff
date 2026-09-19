@@ -61,10 +61,6 @@ function rewriteSkillText(contents: string): string {
 			"- MUST resolve shipped assets through `./`.",
 			"- MUST resolve shipped assets through this skill's `references/` directory.",
 		)
-		.replaceAll(
-			"- MUST prefix Sniff Bash commands with `OMP_SNIFF_ACTIVE=1`.",
-			"- MUST run Sniff Bash commands only after the issued capability and one-shot recipe authorization are verified.",
-		);
 }
 
 function collectFiles(
