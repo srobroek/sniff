@@ -1,6 +1,5 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import reportInputSchemaDocument from "../skills/sniff/references/report-input.schema.json";
 import type { PublicReportArtifacts } from "../src/core/report.ts";
 import { type ReportArtifactReadOptions, type ReportArtifactReadResult, readReportArtifact } from "../src/core/report-artifact-registry.ts";
 import {
@@ -9,6 +8,7 @@ import {
   type SniffReportRuntime,
   type SniffReportToolOptions,
 } from "../src/core/report-use-case.ts";
+import { sniffReportApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
 const MAX_MODEL_CONTENT_BYTES = 64 * 1024 - 1;
 
@@ -139,30 +139,13 @@ function runtimeForContext(ctx: ExtensionContext): SniffReportRuntime {
     },
   };
 }
-type JsonSchema = Record<string, unknown> & { readonly $defs?: Record<string, unknown> };
-
-const canonicalReportSchema = reportInputSchemaDocument as JsonSchema;
-const { $schema: _schema, $id: _id, title: _title, $defs: reportDefinitions, ...reportSchema } = canonicalReportSchema;
-const reportToolParameters = {
-  type: "object",
-  $defs: reportDefinitions,
-  properties: {
-    capability: { type: "string", minLength: 1, description: "Opaque capability returned by sniff_intake" },
-    manifestId: { type: "string", minLength: 1, description: "Opaque manifest ID returned by sniff_intake" },
-    mode: { enum: ["render", "save"], description: "render (default) or explicit save" },
-    report: { ...reportSchema, description: "Copy reportTarget from sniff_intake into target, add languages, and omit extensions[sniff.intake] so the host injects it" },
-    path: { type: "string", minLength: 1, description: "Output parent directory required only for save mode" },
-  },
-  required: ["capability", "manifestId", "report"],
-  additionalProperties: false,
-} as unknown as TSchema;
-
 export default function sniffReportTool(pi: ExtensionAPI): void {
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_report",
     label: "Sniff structured report",
     description: "Build a canonical Sniff report for a live sniff_intake capability; the host injects the authenticated manifest when the report extension is omitted and rejects mismatches.",
-    parameters: reportToolParameters,
+    approval: sniffReportApproval,
+    parameters: sniffToolInputSchemas.sniff_report as unknown as TSchema,
     execute: async (_id, params: SniffReportToolOptions, _signal, _onUpdate, ctx) => {
       try {
         const result = await runSniffReportTool({ ...params, runtime: runtimeForContext(ctx) });

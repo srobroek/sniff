@@ -9,6 +9,7 @@ import {
 	type SniffIntakePublicResult,
 } from "../src/core/intake-use-case.ts";
 import { cancelRunLease } from "../src/core/run-registry.ts";
+import { sniffIntakeApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
 function confirmationMessage(request: CanonicalConfirmationRequest): string {
 	const target = request.target;
@@ -57,13 +58,12 @@ function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): Snif
 }
 
 export default function sniffIntakeTool(pi: ExtensionAPI): void {
-	const z = pi.zod;
 	pi.registerTool<TSchema, { readonly ok: boolean; readonly result?: SniffIntakePublicResult; readonly error?: string }>({
 		name: "sniff_intake",
 		label: "Sniff adaptive intake",
 		description: "Resolve the Sniff decision frontier and materialize an immutable target before issuing a validated run manifest. Accepted responses include a bounded confirmation digest, a summary, and reportTarget for the matching sniff_report payload.",
-		approval: "read",
-		parameters: z.object({ input: z.unknown().describe("Adaptive intake request") }) as unknown as TSchema,
+		approval: sniffIntakeApproval,
+		parameters: sniffToolInputSchemas.sniff_intake as unknown as TSchema,
 		execute: async (_id, params: { input: unknown }, _signal, _onUpdate, ctx) => {
 			try {
 				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, true));
@@ -80,11 +80,8 @@ export default function sniffIntakeTool(pi: ExtensionAPI): void {
 		name: "sniff_cancel",
 		label: "Cancel Sniff run",
 		description: "Cancel an issued Sniff run and delete its host-owned temporary materialization exactly once.",
-		approval: "read",
-		parameters: z.object({
-			capability: z.string().describe("Opaque capability returned by sniff_intake"),
-			manifestId: z.string().describe("Manifest ID returned by sniff_intake"),
-		}) as unknown as TSchema,
+		approval: "write",
+		parameters: sniffToolInputSchemas.sniff_cancel as unknown as TSchema,
 		execute: async (_id, params: { capability: string; manifestId: string }) => {
 			try {
 				cancelRunLease(params.capability, params.manifestId);

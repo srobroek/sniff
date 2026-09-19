@@ -287,7 +287,6 @@ describe("MCP Sniff server", () => {
         systemicPatterns: [],
       };
       expect(validate({ capability: "capability", manifestId: "manifest-id", report })).toBe(true);
-      expect(object(schema.$defs).reportInput).toBeDefined();
     } finally {
       await client.close();
     }
@@ -878,5 +877,35 @@ sleep 1; exit 0
     expect(await client.close()).toBe(0);
     expect(await client.stderr()).toBe("");
     rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("shared tool contracts", () => {
+  test("advertised MCP input schemas are field-for-field shared with extension schemas", async () => {
+    const { tools } = await import("./server.ts");
+    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
+    const expectedProperties: Record<string, string[]> = {
+      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"], sniff_install_tools: ["all", "bundles", "dryRun", "mode", "path"],
+      sniff_run_analyzer: ["analyzer", "capability", "manifestId"], sniff_report: ["capability", "manifestId", "mode", "path", "report"],
+      sniff_read_report_artifact: ["offset", "readCapability", "relativePath", "reportId"], sniff_read_analyzer_artifact: ["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"],
+    };
+    for (const tool of tools) {
+      const schema = sniffToolInputSchemas[tool.name as keyof typeof sniffToolInputSchemas];
+      expect(tool.inputSchema).toEqual(schema);
+      expect(Object.keys(object(schema.properties)).sort()).toEqual(expectedProperties[tool.name]?.sort() ?? []);
+    }
+  });
+
+  test("approval policies select the least-privileged tier for representative arguments", async () => {
+    const { sniffInstallApproval, sniffIntakeApproval, sniffReportApproval } = await import("../../src/core/tool-schemas.ts");
+    expect(sniffInstallApproval({ mode: "probe" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "diagnose" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "list" })).toBe("read");
+    expect(sniffInstallApproval({ mode: "install" })).toBe("exec");
+    expect(sniffReportApproval({ mode: "render" })).toBe("read");
+    expect(sniffReportApproval({ mode: "save" })).toBe("write");
+    expect(sniffIntakeApproval({ input: { target: { kind: "files" } } })).toBe("read");
+    expect(sniffIntakeApproval({ input: { target: { kind: "repository" } } })).toBe("exec");
+    expect(sniffIntakeApproval({ input: {} })).toBe("exec");
   });
 });
