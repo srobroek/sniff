@@ -902,10 +902,19 @@ describe("shared tool contracts", () => {
     const enums: Record<string, string[]> = {
       sniff_install_tools: ["probe", "diagnose", "list", "install"], sniff_report: ["render", "save"],
     };
+    const propertiesByTool: Record<string, string[]> = {
+      sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"],
+      sniff_install_tools: ["all", "bundles", "dryRun", "mode", "path"],
+      sniff_run_analyzer: ["analyzer", "capability", "manifestId"],
+      sniff_report: ["capability", "manifestId", "mode", "path", "report"],
+      sniff_read_report_artifact: ["offset", "readCapability", "relativePath", "reportId"],
+      sniff_read_analyzer_artifact: ["analyzerResultId", "maxBytes", "offset", "readCapability", "relativePath", "sourcePath"],
+    };
     for (const [name, schema] of Object.entries(sniffToolInputSchemas)) {
       expect((schema as { required?: readonly string[] }).required ?? []).toEqual(required[name] ?? []);
       expect(schema.additionalProperties).toBe(false);
       const properties = object(schema.properties);
+      expect(Object.keys(properties).sort()).toEqual(propertiesByTool[name]?.sort() ?? []);
       for (const value of Object.values(properties)) {
         expect(typeof value).toBe("object");
         expect(typeof object(value).description).toBe("string");
