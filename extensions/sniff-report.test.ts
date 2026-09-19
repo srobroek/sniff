@@ -235,6 +235,15 @@ describe("structured Sniff reports", () => {
     );
   });
 
+  test("preserves the probed tool version on coverage entries", () => {
+    const input = reportInput();
+    input.coverage = [{ dimension: "complexity", tool: "lizard", analysisClass: "local", status: "ran", notes: "Probe completed.", version: "1.17.0" }];
+    const report = buildSniffReport(input);
+    expect(report.coverage).toEqual([expect.objectContaining({ tool: "lizard", version: "1.17.0" })]);
+    expect(JSON.parse(createReportArtifacts(report).coverageJson)).toEqual(expect.arrayContaining([expect.objectContaining({ version: "1.17.0" })]));
+    expect(renderSniffMarkdown(report)).toContain("version 1.17.0");
+  });
+
   test("canonicalizes equivalent object and collection order", () => {
     const firstInput = reportInput([finding(), finding({ stableKey: "review:second", location: { path: "src/second.ts", line: 3, anchor: "second" } })]);
     firstInput.extensions = { zeta: { second: 2, first: 1 }, alpha: true };

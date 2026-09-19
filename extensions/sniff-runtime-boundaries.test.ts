@@ -3,12 +3,12 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { runSniffAnalyzer, type SniffInstallRuntime } from "../src/core/install.ts";
+import { runSniffAnalyzer, runSniffInstall, type SniffInstallRuntime } from "../src/core/install.ts";
 import { createRunManifest, type RunManifest } from "../src/core/intake.ts";
 import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePublicResult, type SniffIntakeToolResult } from "../src/core/intake-use-case.ts";
 import type { ReportInput } from "../src/core/report.ts";
 import { runSniffReportTool } from "../src/core/report-use-case.ts";
-import { authorizeAnalyzerRun, cancelRunLease, issueRunLease, releaseAllRunLeases } from "../src/core/run-registry.ts";
+import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, releaseAllRunLeases, validateReportCoverage } from "../src/core/run-registry.ts";
 import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../src/core/target.ts";
 import { detectProvider, withResolvedTarget } from "../src/core/target-provider.ts";
 import sniffIntakeExtension from "./sniff-intake-tool.ts";
@@ -51,7 +51,7 @@ function reportInput(manifest: RunManifest): ReportInput {
   };
 }
 
-function localLease(options: { remote?: boolean; ttlMs?: number; now?: () => number; files?: readonly string[]; kind?: RunManifest["resolvedTarget"]["kind"]; budget?: RunManifest["budget"]; removeRootOnRelease?: boolean } = {}) {
+function localLease(options: { remote?: boolean; ttlMs?: number; now?: () => number; files?: readonly string[]; kind?: RunManifest["resolvedTarget"]["kind"]; budget?: RunManifest["budget"]; removeRootOnRelease?: boolean; onRelease?: () => void } = {}) {
   const root = mkdtempSync(join(tmpdir(), "sniff-lease-target-"));
   temporary.push(root);
   const files = options.files ?? ["a.ts"];
@@ -70,6 +70,7 @@ function localLease(options: { remote?: boolean; ttlMs?: number; now?: () => num
     target: manifest.resolvedTarget,
     release: () => {
       releases += 1;
+      options.onRelease?.();
       if (options.removeRootOnRelease) rmSync(root, { recursive: true, force: true });
     },
   }, { ttlMs: options.ttlMs, now: options.now });
@@ -562,6 +563,92 @@ describe("adaptive runtime boundaries", () => {
     expect(await runSniffAnalyzer({ capability: overrun.lease.capability, manifestId: overrun.lease.manifestId, analyzer: "lizard:complexity", runtime })).toMatchObject({ ok: false, outcome: "not-run" });
     cancelRunLease(overrun.lease.capability, overrun.lease.manifestId);
   });
+  test("terminates a pending analyzer before releasing its target and home", async () => {
+    const order: string[] = [];
+    const leaseFixture = localLease({ remote: true, removeRootOnRelease: true, onRelease: () => {
+      order.push("releaseTarget");
+      expect(existsSync(leaseFixture.root)).toBe(true);
+    } });
+    const calls: AnalyzerCall[] = [];
+    const { promise: pending, resolve: resolveRun } = Promise.withResolvers<void>();
+    const { promise: spawned, resolve: resolveSpawned } = Promise.withResolvers<void>();
+    const base = analyzerRuntime(calls);
+    const runtime = analyzerRuntime(calls, {
+      resolveCommand: base.resolveCommand,
+      run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
+        if (argv.includes("--csv")) {
+          onSpawn?.(54321);
+          resolveSpawned();
+          await pending;
+        }
+        return { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
+      },
+    });
+    const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
+      if (pid === -54321 || pid === 54321) order.push("kill");
+      return true;
+    }) as typeof process.kill);
+    try {
+      const resultPromise = runSniffAnalyzer({ capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
+      await spawned;
+      cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+      order.push("home-check");
+      expect(order).toEqual(["kill", "releaseTarget", "home-check"]);
+      resolveRun();
+      await resultPromise;
+      expect(existsSync(leaseFixture.root)).toBe(false);
+    } finally {
+      kill.mockRestore();
+      resolveRun?.();
+    }
+  });
+
+  test("fails an over-budget reservation and rejects ran coverage", () => {
+    const startedAt = Date.parse("2026-09-11T00:00:00Z");
+    let now = startedAt;
+    const leaseFixture = localLease({ budget: { maxMinutes: 1 }, now: () => now });
+    const authorization = authorizeAnalyzerRun(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity");
+    prepareAnalyzerSpawn(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId);
+    now += 60_001;
+    expect(() => completeAnalyzerReservation(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId)).toThrow("Sniff analyzer exceeded the manifest maxMinutes budget");
+    expect(() => validateReportCoverage(leaseFixture.lease.capability, leaseFixture.lease.manifestId, [{ tool: "lizard", status: "ran" }])).toThrow("Report coverage claims analyzer lizard without a completed reservation");
+    cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+  });
+
+  test("serializes concurrent toolkit installs and re-probes the loser", async () => {
+    const cache = mkdtempSync(join(tmpdir(), "sniff-shared-toolkit-"));
+    temporary.push(cache);
+    const host = mkdtempSync(join(tmpdir(), "sniff-shared-host-"));
+    temporary.push(host);
+    let installed = false;
+    const installCalls: string[][] = [];
+    const makeRuntime = (): SniffInstallRuntime => ({
+      toolkitCacheRoot: cache,
+      resolveCommand: (bin) => bin === "mise" ? join(host, "mise") : installed ? join(host, bin) : null,
+      readLauncher: () => "",
+      resolveOpenGrep: () => installed ? join(host, "opengrep") : null,
+      provisionOpenGrep: async () => { throw new Error("unexpected OpenGrep provisioning"); },
+      run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes) => {
+        if (argv[0] === "mise" && argv.includes("install")) {
+          installCalls.push(argv);
+          installed = true;
+        }
+        const probing = argv.at(-1) === "--version";
+        return { argv, exitCode: 0, stdout: probing ? "tool 1.2.3\\n" : "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
+      },
+      freshEnvironment: async (_cwd, env) => ({ env, source: "mise" }),
+    });
+    const [first, second] = await Promise.all([
+      runSniffInstall({ mode: "install", bundles: ["core"], cwd: host, runtime: makeRuntime() }),
+      runSniffInstall({ mode: "install", bundles: ["core"], cwd: host, runtime: makeRuntime() }),
+    ]);
+    expect(installCalls).toHaveLength(1);
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    const loser = first.tools.some((tool) => tool.install) ? second : first;
+    expect(loser.tools.every((tool) => tool.status === "usable")).toBe(true);
+  });
+
 
   test("passively expires an abandoned lease exactly once", () => {
     vi.useFakeTimers();
