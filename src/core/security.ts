@@ -93,7 +93,8 @@ function scopeCompatibility(name: SniffAnalyzerRecipeId, target: ResolvedTarget 
   if (!target) return undefined;
   const recipe: SniffAnalyzerRecipe = SNIFF_ANALYZER_RECIPES[name];
   if (recipe.scope === "repository-wide") {
-    return target.kind === "repository" || target.kind === "whole-repo" ? undefined : "Analyzer requires an explicitly repository-wide target.";
+    // A history target is a repository-wide walk bounded by its window; trust gating happens at authorization.
+    return target.kind === "repository" || target.kind === "whole-repo" || target.kind === "history" ? undefined : "Analyzer requires an explicitly repository-wide target.";
   }
   if (target.files.length === 0) return "Exact target contains no analyzable files; scope was not widened.";
   if (recipe.fileExtensions && !target.files.some((file) => recipe.fileExtensions?.includes(extname(file).toLowerCase()))) {

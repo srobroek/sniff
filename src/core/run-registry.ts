@@ -90,10 +90,14 @@ function finishRelease(record: LeaseRecord): void {
   }
 }
 
+/** Expiry cleanup is best-effort: a failed target release or home removal must never surface as an unhandled rejection. */
+function swallowReleaseFailure(): void {}
+
 /**
  * Detaches a lease, then terminates every child it spawned and waits for their exits before
  * releasing the target and deleting the home, so no analyzer can write into a released tree.
- * Leases with no live child release synchronously; the returned promise settles once cleanup ran.
+ * Leases with no live child release synchronously; the returned promise settles once cleanup ran
+ * and rejects, never throws, when release fails.
  */
 function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: string): Promise<void> {
   if (activeLeases.get(record.capability) !== record) return record.pendingRelease ?? Promise.resolve();
@@ -103,8 +107,12 @@ function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: strin
   const tracked = [...record.activeProcesses.values()];
   record.activeProcesses.clear();
   if (tracked.length === 0) {
-    finishRelease(record);
-    return Promise.resolve();
+    try {
+      finishRelease(record);
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(error);
+    }
   }
   const pending = Promise.all(tracked.map((spawned) => terminateAndAwait(spawned))).then(() => {
     finishRelease(record);
@@ -121,7 +129,7 @@ function activeLease(capability: string, manifestId: string): LeaseRecord {
   }
   if (record.manifestId !== manifestId) throw new Error("Sniff run capability does not match the manifest ID");
   if (record.now() >= record.expiresAt) {
-    void releaseRecord(record, "expired");
+    releaseRecord(record, "expired").catch(swallowReleaseFailure);
     throw new Error("Sniff run capability expired");
   }
   return record;
@@ -216,11 +224,8 @@ export function issueRunLease(
   };
   activeLeases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
-    try {
-      if (activeLeases.get(capability) === record) void releaseRecord(record, "expired");
-    } catch {
-      // Expiry is best-effort cleanup and must never crash the extension host.
-    }
+    // Expiry is best-effort cleanup and must never crash the extension host.
+    if (activeLeases.get(capability) === record) releaseRecord(record, "expired").catch(swallowReleaseFailure);
   }, Math.max(0, expiresAt - now()));
   record.expiryTimer.unref();
   return { capability, manifestId: manifest.manifestId, expiresAt: new Date(expiresAt).toISOString() };

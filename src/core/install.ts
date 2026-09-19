@@ -834,8 +834,6 @@ export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnviron
   for (;;) {
     try {
       mkdirSync(lockPath);
-      writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
-      break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       // Only a lock whose owner process is gone may be stolen; a slow live owner keeps its lock.
@@ -850,6 +848,15 @@ export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnviron
       const poll = Promise.withResolvers<void>();
       setTimeout(poll.resolve, TOOLKIT_LOCK_POLL_MS);
       await poll.promise;
+      continue;
+    }
+    try {
+      writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
+      break;
+    } catch (error) {
+      // An ownerless lock directory would block every later installer, so never leave one behind.
+      rmSync(lockPath, { recursive: true, force: true });
+      throw error;
     }
   }
   try {

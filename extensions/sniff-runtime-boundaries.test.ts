@@ -782,7 +782,7 @@ describe("adaptive runtime boundaries", () => {
   });
 
   test("bounds a gitleaks history scan by its captured window and reports an unbounded scan honestly", async () => {
-    const bounded = localLease({ kind: "whole-repo", history: { window: { kind: "since-release", release: "v1" }, capturedWindow: { kind: "refs", base: sha("b"), head: sha("a") }, commits: [sha("a")] } });
+    const bounded = localLease({ kind: "history", history: { window: { kind: "since-release", release: "v1" }, capturedWindow: { kind: "refs", base: sha("b"), head: sha("a") }, commits: [sha("a")] } });
     const boundedCalls: AnalyzerCall[] = [];
     const boundedResult = await runSniffAnalyzer({ capability: bounded.lease.capability, manifestId: bounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(boundedCalls) });
     const boundedArgv = boundedCalls.at(-1)?.argv ?? [];
@@ -790,7 +790,7 @@ describe("adaptive runtime boundaries", () => {
     expect(boundedResult.report).not.toContain("unbounded");
     await cancelRunLease(bounded.lease.capability, bounded.lease.manifestId);
 
-    const unbounded = localLease({ kind: "whole-repo", history: { window: { kind: "context-aware-default" }, commits: [sha("a")] } });
+    const unbounded = localLease({ kind: "history", history: { window: { kind: "context-aware-default" }, commits: [sha("a")] } });
     const unboundedCalls: AnalyzerCall[] = [];
     const unboundedResult = await runSniffAnalyzer({ capability: unbounded.lease.capability, manifestId: unbounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(unboundedCalls) });
     expect(unboundedCalls.at(-1)?.argv).not.toContain("--log-opts");
@@ -912,6 +912,17 @@ describe("adaptive runtime boundaries", () => {
       objectives: ["correctness-and-resilience"],
       budget: { maxMinutes: 5 },
     } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    const historyManifest = history.manifest;
+    const historyLease = history.lease;
+    if (!historyManifest || !historyLease) throw new Error("history intake produced no lease");
+    expect(historyManifest.resolvedTarget.kind).toBe("history");
+    expect(historyManifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("selected");
+    const gitleaksCalls: AnalyzerCall[] = [];
+    await runSniffAnalyzer({ capability: historyLease.capability, manifestId: historyLease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(gitleaksCalls) });
+    const gitleaksArgv = gitleaksCalls.at(-1)?.argv ?? [];
+    const captured = historyManifest.resolvedTarget.history?.capturedWindow;
+    if (captured?.kind !== "refs") throw new Error(`expected captured refs window, got ${JSON.stringify(captured)}`);
+    expect(gitleaksArgv[gitleaksArgv.indexOf("--log-opts") + 1]).toBe(`${captured.base}..${captured.head}`);
     expect((await completeReport(history)).artifacts.report.target.kind).toBe("history");
 
     const gitlabRepository = "https://gitlab.com/acme/repo";
