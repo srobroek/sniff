@@ -26,7 +26,7 @@ jobs:
         run: |
           set -euo pipefail
           baseline=$(node -p "require('./package.json').devDependencies['@oh-my-pi/pi-coding-agent']")
-          latest=$(curl --fail --silent --show-error https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest | jq -r .version)
+          latest=$(curl --fail --silent --show-error --max-time 30 --retry 3 https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest | jq -r .version)
           baseline_major=${baseline%%.*}
           baseline_minor=${baseline#*.}
           baseline_minor=${baseline_minor%%.*}
@@ -46,7 +46,7 @@ jobs:
           fi
           jq -n --arg title "$title" --arg body "The latest @oh-my-pi/pi-coding-agent release is $latest. Review compatibility before updating the synchronized OMP pins." \
             '{title: $title, body: $body}' |
-            curl --fail --silent --show-error -X POST \
+            curl --fail --silent --show-error --max-time 30 --retry 3 -X POST \
               -H "Authorization: Bearer $GH_TOKEN" \
               -H "Accept: application/vnd.github+json" \
               -H "Content-Type: application/json" \
