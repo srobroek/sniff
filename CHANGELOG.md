@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/srobroek/sniff/compare/sniff-v0.2.3...sniff-v0.3.0) (2026-09-19)
+
+
+### Features
+
+* declarative analyzer recipes with a generic SARIF ingester ([#32](https://github.com/srobroek/sniff/issues/32)) ([18b2440](https://github.com/srobroek/sniff/commit/18b2440b8a6069076489c64a2f5ec788f4051d26))
+
+
+### Bug Fixes
+
+* argument-dependent approval tiers and one tool schema authority ([#30](https://github.com/srobroek/sniff/issues/30)) ([2c5acc9](https://github.com/srobroek/sniff/commit/2c5acc9802d90802d7169cb2f4c889127ecb1cdf))
+* harden analyzer lifecycle, toolkit locking, and artifact retention ([#29](https://github.com/srobroek/sniff/issues/29)) ([284c6ed](https://github.com/srobroek/sniff/commit/284c6ed86c14c4b6d35f7541cecf69d8cc32cd39))
+
 ## [0.2.3](https://github.com/srobroek/sniff/compare/sniff-v0.2.2...sniff-v0.2.3) (2026-09-13)
 
 
