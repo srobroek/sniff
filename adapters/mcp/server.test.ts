@@ -292,6 +292,17 @@ describe("MCP Sniff server", () => {
     }
   });
 
+  test("rejects caller authorization on incomplete intake", async () => {
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "auth-test", version: "1" } });
+      const result = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { authorization: { granted: true } } } })).result);
+      expect(result.isError).toBe(true);
+      expect(object(result.structuredContent).error).toMatchObject({ code: "invalid_input" });
+    } finally {
+      await client.close();
+    }
+  });
   test("returns a confirmation requirement without elicitation support", async () => {
     const root = repository();
     const client = startClient();
@@ -902,8 +913,14 @@ describe("shared tool contracts", () => {
     expect(sniffInstallApproval({ mode: "diagnose" })).toBe("read");
     expect(sniffInstallApproval({ mode: "list" })).toBe("read");
     expect(sniffInstallApproval({ mode: "install" })).toBe("exec");
+    expect(sniffInstallApproval({})).toBe("read");
+    expect(sniffInstallApproval({ mode: "invalid" })).toBe("exec");
+    expect(sniffInstallApproval({ mode: 1 })).toBe("exec");
     expect(sniffReportApproval({ mode: "render" })).toBe("read");
     expect(sniffReportApproval({ mode: "save" })).toBe("write");
+    expect(sniffReportApproval({})).toBe("read");
+    expect(sniffReportApproval({ mode: "invalid" })).toBe("write");
+    expect(sniffReportApproval({ mode: 1 })).toBe("write");
     expect(sniffIntakeApproval({ input: { target: { kind: "files" } } })).toBe("read");
     expect(sniffIntakeApproval({ input: { target: { kind: "repository" } } })).toBe("exec");
     expect(sniffIntakeApproval({ input: {} })).toBe("exec");

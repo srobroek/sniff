@@ -293,6 +293,9 @@ export const tools = [
     description: "Probe, diagnose, and list are read-only inventory modes; only mode=install writes and requires explicit authorization.",
     inputSchema: sniffToolInputSchemas.sniff_install_tools,
     outputSchema: outputSchemas.install,
+    // MCP ToolAnnotations are static per tool and cannot vary by argument, so the
+    // hint describes the most consequential mode (install). Per-mode approval
+    // tiers exist only on the OMP extension side (extensions/sniff-install-tool.ts).
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   },
   {
@@ -604,6 +607,7 @@ function publicIntakeInterview(input: IntakeInput): SniffIntakePublicResult["int
 async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const input = intakeInput(args.input);
   const noninteractive = input.interactive === false;
+  if (input.authorization) throw new SniffMcpError("invalid_input", "Caller-provided authorization is not accepted");
   if (noninteractive) {
     if (!input.target || !input.intent) {
       const interview = publicIntakeInterview(input);
