@@ -114,6 +114,7 @@ export function readReportArtifact(options: ReportArtifactReadOptions, now = Dat
   if (entry.reportId !== options.reportId) throw new Error("Sniff report artifact capability does not match report ID");
   const descriptor = entry.descriptors.get(options.relativePath);
   const source = entry.contents.get(options.relativePath);
+  if (!descriptor || source === undefined) throw new Error(`Unknown Sniff report artifact: ${options.relativePath}`);
   entry.expiresAt = Math.min(entry.createdAt + REPORT_ARTIFACT_MAX_AGE_MS, now + REPORT_ARTIFACT_IDLE_TTL_MS);
 
   const offset = options.offset ?? 0;

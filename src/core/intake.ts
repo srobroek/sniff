@@ -1,7 +1,7 @@
-import { reportPersistenceSupported } from "./report-native-persistence.ts";
 import { createHash } from "node:crypto";
 import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./objectives.ts";
-import { type SecurityAnalyzerDisposition, type SecurityRequest, securityExclusions, selectSecurityAnalyzers, validateAnalyzerDispositions } from "./security.ts";
+import { reportPersistenceSupported } from "./report-native-persistence.ts";
+import { type SecurityAnalyzerDisposition, type SecurityRequest, securityExclusions, selectSecurityAnalyzers, type TargetTrust, validateAnalyzerDispositions } from "./security.ts";
 import { type ResolvedTarget, type TargetRequest, validateRepository } from "./target.ts";
 
 export type ScopeMode = "quick" | "full" | "plan-only";

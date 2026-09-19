@@ -271,7 +271,13 @@ export function saveReportEntriesAt(
   const parentFd = directory.directoryFd;
   const stagingPrefix = `.${reportId}.staging-`;
   const staleBefore = Date.now() - 60 * 60 * 1_000;
-  for (const name of readdirSync(directory.path)) {
+  let stagingEntries: string[] = [];
+  try {
+    stagingEntries = readdirSync(directory.path);
+  } catch {
+    // The approved parent may have been renamed; the open directory fd remains authoritative.
+  }
+  for (const name of stagingEntries) {
     if (!name.startsWith(stagingPrefix)) continue;
     const candidate = resolve(directory.path, name);
     try {

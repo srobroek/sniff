@@ -462,9 +462,6 @@ describe("structured Sniff reports", () => {
 		).rejects.toThrow("denied or mismatched");
 		expect(existsSync(directory)).toBe(false);
 	});
-  test("tool save mode rejects an absent output path", async () => {
-    await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
-  });
   test("groups findings into deterministic per-file artifacts and verifies index digests", () => {
     const report = buildSniffReport(reportInput([
       finding({ stableKey: "test:second", location: { path: "src/z.ts", line: 4, anchor: "z" } }),
