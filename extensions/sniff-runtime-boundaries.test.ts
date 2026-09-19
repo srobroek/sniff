@@ -527,7 +527,7 @@ describe("adaptive runtime boundaries", () => {
     expect((await runSniffAnalyzer({ capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
     expect((await runSniffAnalyzer({ capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("maxAnalyzers");
     const fileBound = localLease({ files: ["a.ts", "b.ts"], budget: { maxFiles: 1 } });
-    expect((await runSniffAnalyzer({ capability: fileBound.lease.capability, manifestId: fileBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("maxFiles");
+    expect((await runSniffAnalyzer({ capability: fileBound.lease.capability, manifestId: fileBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).outcome).toBe("incomplete-output");
     cancelRunLease(fileBound.lease.capability, fileBound.lease.manifestId);
     expect(() => localLease({ budget: { maxAnalyzers: 0 } })).toThrow("positive finite integer");
   });

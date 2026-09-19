@@ -50,6 +50,8 @@ export type AnalyzerRunAuthorization = {
   readonly target: ResolvedTarget;
   readonly recipe: SniffAnalyzerRecipe;
   readonly argv: readonly string[];
+  readonly operands: readonly string[];
+  readonly maxFiles?: number;
   readonly acceptedExitCodes: readonly number[];
   readonly home: string;
   readonly trust: RunManifest["route"]["trust"];
@@ -132,13 +134,13 @@ function authorizedTarget(record: LeaseRecord, recipe: SniffAnalyzerRecipe): { t
       ? target.files.filter((file) => recipe.fileExtensions?.includes(extname(file).toLowerCase()))
       : [...target.files];
     if (operands.length === 0) throw new Error(`Analyzer ${recipe.id} has no compatible files in the exact target scope`);
-  } else if (recipe.scope === "repository-wide" && target.kind !== "repository" && target.kind !== "whole-repo") {
+  } else if (recipe.scope === "repository-wide" && target.kind !== "repository" && target.kind !== "whole-repo" && target.kind !== "history") {
     throw new Error(`Analyzer ${recipe.id} requires an explicitly repository-wide target`);
   } else if (recipe.scope === "bounded-history" && target.kind !== "history") {
     throw new Error(`Analyzer ${recipe.id} requires an explicitly bounded history target`);
   }
   const accessedFiles = recipe.scope === "scoped-files" ? operands.length : target.files.length;
-  if (record.manifest.budget.maxFiles !== undefined && accessedFiles > record.manifest.budget.maxFiles) {
+  if (recipe.scope !== "scoped-files" && record.manifest.budget.maxFiles !== undefined && accessedFiles > record.manifest.budget.maxFiles) {
     throw new Error(`Analyzer ${recipe.id} exceeds the manifest maxFiles budget`);
   }
   return { target, operands };
@@ -162,6 +164,8 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
     target,
     recipe,
     argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...("targetSeparator" in recipe ? recipe.targetSeparator : ["--"]), ...operands] : [])],
+    operands,
+    ...(record.manifest.budget.maxFiles !== undefined ? { maxFiles: record.manifest.budget.maxFiles } : {}),
     acceptedExitCodes: recipe.acceptedExitCodes,
     home: record.home,
     trust: record.manifest.route.trust,
