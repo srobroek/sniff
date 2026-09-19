@@ -117,17 +117,23 @@ bounded targets.
 ### opengrep -- AST pattern + intra-file dataflow, 30+ languages
 - **Dimensions:** anti-patterns, security, hardcoded values, custom smells.
 - **Class:** local (intra-file rules) -- scope to the file list.
-- **Invocation:** the shipped ruleset is under `./references/opengrep-rules/`,
-  not the target repo -- and Step 3 runs tools with cwd = the target (or a worktree).
-  So ALWAYS pass it as an absolute path, or opengrep silently matches nothing (the
-  worst failure: looks clean). Resolve the installed sniff skill directory, then:
+- **Invocation:** the shipped ruleset is authored at
+  `.skill-source/sniff/references/opengrep-rules/hardcoded-values.yml` in the Sniff
+  repository; the installed skill copy under `./references/opengrep-rules/`
+  and `src/core/sniff-opengrep-hardcoded-values.yml` are generated from it. It lives
+  in the skill, not the target repo -- and Step 3 runs tools with cwd = the target (or
+  a worktree). So ALWAYS pass it as an absolute path, or opengrep silently matches
+  nothing (the worst failure: looks clean). Resolve the installed sniff skill
+  directory, then:
   `opengrep scan --config "$SNIFF_SKILL_DIR/references/opengrep-rules/hardcoded-values.yml" --json --no-rewrite-rule-ids --disable-version-check <files>`
   Registry sweep (no shipped asset, network): `opengrep scan --config auto --json --no-rewrite-rule-ids <files>`.
   The same rule applies to any bundled-asset path: absolutize against the installed
   skill directory before use, because cwd is the target, not the skill.
 - **Overlap:** the writable layer; complements every native linter. Highest
-  leverage single cross-language install. Replaces any grep-based hardcoded-value
-  scan with AST-aware matching (ignores consts, enums, test files).
+  leverage single cross-language install. The shipped hardcoded-values rules are
+  regex heuristics over string and number literals plus one structural debug-print
+  rule; test-path exclusions are per rule, and `tracked-tech-debt-marker` scans
+  tests on purpose. Custom rules can add real AST matching.
 
 ### lizard -- complexity metrics, language-agnostic
 - **Dimensions:** cyclomatic complexity, function length, parameter count, token count.

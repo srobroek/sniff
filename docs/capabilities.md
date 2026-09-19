@@ -63,6 +63,7 @@ Plugin manifests live in these files:
 - `.omp-plugin/plugin.json`
 - `.claude-plugin/plugin.json`
 - `.agents/plugins/marketplace.json`
+- `dist/codex/plugin.json`
 
 Generated skill evidence uses these paths:
 
@@ -72,8 +73,6 @@ Generated skill evidence uses these paths:
 - `.claude/skills/sniff/`
 - `.agents/skills/sniff/`
 - `dist/codex/skills/sniff/`
-- `dist/codex/plugin.json`
-- `dist/codex/mcp.json`
 
 Run the focused protocol suite with this command:
 

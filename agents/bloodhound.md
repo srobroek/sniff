@@ -53,7 +53,6 @@ DEFAULT Notes section: omit when nothing ambiguous or large-scale was observed.
 
 ## Output
 
-STATUS: FINDINGS|CLEAN -- language + scope summary.
-Coverage: tools run, tools skipped with the gaps they would catch, and scanned scope.
+STATUS: FINDINGS|CLEAN -- language + scope summary, then Coverage: tools run, tools skipped with the gaps they would catch, and scanned scope.
 Findings: one line per finding with `file:line`, smell, source, evidence, alternative, and refactoring.guru name. Omit empty sections. Never reprint code or file contents.
 CAP uncapped (findings scale with scope)
