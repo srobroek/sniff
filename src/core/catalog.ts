@@ -45,19 +45,6 @@ export type ToolRec = {
 	readonly securityTier?: "project-native" | "lightweight-static" | "deep-static";
 };
 
-export type SniffAnalyzerRecipe = {
-	readonly id: string;
-	readonly tool: string;
-	readonly tier: "project-native" | "lightweight-static" | "deep-static";
-	readonly args: readonly string[];
-	readonly scope: "scoped-files" | "bounded-history" | "repository-wide";
-	readonly fileExtensions?: readonly string[];
-	readonly targetSeparator?: readonly string[];
-	readonly acceptedExitCodes: readonly number[];
-	readonly remoteSafe: boolean;
-	readonly configFree: boolean;
-	readonly projectControlled: boolean;
-};
 
 
 export const OPENGREP_FILE_EXTENSIONS = [
@@ -101,46 +88,6 @@ export const OPENGREP_FILE_EXTENSIONS = [
 	".zsh",
 ] as const;
 
-export const SNIFF_ANALYZER_RECIPES = {
-	"lizard:complexity": {
-		id: "lizard:complexity",
-		tool: "lizard",
-		tier: "lightweight-static",
-		args: ["--csv", "-C", "10", "-L", "50", "-a", "5"],
-		scope: "scoped-files",
-		fileExtensions: [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".java", ".js", ".jsx", ".m", ".mm", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx"],
-		acceptedExitCodes: [0, 1],
-		remoteSafe: true,
-		configFree: true,
-		projectControlled: false,
-	},
-	"opengrep:hardcoded-values": {
-		id: "opengrep:hardcoded-values",
-		tool: "opengrep",
-		tier: "lightweight-static",
-		args: ["scan", "-f", `${import.meta.dir}/sniff-opengrep-hardcoded-values.yml`, "--json", "--no-rewrite-rule-ids", "--disable-version-check"],
-		scope: "scoped-files",
-		fileExtensions: OPENGREP_FILE_EXTENSIONS,
-		targetSeparator: ["--"],
-		acceptedExitCodes: [0],
-		remoteSafe: true,
-		configFree: true,
-		projectControlled: false,
-	},
-	"gitleaks:tracked-history": {
-		id: "gitleaks:tracked-history",
-		tool: "gitleaks",
-		tier: "lightweight-static",
-		args: ["git", "--redact", "--report-format", "json", "--report-path", "-", "--no-banner", "."],
-		scope: "repository-wide",
-		acceptedExitCodes: [0, 1],
-		remoteSafe: false,
-		configFree: false,
-		projectControlled: false,
-	},
-} as const satisfies Record<string, SniffAnalyzerRecipe>;
-
-export type SniffAnalyzerRecipeId = keyof typeof SNIFF_ANALYZER_RECIPES;
 
 export const TOOLS = {
 	core: [

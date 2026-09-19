@@ -1,4 +1,5 @@
 export * from "./analyzer-artifact-registry.ts";
+export * from "./analyzer-recipes.ts";
 export * from "./catalog.ts";
 export * from "./install.ts";
 export * from "./intake.ts";

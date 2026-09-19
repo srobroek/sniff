@@ -41,6 +41,9 @@ runnable from its recipe alone, not improvised:
    do not normalize or guess a flag.
 
 ## Where the tiers live (source of truth)
+The executable analyzer recipes are `lizard:complexity`, `opengrep:hardcoded-values`, and `gitleaks:tracked-history`; these IDs are the registry keys used by `sniff_run_analyzer`.
+
+
 
 **Per-target default-on / opt-in lists are authoritative in each target's doc**
 (`references/languages/<target>.md`, its `## Tools` table with the **Tier**

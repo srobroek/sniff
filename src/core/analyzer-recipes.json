@@ -1,0 +1,41 @@
+{
+  "lizard:complexity": {
+    "id": "lizard:complexity",
+    "tool": "lizard",
+    "tier": "lightweight-static",
+    "args": ["--csv", "-C", "10", "-L", "50", "-a", "5"],
+    "scope": "scoped-files",
+    "fileExtensions": [".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".java", ".js", ".jsx", ".m", ".mm", ".php", ".py", ".rb", ".rs", ".swift", ".ts", ".tsx"],
+    "acceptedExitCodes": [0, 1],
+    "remoteSafe": true,
+    "configFree": true,
+    "projectControlled": false,
+    "output": "lizard-csv"
+  },
+  "opengrep:hardcoded-values": {
+    "id": "opengrep:hardcoded-values",
+    "tool": "opengrep",
+    "tier": "lightweight-static",
+    "args": ["scan", "-f", "@opengrep-rule-file", "--json", "--no-rewrite-rule-ids", "--disable-version-check"],
+    "scope": "scoped-files",
+    "fileExtensions": "@opengrep-extensions",
+    "targetSeparator": ["--"],
+    "acceptedExitCodes": [0],
+    "remoteSafe": true,
+    "configFree": true,
+    "projectControlled": false,
+    "output": "opengrep-json"
+  },
+  "gitleaks:tracked-history": {
+    "id": "gitleaks:tracked-history",
+    "tool": "gitleaks",
+    "tier": "lightweight-static",
+    "args": ["git", "--redact", "--report-format", "json", "--report-path", "-", "--no-banner", "."],
+    "scope": "repository-wide",
+    "acceptedExitCodes": [0, 1],
+    "remoteSafe": false,
+    "configFree": false,
+    "projectControlled": false,
+    "output": "gitleaks-json"
+  }
+}

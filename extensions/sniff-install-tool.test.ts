@@ -14,11 +14,13 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../src/core/analyzer-artifact-registry.ts";
-import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput } from "../src/core/analyzer-output.ts";
-import { OPENGREP_FILE_EXTENSIONS, SNIFF_ANALYZER_RECIPES, TOOLS } from "../src/core/catalog.ts";
+import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../src/core/analyzer-output.ts";
+import { SNIFF_ANALYZER_RECIPES } from "../src/core/analyzer-recipes.ts";
+import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
 import { renderMiseToolkit, runSniffInstall } from "../src/core/install.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../src/core/opengrep.ts";
+import { SECURITY_ANALYZER_CATALOG } from "../src/core/security.ts";
 import sniffInstallTool from "./sniff-install-tool.ts";
 
 const temps: string[] = [];
@@ -99,6 +101,27 @@ describe("sniff tool catalog", () => {
 	});
 });
 
+test("analyzer recipe registry matches security catalog and documented IDs", () => {
+	const registryIds = Object.keys(SNIFF_ANALYZER_RECIPES).sort();
+	expect(registryIds).toEqual(Object.keys(SECURITY_ANALYZER_CATALOG).sort());
+	for (const recipe of Object.values(SNIFF_ANALYZER_RECIPES)) {
+		const tool = Object.values(TOOLS).flat().find((candidate) => candidate.name === recipe.tool);
+		expect(tool).toBeDefined();
+		expect(tool?.key).not.toBe("npm-local");
+		expect(["sarif", "lizard-csv", "gitleaks-json", "opengrep-json"]).toContain(recipe.output);
+	}
+	const documentedRecipeIds = (markdown: string, heading: string) => {
+		const headingStart = markdown.indexOf(`## ${heading}`);
+		const nextHeading = markdown.indexOf("\n## ", headingStart + 1);
+		const section = markdown.slice(headingStart, nextHeading === -1 ? undefined : nextHeading);
+		return [...section.matchAll(/`([a-z0-9-]+:[a-z0-9-]+)`/g)].map((match) => match[1]).sort();
+	};
+	const tooling = readFileSync(join(import.meta.dir, "../skills/sniff/references/tooling.md"), "utf8");
+	expect(documentedRecipeIds(tooling, "Where the tiers live (source of truth)")).toEqual(registryIds);
+	const types = readFileSync(join(import.meta.dir, "../docs/sniff-types.md"), "utf8");
+	expect(documentedRecipeIds(types, "Analyzer recipes")).toEqual(registryIds);
+});
+
 describe("OpenGrep parser contract", () => {
 	test("uses OpenGrep's exact rule IDs, target-relative paths, and supported file extensions", () => {
 		const root = tempDir("sniff-opengrep-target-");
@@ -111,8 +134,8 @@ describe("OpenGrep parser contract", () => {
 		]);
 		expect(parsed.capture.incomplete).toBe(true);
 		expect(parsed.capture.reason).toContain("escaped");
-		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].args).toEqual(expect.arrayContaining(["--no-rewrite-rule-ids", "--disable-version-check"]));
-		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].targetSeparator).toEqual(["--"]);
+		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"]?.args).toEqual(expect.arrayContaining(["--no-rewrite-rule-ids", "--disable-version-check"]));
+		expect(SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"]?.targetSeparator).toEqual(["--"]);
 		expect(OPENGREP_FILE_EXTENSIONS).toEqual(expect.arrayContaining([".go", ".sh", ".bash", ".yaml", ".yml", ".json", ".toml", ".conf"]));
 	});
 
@@ -187,6 +210,32 @@ describe("bounded analyzer output projections", () => {
 		expect(parsed.capture.incomplete).toBe(true);
 		expect(parsed.capture.reason).toContain("escaped");
 	});
+ 
+		test("projects SARIF results and rejects escaped paths", () => {
+			const root = tempDir("sniff-sarif-target-");
+			mkdirSync(join(root, "src"), { recursive: true });
+			writeFileSync(join(root, "src", "main.ts"), "const value = 1;\n");
+			const parsed = parseSarifOutput(JSON.stringify({ runs: [{ results: [
+				{ ruleId: "security/rule", level: "error", message: { text: "unsafe value" }, locations: [{ physicalLocation: { artifactLocation: { uri: `file://${join(root, "src", "main.ts")}` }, region: { startLine: 3, startColumn: 5 } } }] },
+				{ ruleId: "style/note", level: "note", message: { text: "style note" }, locations: [{ physicalLocation: { artifactLocation: { uri: "src/main.ts" }, region: { startLine: 1, startColumn: 1 } } }] },
+				{ rule: { id: "outside" }, level: "note", message: { text: "must not escape" }, locations: [{ physicalLocation: { artifactLocation: { uri: "../outside.ts" } } }] },
+			] }] }), root, false, "semgrep:sarif");
+			expect(parsed.observations).toEqual([{
+				ruleId: "security/rule",
+				path: "src/main.ts",
+				start: { line: 3, column: 5 },
+				message: "unsafe value",
+				severity: "HIGH",
+			}, {
+				ruleId: "style/note",
+				path: "src/main.ts",
+				start: { line: 1, column: 1 },
+				message: "style note",
+				severity: "LOW",
+			}]);
+			expect(parsed.capture.incomplete).toBe(true);
+			expect(parsed.capture.reason).toContain("escaped");
+		});
 
 	test("fails closed for malformed or truncated output and caps observations", () => {
 		const root = tempDir("sniff-analyzer-bounds-");
@@ -490,7 +539,7 @@ describe("runSniffInstall", () => {
 				resolvedPath: expectedPath,
 				attempts: [],
 			});
-			expect(eslint?.remediation).toContain("inventory does not execute project code");
+			expect(eslint?.remediation).toContain("inventory only");
 		}
 		expect(existsSync(marker)).toBe(false);
 	});
