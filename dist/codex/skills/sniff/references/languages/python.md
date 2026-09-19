@@ -123,3 +123,5 @@ a `*,` keyword-only signature, not a new behavioural class.
   of widening the rule set, not a real unused suppression. (When the repo pins no
   `[tool.ruff]` config at all, `--extend-select` simply augments the E/F defaults --
   still use it, never `--select`.)
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

@@ -67,3 +67,5 @@ Where "fixes" commonly over-reach in this language -- the false positives and
 non-idiomatic-but-fine patterns the `refactor-challenger` should protect.
 
 - ...
+
+**Execution routing:** rows whose **Installed via** cell is not `sniff_install_tools` are **operator-direct**: invoke the documented command directly. Only registry-backed rows that name `sniff_install_tools` are dispatched through `sniff_run_analyzer`.

@@ -82,3 +82,5 @@ component and the composable.
   and don't need it to stay reactive (e.g. reading a one-shot config).
 - A single large but cohesive SFC that isn't reused isn't automatically a smell;
   split on diverging responsibility, not raw line count.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

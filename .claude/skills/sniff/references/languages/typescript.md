@@ -107,3 +107,5 @@ via a `never` fallthrough) over subclasses.
 - `enum` is not always wrong -- a stable, exhaustively-handled numeric flag set
   can be a legitimate `enum`; the smell is leaking enum *values* across module
   boundaries or using it where a string-literal union reads better.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

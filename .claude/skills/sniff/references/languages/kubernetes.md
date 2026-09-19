@@ -86,3 +86,5 @@ best-practices and kube-linter URLs as the authority over forcing an OO mapping.
   the recommendation with a writable `emptyDir` mount rather than flagging blindly.
 - Security smells (privileged, `hostNetwork`/`hostPath`, plaintext secret env,
   `runAsNonRoot` absent) are rarely false positives -- weight them high in severity.
+
+**Execution routing:** kube-linter, kubeconform, and trivy are operator-direct because they have no `sniff_install_tools` registry entries; invoke their documented commands directly. Keep registry-backed `checkov` on `sniff_run_analyzer`.

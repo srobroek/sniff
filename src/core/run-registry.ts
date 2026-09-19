@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./catalog.ts";
+import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
@@ -168,6 +168,7 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
   if (!disposition) throw new Error(`Analyzer ${analyzer} was not selected by the issued manifest`);
   if (!(analyzer in SNIFF_ANALYZER_RECIPES)) throw new Error(`Analyzer ${analyzer} has no fixed runtime recipe`);
   const recipe = SNIFF_ANALYZER_RECIPES[analyzer as keyof typeof SNIFF_ANALYZER_RECIPES];
+  if (!recipe) throw new Error(`Analyzer ${analyzer} has no fixed runtime recipe`);
   if (disposition.tool !== recipe.tool || disposition.recipe !== recipe.id) throw new Error(`Analyzer ${analyzer} mapping differs from the issued policy`);
   if (record.manifest.route.trust === "untrusted-remote" && (!recipe.remoteSafe || !recipe.configFree || recipe.projectControlled)) {
     throw new Error(`Analyzer ${analyzer} is not remote-safe and config-free`);
@@ -180,7 +181,7 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
     reservationId,
     target,
     recipe,
-    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...("targetSeparator" in recipe ? recipe.targetSeparator : ["--"]), ...operands] : [])],
+    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...(recipe.targetSeparator ?? ["--"]), ...operands] : [])],
     operands,
     ...(record.manifest.budget.maxFiles !== undefined ? { maxFiles: record.manifest.budget.maxFiles } : {}),
     acceptedExitCodes: recipe.acceptedExitCodes,
@@ -289,7 +290,9 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
   const reservation = record.reservations.get(analyzer);
   if (!reservation || reservation.id !== reservationId || reservation.state !== "running") throw new Error(`Analyzer ${analyzer} reservation cannot be completed`);
   try {
-    authorizedTarget(record, SNIFF_ANALYZER_RECIPES[analyzer as keyof typeof SNIFF_ANALYZER_RECIPES]);
+    const recipe = SNIFF_ANALYZER_RECIPES[analyzer as keyof typeof SNIFF_ANALYZER_RECIPES];
+    if (!recipe) throw new Error(`Analyzer ${analyzer} has no fixed runtime recipe`);
+    authorizedTarget(record, recipe);
     if (record.now() > analyzerDeadline(record)) throw new Error("Sniff analyzer exceeded the manifest maxMinutes budget");
   } catch (error) {
     reservation.state = "failed";

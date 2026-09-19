@@ -94,3 +94,5 @@ real authority is the wire-compat rules above.
   default for an absent field) -- this is not pedantry.
 - Don't recommend splitting a message if it would change surviving field numbers;
   the structural cleanup is not worth a wire break. Favor leaving numbers stable.
+
+**Execution routing:** buf lint and buf breaking are operator-direct because they have no `sniff_install_tools` registry entries; invoke their documented commands directly. Keep registry-backed `protolint` on `sniff_run_analyzer`.

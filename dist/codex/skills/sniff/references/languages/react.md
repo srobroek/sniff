@@ -88,3 +88,5 @@ extraction is the component and the hook, not the class.
 - An `index` key is acceptable for static, never-reordered, never-filtered lists.
 - A single large but cohesive component that isn't reused is not automatically a
   smell; split when responsibilities diverge, not by line count alone.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

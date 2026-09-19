@@ -88,3 +88,5 @@ for vocabulary, but the fix is a schema edit.
   Flag it as "needs DataLoader, verify in resolver code," not as a schema defect.
 - Adding an enum value can still break clients with exhaustive switches; note it
   as `DANGEROUS` rather than always-safe.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

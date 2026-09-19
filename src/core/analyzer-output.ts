@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { SNIFF_ANALYZER_RECIPES } from "./analyzer-recipes.ts";
+import { parseOpenGrepOutput } from "./opengrep.ts";
 
 /** Maximum number of normalized observations retained from one analyzer run. */
 export const ANALYZER_MAX_OBSERVATIONS = 2_000;
@@ -321,8 +323,48 @@ export function parseGitleaksOutput(stdout: string, targetRoot: string, truncate
 	return { observations, capture: capture(stdout, false, Boolean(reason), reason) };
 }
 
+export function parseSarifOutput(stdout: string, targetRoot: string, truncated = false, recipeId = "sarif"): AnalyzerParseResult {
+  if (truncated) return incompleteResult(stdout, true, `SARIF output exceeded the bounded capture limit for recipe ${recipeId}`);
+  let payload: unknown;
+  try { payload = JSON.parse(stdout.replace(/^\uFEFF/, "")); } catch { return incompleteResult(stdout, false, "SARIF JSON was malformed"); }
+  if (!isRecord(payload) || !Array.isArray(payload.runs)) return incompleteResult(stdout, false, "SARIF JSON did not contain a runs array");
+  const state: ParseState = { reasons: [] };
+  const observations: AnalyzerObservation[] = [];
+  for (const run of payload.runs) {
+    if (!isRecord(run) || !Array.isArray(run.results)) { addReason(state, "SARIF run did not contain a results array"); continue; }
+    for (const candidate of run.results) {
+      if (observations.length >= ANALYZER_MAX_OBSERVATIONS) { addReason(state, `SARIF observations exceeded the bounded limit of ${ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US")}`); break; }
+      if (!isRecord(candidate)) { addReason(state, "SARIF results contained a non-object entry"); continue; }
+      const rule = isRecord(candidate.rule) ? candidate.rule : null;
+      const ruleId = field(candidate.ruleId ?? rule?.id, state, "rule ID");
+      const locations = Array.isArray(candidate.locations) ? candidate.locations : [];
+      const location = isRecord(locations[0]) ? locations[0] : null;
+      const physical = location && isRecord(location.physicalLocation) ? location.physicalLocation : null;
+      const artifact = physical && isRecord(physical.artifactLocation) ? physical.artifactLocation : null;
+      const uri = field(artifact?.uri, state, "artifact URI");
+      const region = physical && isRecord(physical.region) ? physical.region : null;
+      const line = integer(region?.startLine ?? 1, "start line", state, 1);
+      const column = integer(region?.startColumn ?? 1, "start column", state, 1);
+      const messageRecord = isRecord(candidate.message) ? candidate.message : null;
+      const message = field(messageRecord?.text, state, "message");
+      const severity = candidate.level === "error" ? "HIGH" : candidate.level === "warning" ? "MEDIUM" : candidate.level === "note" || candidate.level === "none" ? "LOW" : "MEDIUM";
+      if (!ruleId || !uri || line === null || column === null || !message) continue;
+      const path = normalizePath(targetRoot, uri.replace(/^file:\/\//, ""));
+      if (!path) { addReason(state, "SARIF finding path escaped the authorized target root"); continue; }
+      observations.push({ ruleId, path, start: { line, column }, message, severity });
+    }
+  }
+  const reason = state.reasons.length ? state.reasons.join("; ") : undefined;
+  return { observations, capture: capture(stdout, false, Boolean(reason), reason) };
+}
+
 export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false): AnalyzerParseResult {
-	if (tool === "lizard" && recipeId === "lizard:complexity") return parseLizardOutput(stdout, targetRoot, truncated, recipeId);
-	if (tool === "gitleaks" && recipeId === "gitleaks:tracked-history") return parseGitleaksOutput(stdout, targetRoot, truncated, recipeId);
-	return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
+  const recipe = SNIFF_ANALYZER_RECIPES[recipeId];
+  if (!recipe || recipe.tool !== tool) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
+  switch (recipe.output) {
+    case "lizard-csv": return parseLizardOutput(stdout, targetRoot, truncated, recipeId);
+    case "gitleaks-json": return parseGitleaksOutput(stdout, targetRoot, truncated, recipeId);
+    case "sarif": return parseSarifOutput(stdout, targetRoot, truncated, recipeId);
+    case "opengrep-json": return parseOpenGrepOutput(stdout, targetRoot, truncated);
+  }
 }

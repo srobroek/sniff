@@ -104,3 +104,5 @@ edit.
   *inconsistency* within one spec, not the strategy itself.
 - A missing `maxItems` on a tiny, fixed enum-like array is not a real unbounded
   risk -- reserve the flag for collections that grow with data.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

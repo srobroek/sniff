@@ -25,7 +25,7 @@ import {
   TOOLS,
   type ToolRec,
 } from "./catalog.ts";
-import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, parseOpenGrepOutput, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
+import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
 import { processAlive, type SpawnedProcess, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
 import {
   type AnalyzerRunAuthorization,
@@ -1105,9 +1105,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
       // Each shard is evaluated and parsed alone so no shard can mask another's exit or truncation.
       batches.push({
         result,
-        parsed: openGrep
-          ? parseOpenGrepOutput(result.stdout, authorization.target.root, result.stdoutTruncated)
-          : parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated),
+        parsed: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated),
       });
       if (result.timedOut || result.error || result.exitCode === null || !acceptedExitCodes.includes(result.exitCode)) break;
     } catch (error) {

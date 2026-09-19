@@ -91,3 +91,5 @@ fix is composition + `for_each`, not inheritance.
   weight the "no remote state" smell by whether the code looks production-bound.
 - Security smells (public `0.0.0.0/0` ingress on admin ports, IAM `*:*`, plaintext
   secrets) are rarely false positives -- weight them high in the severity column.
+
+**Execution routing:** tflint, terraform fmt, terraform validate, and trivy are operator-direct because they have no `sniff_install_tools` registry entries; invoke their documented commands directly. Keep registry-backed `checkov` on `sniff_run_analyzer`.

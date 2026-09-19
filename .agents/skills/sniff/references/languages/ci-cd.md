@@ -88,3 +88,5 @@ the GitHub security-hardening URL as the authority over forcing an OO mapping.
 - Security smells here are rarely false positives -- `pull_request_target` + untrusted
   checkout, script injection via `${{ }}` into `run:`, and over-broad `permissions:`
   enable real supply-chain compromise. **Weight them high; do not soften them.**
+
+**Execution routing:** `actionlint` is operator-direct because it has no `sniff_install_tools` registry entry; invoke its documented command directly. Keep registry-backed rows on `sniff_run_analyzer`.

@@ -82,3 +82,5 @@ use the catalog only for true duplication/length structure:
   materialize CTEs); a "fix" that helps Postgres may hurt another dialect.
 - Migration warnings from squawk assume large tables under load; on a tiny or
   empty table a "rewriting" ALTER is harmless.
+
+**Execution routing:** `sqlfluff` is operator-direct because it has no `sniff_install_tools` registry entry; invoke its documented command directly. Keep registry-backed `squawk` and `jscpd` on `sniff_run_analyzer`.

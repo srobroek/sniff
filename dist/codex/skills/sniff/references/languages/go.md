@@ -91,3 +91,5 @@ Where "fixes" over-reach in Go -- the `independent challenge reviewer` should pr
 - `switch` / type switches are idiomatic and should not be rewritten into polymorphism.
 - Named returns and naked `return` are acceptable in short functions and where `defer` mutates the result -- only flag them in long functions.
 - A linter disabled in `.golangci.yml` reflects a deliberate project choice; respect it rather than re-reporting the suppressed category.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly. Registry-backed rows elsewhere remain on `sniff_run_analyzer`.

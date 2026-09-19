@@ -95,3 +95,5 @@ should protect.
   writing.
 - A bare URL inside a fenced code block (an example, not a link) is intentional --
   do not "fix" it into a markdown link.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

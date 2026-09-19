@@ -78,3 +78,5 @@ only to the genuine duplication/structure smells:
 - Unquoted expansion is occasionally intentional (deliberate word-splitting of a
   known-safe flag string); shellcheck `# shellcheck disable=SC2086` with a reason
   is a valid, not a smell.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

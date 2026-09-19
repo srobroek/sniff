@@ -73,3 +73,5 @@ spec / taplo rather than the OO catalog for syntax and style findings.
   within one file*, not a project's deliberate house style.
 - TOML has no anchor/alias mechanism, so "extract the duplicate" advice that works
   for YAML often doesn't apply -- don't recommend a TOML feature that doesn't exist.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

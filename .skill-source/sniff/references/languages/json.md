@@ -76,3 +76,5 @@ format/structure issues better cited to the JSON Schema spec than the catalog.
 - **Honor `.editorconfig` before flagging indentation.** Tools won't read it; a
   declared `[*.json] indent_size` overrides a linter's default expectation, so a
   mismatch there is config-driven, not a smell.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

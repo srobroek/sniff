@@ -81,3 +81,5 @@ the Docker best-practices URL as the authority over forcing an OO mapping.
   images -- don't flag its absence on a job container.
 - Security smells (secrets in ENV/layers, root in the final stage, unpinned base
   from an untrusted registry) are rarely false positives -- weight them high.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly. Registry-backed rows elsewhere remain on `sniff_run_analyzer`.

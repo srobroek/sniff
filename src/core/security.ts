@@ -1,5 +1,5 @@
 import { extname } from "node:path";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId } from "./catalog.ts";
+import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId } from "./analyzer-recipes.ts";
 import type { ResolvedTarget } from "./target.ts";
 
 export type SecurityAnalyzerTier = "project-native" | "lightweight-static" | "deep-static";
@@ -48,10 +48,16 @@ type AnalyzerCatalogEntry = {
   readonly defaultEnabled: boolean;
 };
 
+function recipeFor(name: SniffAnalyzerRecipeId): SniffAnalyzerRecipe {
+  const recipe = SNIFF_ANALYZER_RECIPES[name];
+  if (!recipe) throw new Error(`Unknown analyzer recipe ${name}`);
+  return recipe;
+}
+
 export const SECURITY_ANALYZER_CATALOG = {
-  "lizard:complexity": { tool: SNIFF_ANALYZER_RECIPES["lizard:complexity"].tool, recipe: "lizard:complexity", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "opengrep:hardcoded-values": { tool: SNIFF_ANALYZER_RECIPES["opengrep:hardcoded-values"].tool, recipe: "opengrep:hardcoded-values", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "gitleaks:tracked-history": { tool: SNIFF_ANALYZER_RECIPES["gitleaks:tracked-history"].tool, recipe: "gitleaks:tracked-history", tier: "lightweight-static", remoteSafe: false, defaultEnabled: true },
+  "lizard:complexity": { tool: recipeFor("lizard:complexity").tool, recipe: "lizard:complexity", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
+  "opengrep:hardcoded-values": { tool: recipeFor("opengrep:hardcoded-values").tool, recipe: "opengrep:hardcoded-values", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
+  "gitleaks:tracked-history": { tool: recipeFor("gitleaks:tracked-history").tool, recipe: "gitleaks:tracked-history", tier: "lightweight-static", remoteSafe: false, defaultEnabled: true },
 } as const satisfies Record<SniffAnalyzerRecipeId, AnalyzerCatalogEntry>;
 
 const FORBIDDEN_ALIAS: Record<string, string> = {
@@ -91,7 +97,7 @@ function checkedNames(names: readonly string[], tier: SecurityAnalyzerTier): Arr
 
 function scopeCompatibility(name: SniffAnalyzerRecipeId, target: ResolvedTarget | undefined): string | undefined {
   if (!target) return undefined;
-  const recipe: SniffAnalyzerRecipe = SNIFF_ANALYZER_RECIPES[name];
+  const recipe = recipeFor(name);
   if (recipe.scope === "repository-wide") {
     // A history target is a repository-wide walk bounded by its window; trust gating happens at authorization.
     return target.kind === "repository" || target.kind === "whole-repo" || target.kind === "history" ? undefined : "Analyzer requires an explicitly repository-wide target.";

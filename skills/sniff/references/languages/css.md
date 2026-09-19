@@ -95,3 +95,5 @@ extraction family (→ mixins, utility classes, tokens).
   for *styling*, not their existence.
 - A pragmatic mix of methodologies in legacy code may be reality; flag drift and
   inconsistency where it causes specificity pain, not stylistic purity.
+
+**Execution routing:** all rows in this table are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.

@@ -83,3 +83,5 @@ Svelte's extraction units are the component and the plain module, not the class.
   flag *mixing* within a component, not the absence of a runes migration.
 - `$effect` / `$:` side effects are legitimate when synchronizing with the DOM,
   storage, or subscriptions -- only flag effects that merely derive a value.
+
+**Execution routing:** these tools are operator-direct because they have no `sniff_install_tools` registry entries; invoke the documented commands directly rather than routing through `sniff_run_analyzer`.
