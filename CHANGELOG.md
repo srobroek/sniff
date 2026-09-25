@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/srobroek/sniff/compare/sniff-v0.3.0...sniff-v0.3.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **deps:** keep bun.lock at version 1 for Dependabot ([e8ac3fe](https://github.com/srobroek/sniff/commit/e8ac3feb3e53bd67583127ade236817386a6de6f))
+
 ## [0.3.0](https://github.com/srobroek/sniff/compare/sniff-v0.2.3...sniff-v0.3.0) (2026-09-19)
 
 
