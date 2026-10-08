@@ -14,6 +14,10 @@ How sniff knows shell is present: key files, extensions, config.
 
 ## Tools
 
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag.
+
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
 | shellcheck | **Run recipe.** `shellcheck -f json <files>` -- pass the resolved `.sh`/`.bash`/`.ksh` paths explicitly (shellcheck does not recurse; expand the file set yourself). Auto-reads `.shellcheckrc` from the repo root for disabled checks + shell dialect; shell is auto-detected from each shebang (override `-s bash`/`-s sh` only when a file has none). **Exit:** 0 = clean · 1 = issues found → parse the JSON array (each object has `file`/`line`/`code`/`message`/`level`) · 2/3/4 = parse/usage error = INVALID, never "clean". **Gotcha:** when the target is a Dockerfile `RUN` or GHA `run:`, run hadolint/actionlint instead -- they embed shellcheck; don't double-run it standalone. | quoting/word-splitting, unset vars, unchecked `cd`, useless `cat`, `ls` parsing, `[` vs `[[`, sh-vs-bash portability | default-on | operator follow-up (not run by Sniff) |

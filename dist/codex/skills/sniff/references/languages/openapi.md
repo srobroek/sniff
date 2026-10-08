@@ -19,15 +19,17 @@ How sniff knows an OpenAPI/Swagger contract is present.
 
 ## Tools
 
-Primary first. Run on the **resolved** spec (all `$ref`s dereferenced) so rules
-see the full graph. Spectral and vacuum overlap heavily -- run one as the linter.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Point them at the **root** spec so `$ref`s
+resolve and rules see the full graph. Spectral and vacuum overlap heavily --
+recommend one as the linter.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
 | vacuum | **Run recipe (use ONE of vacuum/spectral).** `vacuum lint -d -o json <spec>` from repo root -- `<spec>` is the root spec path (vacuum resolves `$ref`s itself); `-d` = full details, `-o json` = machine-readable. Auto-reuses a project ruleset if present (`.spectral.yaml`/`.spectral.json` or `.vacuum.yaml`/`vacuum.conf.yaml`); with none it applies its built-in recommended OWASP/OAS rules. `vacuum report <spec>` produces a shareable report variant. **Exit:** 0 = no errors · non-zero = rule violations → parse the JSON `resultSet`/results (each has `message`/`severity`/path) · a parse/usage failure (unresolvable `$ref`, bad ruleset) = INVALID. **Gotcha:** point at the root spec, not a split fragment, or rule coverage is partial. | rule-based design smells, naming, missing schemas/operationId, governance rulesets (Go, fast on large specs; `-d` = details) | default-on (preferred linter) | operator follow-up (not run by Sniff) |
 | spectral | **Run recipe (alternative -- use ONE of vacuum/spectral, not both).** `spectral lint -f json <spec>` from repo root -- `<spec>` is the root spec (spectral resolves `$ref`s). Auto-reads `.spectral.yaml`/`.spectral.json` from the repo; with none it falls back to the built-in `spectral:oas` ruleset. **Exit:** 0 = clean · 1 = results at or above the failure severity → parse the JSON array (`code`/`message`/`severity`/`range`) · a usage/resolution error = INVALID, never "clean". Run this only when vacuum is not the chosen linter. | same rule classes as vacuum; the meta-linter for Node-centric repos | default-on (alternative -- use ONE of vacuum/spectral, not both) | operator follow-up (not run by Sniff) |
 | openapi-spec-validator | **Run recipe.** `openapi-spec-validator <spec>` from repo root -- `<spec>` is the root spec path; it auto-detects the OAS version from the document. No project config (it validates against the bundled OAS schema). **Exit:** 0 = structurally valid · non-zero = the document violates the OAS schema → read the printed validation errors · this is a validity gate only, not a style/smell finding. A crash on an unreadable/unresolvable file is INVALID, not "valid". | strict spec-validity (structural conformance to the OAS schema), not style | default-on | operator follow-up (not run by Sniff) |
-| oasdiff | **Run recipe (opt-in, baseline target).** `oasdiff breaking <base> <revision>` from repo root -- `<base>` is the prior spec (vendored `openapi.prev.yaml`, a checkout of a git ref, or a published version) and `<revision>` is the current spec. No project config; the baseline you pass IS the comparison. **Exit:** 0 = no breaking changes · non-zero = breaking changes found → parse the per-change output (headline these in the back-compat column) · a failure to load either spec = INVALID. Only run when a real baseline exists; without one, diff manually per the Pragmatism notes. | breaking-change detection vs a baseline spec (removed paths/fields, narrowed types, newly-required request fields) | opt-in (needs a CI baseline -- prior spec / git ref / published version) | operator follow-up (not run by Sniff) |
+| oasdiff | **Run recipe (opt-in, baseline target).** `oasdiff breaking --fail-on ERR -f json <base> <revision>` from repo root -- `<base>` is the prior spec (vendored `openapi.prev.yaml`, a checkout of a git ref, or a published version) and `<revision>` is the current spec. No project config; the baseline you pass IS the comparison. **Exit:** without `--fail-on`, oasdiff exits 0 even when it reports breaking changes, so never infer "no breaking changes" from exit 0 alone · with `--fail-on ERR`: 0 = no ERR-level changes · 1 = ERR-level breaking changes → parse the JSON (each change has an `id` and `level`; headline ERR and WARN changes in the back-compat column) · a failure to load either spec = INVALID. Only run when a real baseline exists; without one, diff manually per the Pragmatism notes. | breaking-change detection vs a baseline spec (removed paths/fields, narrowed types, newly-required request fields, enum values added to responses) | opt-in (needs a CI baseline -- prior spec / git ref / published version) | operator follow-up (not run by Sniff) |
 
 Notes: vacuum and spectral are the meta-linters -- both flag missing
 `operationId`, missing descriptions, unused/duplicate components, and invalid
@@ -36,9 +38,10 @@ examples against the same rule classes. They use a compatible ruleset format, so
 Node-centric repos that already wire it in) -- running both is redundant.
 openapi-spec-validator only answers "is this a valid OAS document" -- keep it for
 the validity gate, not for smells. **Breaking-change detection is not built into
-the linters**: run `oasdiff` against the baseline (opt-in -- needs a CI baseline
+the linters**: recommend `oasdiff` against the baseline (opt-in -- needs a CI baseline
 spec, git ref, or published version) to catch removed paths/operations, removed
-response fields, narrowed types, and newly-required request fields; without a
+response fields, narrowed types, newly-required request fields, and enum values
+added to responses; without a
 baseline, diff manually -- see Pragmatism notes. If the project already pins a
 Spectral ruleset, respect it rather than imposing defaults.
 
@@ -85,12 +88,18 @@ edit.
 
 ## Pragmatism notes (for the adversarial pass)
 
-- **Additive is safe; removal/retype is breaking.** Adding a new optional field,
-  a new endpoint, a new optional query param, or a new enum value to a *request*
-  is backwards-compatible. Removing or renaming a field, narrowing a type
-  (`string`→`integer`), making a previously-optional request field required,
-  changing/removing a status code, or removing an enum value from a *response*
-  is breaking -- **always flag in the back-compat column**.
+- **Additive is safe on input, not always on output.** Adding a new optional
+  field, a new endpoint, a new optional query param, or a new enum value to a
+  *request* is backwards-compatible. Removing or renaming a field, narrowing a
+  type (`string`→`integer`), making a previously-optional request field
+  required, changing/removing a status code, or removing an enum value from a
+  *response* is breaking -- **always flag in the back-compat column**.
+- **Adding an enum value to a response is a client-breaking risk**, not a safe
+  addition: clients with exhaustive `switch`/match handling or generated closed
+  enums fail on the unknown value (oasdiff classifies
+  `response-property-enum-value-added` as ERR). Flag it unless the contract
+  documents the enum as extensible and clients are known to tolerate unknown
+  values.
 - Adding a required field to a **request** breaks existing clients; adding a
   field to a **response** is safe only if clients tolerate unknown fields
   (the usual contract). Note the direction.

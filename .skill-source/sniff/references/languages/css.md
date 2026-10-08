@@ -14,23 +14,29 @@ How sniff knows CSS/SCSS is present.
 
 ## Tools
 
-stylelint is the meta-linter. The standard config is default-on; the
-`-strict-value` and `-order` plugins are opt-in (they need per-project config or
-are organizational preference), and `@projectwallace/css-analyzer` is opt-in for
-a deep CSS metrics audit.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). stylelint is the meta-linter. The standard
+config is default-on; the `-strict-value` and `-order` plugins are opt-in (they
+need per-project config or are organizational preference), and
+`@projectwallace/css-analyzer` is opt-in for a deep CSS metrics audit. All of
+them are project-local `devDependencies` of the target; never install them
+globally or let `npx` fetch them.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| stylelint + `stylelint-config-standard` (+ `stylelint-config-recommended-scss` when SCSS) | **Run recipe:** from repo root. If the repo has a `.stylelintrc*`/`stylelint.config.*`, run `npx stylelint --formatter json "**/*.{css,scss}"` (config auto-used). If it has **no** config, bare stylelint is a HARD ERROR ("No configuration provided") -- supply one: `npx stylelint --config stylelint-config-standard --config-basedir "$(npm root -g)" --formatter json "**/*.{css,scss}"`, or write a 1-line temp `{"extends":"stylelint-config-standard"}`. **Exit:** 0 clean · 2 = lint problems (parse JSON) · 1/78 = config/usage error → INVALID, fix and re-run (never report as clean). | specificity, `!important`, nesting depth, overqualified/ID selectors, duplicates, invalid/legacy properties | default-on | operator follow-up (not run by Sniff) |
+| stylelint + `stylelint-config-standard` (+ `stylelint-config-recommended-scss` when SCSS) | **Run recipe:** from repo root, using the target's own `devDependencies` (`npx --no` fails instead of downloading a missing package). If the repo has a `.stylelintrc*`/`stylelint.config.*`, run `npx --no stylelint --formatter json "**/*.{css,scss}"` (config auto-used). If it has **no** config, bare stylelint is a HARD ERROR ("No configuration provided"): when `stylelint-config-standard` is already in the target's `devDependencies`, pass a 1-line temp config outside the repo, `npx --no stylelint --config <tmp>/stylelintrc.json --config-basedir "$PWD" --formatter json "**/*.{css,scss}"` with `{"extends":"stylelint-config-standard"}`; otherwise record stylelint as a coverage gap -- never resolve configs from a global npm root. **Exit:** 0 clean · 2 = lint problems (parse JSON) · 1 = fatal error, 64 = invalid CLI usage, 78 = invalid config → INVALID, fix and re-run (never report as clean). | duplicates, invalid/unknown properties and selectors, legacy/longhand redundancy, `selector-id-pattern` naming; `!important`, ID selectors, overqualification, nesting depth and specificity only when the project config enables `declaration-no-important`, `selector-max-id`, `selector-no-qualifying-type`, `max-nesting-depth`, `selector-max-specificity` | default-on | operator follow-up (not run by Sniff) |
 | `stylelint-declaration-strict-value` (plugin) | same invocation, rule `scale-unlimited/declaration-strict-value` enabled | magic numbers -- raw colors/sizes that should be custom properties/tokens | opt-in (needs per-property config; noisy without it) | bundled with `css` |
 | `stylelint-order` (plugin) | same invocation | declaration-order consistency | opt-in (organizational preference) | bundled with `css` |
-| `@projectwallace/css-analyzer` | `npx @projectwallace/css-analyzer "**/*.css"` | specificity/complexity metrics -- deep CSS audit | opt-in (deep CSS audit) | `npm i -D @projectwallace/css-analyzer` |
+| `@projectwallace/css-analyzer` | `npx --no @projectwallace/css-analyzer "**/*.css"` | specificity/complexity metrics -- deep CSS audit | opt-in (deep CSS audit) | target `devDependencies` (`npm i -D @projectwallace/css-analyzer`, with approval) |
 
 Notes: stylelint is the single CSS/SCSS entry point -- one AST parse covers most
 dimensions; don't stack regex scanners. **stylelint v15+ is quality-only**
 (formatting rules removed); `jscpd` covers CSS duplication if you need a
-dedicated dup pass. `stylelint-config-standard` already flags `!important`
-overuse, ID selectors for styling, and overqualification via its rule set; add
+dedicated dup pass. Neither `stylelint-config-standard` nor
+`stylelint-config-recommended` enables `declaration-no-important`,
+`selector-max-id`, `selector-no-qualifying-type`, or `max-nesting-depth`, so
+`!important` overuse, ID styling, overqualification and deep nesting stay on the
+smell checklist unless the project config turns those rules on; add
 `stylelint-config-recommended-scss` for SCSS sources. Magic-number detection
 requires the strict-value plugin (configure it for `color`/`fill`/spacing
 properties -- noisy without that config, hence opt-in). Autoprefixer (PostCSS) --

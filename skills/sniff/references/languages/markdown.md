@@ -12,7 +12,9 @@ How sniff knows Markdown is present: file extensions and lint config.
 
 ## Tools
 
-The analyzers to run, primary first. Exact invocation + machine-readable flag.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|

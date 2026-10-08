@@ -14,8 +14,10 @@ How sniff knows Vue is present.
 
 ## Tools
 
-Run `eslint-plugin-vue` first (the SFC meta-linter), then `vue-tsc` for
-template-aware type checking that `tsc` alone cannot do.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Recommend `eslint-plugin-vue` first (the SFC
+meta-linter), then `vue-tsc` for template-aware type checking that `tsc` alone
+cannot do.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|

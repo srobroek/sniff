@@ -16,13 +16,24 @@ How sniff knows a Protobuf contract is present.
 
 ## Tools
 
-Primary first. buf is the AST linter **and** the breaking-change detector;
-protolint is a lint-only alternative.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). buf is the AST linter **and** the
+breaking-change detector; protolint is a lint-only alternative.
+
+**Module-directory exception.** buf resolves `buf.yaml`/`buf.work.yaml` and
+import paths relative to the module (or workspace) root, which is often a
+subdirectory such as `proto/`. Keep `../tooling.md` run-rule 1 (cwd = repo root)
+and pass that module directory as buf's `<input>` argument instead of changing
+cwd: `buf lint proto`. Only when the input form still cannot resolve imports
+(e.g. project scripts or config that assume `cd proto`) may the operator run buf
+with cwd = the module dir -- the one sanctioned subdirectory cwd for this doc.
+State that cwd explicitly in the follow-up command so it never leaks into the
+next tool's run.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| buf (lint) | **Run recipe.** `buf lint --error-format json` run from the proto module dir (the dir holding `buf.yaml`) or the repo root if the module is rooted there. Auto-reads `buf.yaml` for the configured lint rule set + ignores (project config governs); with none it applies buf's default rule set. **Exit:** 0 = clean · 1 = lint violations → parse the JSON lines (each has `path`/`start_line`/`type`/`message`) · a config/usage error (no `buf.yaml`, bad flag) = INVALID, never "clean". **Gotcha:** run from the module dir so relative `$ref`/import paths resolve. | AST-level style/naming/structure rules (snake_case fields, enum zero-value, package versioning, etc.) | default-on | operator follow-up (not run by Sniff) |
-| buf (breaking) | **Run recipe (opt-in, baseline target).** `buf breaking --against ".git#ref=<base-ref>,subdir=<proto-dir>"` -- the `--against` value is a buf input string, not a bare git ref; `subdir=` is required when protos live in a subdirectory (e.g. `buf breaking --against ".git#ref=main,subdir=proto"` from `proto/`). It can also take a built `image.bin` or a registry module. **Exit:** 0 = no breaking changes · **100 = breaking changes found** (this is the expected finding code, NOT an error -- parse stdout for the per-change lines and headline them in the back-compat column) · 1 / other = a real usage/config error = INVALID. | wire- and source-compat regression detection vs a baseline (git ref, image, or registry module) | opt-in (needs a baseline, CI) | operator follow-up (not run by Sniff) |
+| buf (lint) | **Run recipe.** From the repo root: `buf lint <module-dir> --error-format json` (`<module-dir>` holds `buf.yaml`; omit it when the module is rooted at the repo root, since buf's default input is `.`). Auto-reads `buf.yaml` for the configured lint rule set + ignores (project config governs); with none it applies buf's default rule set. **Exit:** 0 = clean · **100 = lint violations** (buf's file-annotation exit code) → parse the JSON lines (each has `path`/`start_line`/`type`/`message`) · 1 / other = a config/usage error (bad `buf.yaml`, bad flag) = INVALID, never "clean". **Gotcha:** pointing buf at a directory that is not the module root makes imports fail to resolve -- that is INVALID, not a finding; see the module-directory exception above. | AST-level style/naming/structure rules (snake_case fields, enum zero-value, package versioning, etc.) | default-on | operator follow-up (not run by Sniff) |
+| buf (breaking) | **Run recipe (opt-in, baseline target).** From the repo root: `buf breaking <module-dir> --against ".git#ref=<base-ref>,subdir=<module-dir>"` -- the `--against` value is a buf input string, not a bare git ref; `.git` is the repo root's git dir and `subdir=` selects the module inside the baseline (e.g. `buf breaking proto --against ".git#ref=main,subdir=proto"`). It can also take a built `image.bin` or a registry module. **Exit:** 0 = no breaking changes · **100 = breaking changes found** (this is the expected finding code, NOT an error -- parse stdout for the per-change lines and headline them in the back-compat column) · 1 / other = a real usage/config error = INVALID. | wire- and source-compat regression detection vs a baseline (git ref, image, or registry module) | opt-in (needs a baseline, CI) | operator follow-up (not run by Sniff) |
 | protolint | **Run recipe (opt-in -- redundant; prefer `buf lint`).** `protolint lint <files>` from repo root (pass explicit `.proto` paths); reads `.protolint.yaml` if present. **Exit:** 0 = clean · 1 = lint findings · other = INVALID. Skip entirely when buf is available -- `buf lint` already covers the same lint half; running both double-counts findings. | lint-only alternative (naming, ordering, style); no breaking-change detection | opt-in (redundant -- `buf lint` covers it) | operator follow-up (not run by Sniff) |
 
 Notes: buf is the meta-tool here -- `buf lint` covers naming/structure and
@@ -31,10 +42,9 @@ classifies removed fields, renumbered fields, type changes, etc.). protolint
 only overlaps the lint half; if buf is present, protolint is redundant.
 
 The `--against` ref is a buf input string, not a bare git ref. Run it **from the
-proto module dir** and point at the base in that same repo:
-`buf breaking --against ".git#ref=<base-ref>,subdir=<proto-path>"` (the `subdir=`
-is required when protos live in a subdirectory, e.g.
-`buf breaking --against ".git#ref=main,subdir=proto"` from `proto/`). It can also
+repo root** with the module dir as the input and point at the base in that same
+repo: `buf breaking <module-dir> --against ".git#ref=<base-ref>,subdir=<module-dir>"`
+(`subdir=` is required when protos live in a subdirectory). It can also
 take a built `image.bin` or a registry module. **Exit 100 = breaking changes
 found** (not an error) -- parse stdout for the per-change lines. Reserve a baseline
 reference per spec so breaking checks are meaningful.

@@ -12,27 +12,37 @@ reliability, maintainability.
 How sniff knows manifests are k8s (vs plain YAML): key markers.
 - Files/extensions: `*.yaml`/`*.yml` containing `apiVersion:` + `kind:` + `metadata:`
 - Kustomize: `kustomization.yaml`, `base/` + `overlays/` layout
-- Helm: `Chart.yaml`, `templates/*.yaml` (templated -- lint the *rendered* output via `helm template | kube-linter lint -`)
+- Helm: `Chart.yaml`, `templates/*.yaml` (templated -- lint the *rendered* output; rendering is gated, see Tools)
 - Config that governs it: `.kube-linter.yaml`
 
 ## Tools
 
-Primary first. Exact invocation + machine-readable flag. Canonical detail in
-`../tooling.md`; this is the runnable subset.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag; shared run-rules live in
+`../tooling.md`.
+
+**Helm rendering is gated.** `helm template` evaluates the chart's templates and
+values, and charts with dependencies need `helm dependency build`, which
+downloads charts. Treat both as executing target configuration: recommend them
+only for a trusted local target with separate approval, never for a remote
+target. Without that approval, lint only plain (non-templated) manifests and
+record the Helm chart as a coverage gap.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| kube-linter | **Run recipe.** `kube-linter lint --format json <paths-or-dir>` from repo root -- pass the manifest files, a dir, or a glob; for Helm render first and pipe (`helm template . \| kube-linter lint --format json -`). Auto-reads `.kube-linter.yaml` for enabled/disabled checks (project config governs). **Exit:** 0 = clean · 1 = findings → parse the JSON `Reports[]` (`Check`/`Object`/`Diagnostic.Message`) · a parse/usage error = INVALID, never "clean". Best-practice + security-posture checks (limits, probes, runAsNonRoot). | missing limits/requests, probes, `runAsNonRoot`, `:latest`, privileged, hostPath | default-on | operator follow-up (not run by Sniff) |
-| kubeconform | **Run recipe.** `kubeconform -output json <files>` from repo root -- pass the explicit manifest paths. No project config; validates each resource's **schema** against the bundled k8s OpenAPI schemas. **Exit:** 0 = all valid · non-zero = invalid/errored resources → parse the JSON `resources[]` (`status` is `valid`/`invalid`/`error`/`skipped`). **Gotcha:** CRDs and out-of-tree kinds report as `error`/`skipped` because their schema is unknown -- that is NOT an invalid-manifest finding; supply `-schema-location` for the CRD schemas or note the skipped kinds as a coverage gap rather than a failure. Cheap schema gate only -- it does not catch missing-limits/probe smells. | schema validity against the k8s OpenAPI / CRD schemas | default-on | operator follow-up (not run by Sniff) |
+| kube-linter | **Run recipe.** `kube-linter lint --format json <paths-or-dir>` from repo root -- pass the manifest files, a dir, or a glob; for an approved Helm chart render first and pipe (`helm template . \| kube-linter lint --format json -`, see the gate above). Auto-reads `.kube-linter.yaml` for enabled/disabled checks (project config governs). **Exit:** 0 = clean · 1 = findings → parse the JSON `Reports[]` (`Check`/`Object`/`Diagnostic.Message`) · a parse/usage error = INVALID, never "clean". Best-practice + security-posture checks (limits, probes, runAsNonRoot). | missing limits/requests, probes, `runAsNonRoot`, `:latest`, privileged, hostPath | default-on | operator follow-up (not run by Sniff) |
+| kubeconform | **Run recipe.** `kubeconform -output json <files>` from repo root -- pass the explicit manifest paths. No project config; validates each resource's **schema** against Kubernetes JSON schemas that it **downloads by default** from the `yannh/kubernetes-json-schema` registry (network access; add `-cache <dir>` to reuse them, or `-schema-location <local-dir-template>` for offline runs). **Exit:** 0 = all valid · non-zero = invalid/errored resources → parse the JSON `resources[]` (`status` is `valid`/`invalid`/`error`/`skipped`). **Gotcha:** CRDs and out-of-tree kinds report as `error` (or `skipped` with `-ignore-missing-schemas`) because their schema is unknown -- that is NOT an invalid-manifest finding; supply `-schema-location` for the CRD schemas or note the skipped kinds as a coverage gap rather than a failure. A schema download failure is also a coverage gap, not a finding. Cheap schema gate only -- it does not catch missing-limits/probe smells. | schema validity against the k8s OpenAPI / CRD schemas | default-on | operator follow-up (not run by Sniff) |
 | trivy (config) | **Run recipe (opt-in, security).** `trivy config --format json <dir>` from repo root -- `<dir>` holds the manifests; trivy reads them statically. Reads `.trivyignore`. **Exit:** by default 0 even with findings unless `--exit-code 1` is set -- **do not infer clean from exit 0**; parse the JSON `Results[].Misconfigurations[]` · a scan crash = INVALID. Overlaps kube-linter on security context -- run kube-linter for posture, trivy as the security gate. | k8s misconfig: privileged, hostNetwork, capabilities, secrets as env | opt-in (security; overlaps kube-linter's security checks) | operator follow-up (not run by Sniff) |
 | checkov | **Run recipe (opt-in, security).** `checkov -d <dir> --framework kubernetes -o json` from repo root -- `-d` points at the manifest dir, `--framework kubernetes` scopes the rule set. Reads `.checkov.yaml` for skips. **Exit:** 0 = no failed checks · non-zero = failed checks → parse the JSON `results.failed_checks[]` (`check_id`/`check_name`/`file_path`) · a crash = INVALID. Reserve for benchmark-grade policy runs. | deep policy/benchmark checks | opt-in (security) | operator follow-up (not run by Sniff) |
 
 Notes: `kube-linter` is the primary semantic linter (reliability + security
 posture). `kubeconform` only validates *schema* (does the manifest parse against
-the API spec) -- run it as a cheap gate, it does not catch missing-limits/probe
+the API spec) -- recommend it as a cheap gate, it does not catch missing-limits/probe
 smells. `trivy config` and `checkov` overlap with kube-linter on security context;
-run kube-linter for posture and trivy as the security gate, reserve checkov for
-benchmark-grade runs. For Helm, render first (`helm template . | kube-linter lint -`).
+recommend kube-linter for posture and trivy as the security gate, reserve checkov for
+benchmark-grade runs. For an approved Helm chart, render first
+(`helm template . | kube-linter lint -`).
 
 ## Smell checklist
 

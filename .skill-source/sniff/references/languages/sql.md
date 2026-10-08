@@ -16,15 +16,20 @@ How sniff knows SQL is present: key files, extensions, config.
 
 ## Tools
 
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag.
+
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| sqlfluff | **Run recipe:** `cd` to the repo root FIRST (sqlfluff resolves `.sqlfluff`/`setup.cfg` and templater state from cwd -- a leaked subdir cwd from a prior step is the "ran against frontend/" bug), then pass **absolute or repo-root-relative** paths: `sqlfluff lint --format json --dialect <d> <abs-paths>`. **`--dialect` is MANDATORY** -- sqlfluff errors without it unless `.sqlfluff` sets one; detect the dialect (postgres/mysql/sqlite/bigquery/snowflake/ansi) from the repo, else default `ansi`. **Exit:** 0 clean · 1 = lint violations (parse JSON) · 2 = usage/config error → INVALID. | dialect-aware style + anti-patterns (`SELECT *`, implicit joins, ambiguous refs, layout) | default-on | operator follow-up (not run by Sniff) |
+| sqlfluff | **Run recipe:** `cd` to the repo root FIRST (sqlfluff resolves `.sqlfluff`/`setup.cfg` and templater state from cwd -- a leaked subdir cwd from a prior step is the "ran against frontend/" bug), then pass **absolute or repo-root-relative** paths: `sqlfluff lint --format json --dialect <d> <abs-paths>`. **`--dialect` is MANDATORY** -- sqlfluff errors without it unless `.sqlfluff` sets one. Take the dialect (postgres/mysql/sqlite/bigquery/snowflake/tsql/…) from `.sqlfluff`, `[tool.sqlfluff]`, the dbt adapter, or the connection string. **Unknown dialect:** do NOT default to `ansi` -- a wrong dialect turns valid dialect syntax into false parse errors. Ask the user for the dialect in an interactive run; otherwise record sqlfluff as a coverage gap naming the unresolved dialect. **Exit:** 0 clean · 1 = lint violations (parse JSON) · 2 = usage/config error → INVALID. | dialect-aware style + anti-patterns (`SELECT *`, implicit joins, ambiguous refs, layout) | default-on | operator follow-up (not run by Sniff) |
 | squawk | `squawk <migration.sql>` | dangerous Postgres migrations (locking ALTER, table rewrite, NOT NULL without default) | opt-in (only when Postgres migration files are present) | operator follow-up (not run by Sniff) |
 | jscpd | `jscpd --reporters json --silent --min-tokens 50 <path>` | cross-file query duplication (no native SQL dup detector) | default-on | operator follow-up (not run by Sniff) |
 
 Notes: sqlfluff is primary and is dialect-aware (`postgres`, `bigquery`,
-`snowflake`, `mysql`, `tsql`, `ansi`, …) -- always pass the project's real dialect.
-squawk is Postgres-only and targets migration safety, not query style; run it on
+`snowflake`, `mysql`, `tsql`, `ansi`, …) -- always pass the project's real dialect,
+never a guessed one.
+squawk is Postgres-only and targets migration safety, not query style; recommend it on
 migration files on deep passes. jscpd is the dup floor since SQL has no native
 copy-paste detector. None of these understand the live schema, so missing-index
 and N+1 judgments come from the smell checklist, not a tool. **sqlint is
@@ -43,7 +48,7 @@ redundant with sqlfluff -- do not add it.**
 | Missing index on FK/filter | FK or hot `WHERE`/`JOIN` column with no supporting index | Add index on the FK / high-selectivity filter column |
 | Ambiguous column ref | `SELECT id FROM a JOIN b ...` where both have `id` | Qualify every column: `a.id` |
 | `DISTINCT` masking a join | `SELECT DISTINCT ...` added to hide row fan-out from a bad join | Fix the join cardinality; `DISTINCT` is the symptom |
-| Dangerous migration | `ALTER TABLE big ADD COLUMN c int NOT NULL` (rewrite + long lock); `ALTER ... TYPE`; non-`CONCURRENTLY` index build | Add nullable + backfill + set NOT NULL; `CREATE INDEX CONCURRENTLY`; squawk flags these |
+| Dangerous migration | `ALTER TABLE big ADD COLUMN c int NOT NULL` with no default (fails outright on a non-empty table); `ADD COLUMN ... DEFAULT clock_timestamp()` or another volatile default (full table rewrite); `ALTER ... TYPE` (usually a rewrite); non-`CONCURRENTLY` index build (blocks writes) | Add the column nullable, or with a constant default (no rewrite since Postgres 11), backfill, then `SET NOT NULL`; `CREATE INDEX CONCURRENTLY`; squawk flags these |
 
 ## Idioms & style authorities
 

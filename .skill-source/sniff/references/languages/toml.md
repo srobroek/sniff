@@ -15,15 +15,21 @@ How sniff knows TOML is present: key files, extensions, config.
 
 ## Tools
 
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). The default-on rows are offline; online
+schema validation is a separate opt-in row because it fetches schemas over the
+network.
+
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| taplo | **Run recipe:** always pass **explicit file paths** and disable online schema fetch -- `taplo lint --no-schema <files>`. Bare `taplo lint` (no paths) globs the cwd and the schema fetch over the network can **panic on macOS** (taplo 0.10) -- `--no-schema` + explicit files avoids it. If you want schema validation for `Cargo.toml`/`pyproject.toml`, run a second pass without `--no-schema` only on those files and treat a network/panic failure as a skipped check, not a finding. **Exit:** 0 clean · non-zero = lint problems (or, if it crashed, INVALID -- re-run with `--no-schema`). | syntax, duplicate keys, schema conformance (built-in catalog for Cargo/pyproject) | default-on | operator follow-up (not run by Sniff) |
-| taplo | **Run recipe:** `taplo format --check <files>` (note: subcommand is `format`, `fmt` is an alias; pass explicit paths). Reports formatting drift; advisory. **Exit:** 0 already-formatted · non-zero = would reformat. | formatting/style diff (table style, alignment, key order) | default-on | operator follow-up (not run by Sniff) |
+| taplo (lint) | **Run recipe:** always pass **explicit file paths** and disable online schema fetch -- `taplo lint --no-schema <files>`. Bare `taplo lint` (no paths) globs the cwd and the schema fetch over the network can **panic on macOS** (taplo 0.10) -- `--no-schema` + explicit files avoids it. **Exit:** 0 clean · non-zero = lint problems (or, if it crashed, INVALID -- re-run with `--no-schema`). | syntax, duplicate keys (offline; no schema conformance) | default-on | operator follow-up (not run by Sniff) |
+| taplo (format) | **Run recipe:** `taplo format --check <files>` (note: subcommand is `format`, `fmt` is an alias; pass explicit paths). Reports formatting drift; advisory. **Exit:** 0 already-formatted · non-zero = would reformat. | formatting/style diff (table style, alignment, key order) | default-on | operator follow-up (not run by Sniff) |
+| taplo (schema) | **Run recipe (opt-in, network).** `taplo lint <files>` without `--no-schema`, only on schema-backed files such as `Cargo.toml`/`pyproject.toml`; it fetches the catalog schema over the network. Treat a network/panic failure as a skipped check (coverage gap), not a finding. **Exit:** 0 = conforms · non-zero = schema or lint problems (parse) · crash = INVALID. | schema conformance (online JSON Schema Store catalog for Cargo/pyproject) | opt-in (network access; schema-backed files only) | operator follow-up (not run by Sniff) |
 
 Notes: taplo is the single tool -- it lints, formats, and validates against
 schemas in one binary. `taplo lint` ships an online schema catalog (the JSON
 Schema Store) and will validate `Cargo.toml`/`pyproject.toml` automatically when
-it recognizes them; `--schema <url>` forces a specific schema. `taplo fmt --check`
+it recognizes them; `--schema <url>` forces a specific schema. `taplo format --check`
 reports style drift without writing. No grep fallback; if taplo is absent, record
 a coverage gap.
 
