@@ -10,28 +10,31 @@ How sniff knows Go is present: a module manifest plus `.go` sources.
 
 ## Tools
 
-The analyzers to run, primary first. golangci-lint is the meta-linter; it
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). golangci-lint is the meta-linter; it
 collapses ~50 analyzers into one AST parse, so most dimensions need no extra tool.
+No fixed Sniff recipe covers Go: `lizard:complexity` does not scan `.go` files.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
 | golangci-lint (primary) | From repo root: `golangci-lint run --output.json.path stdout --enable=gocyclo,gocognit,dupl,revive,unparam,gocritic,misspell ./...` (the `./...` walks the module -- no explicit paths). **NOTE:** v2 uses `--output.<fmt>.path`; if the installed version rejects `--output.json.path`, fall back to `--out-format json`. **Config:** honors `.golangci.yml`/`.yaml`/`.toml` if present -- `--enable` is ADDITIVE (it adds the smell linters on top, since defaults are only `errcheck`/`govet`/`ineffassign`/`staticcheck`/`unused`); when the repo already enables them in config, don't fight it. **Exit:** 1 = issues found (parse the JSON) · 0 = clean · any OTHER code = config/usage error → INVALID, fix and re-run (never report as clean). | complexity (gocyclo/gocognit), dup (dupl), dead code (unused), idioms (revive/gocritic), bugs (staticcheck), magic numbers (mnd), unchecked errors (errcheck), unused params (unparam), spelling (misspell) | default-on | operator follow-up (not run by Sniff) |
-| go vet | `go vet ./...` | built-in correctness checks (printf, struct tags, lock copying) | default-on | bundled with toolchain |
+| go vet | `go vet ./...` | built-in correctness checks (printf, struct tags, lock copying) | opt-in (redundant -- `govet` is in golangci-lint's default set; recommend only when golangci-lint cannot run) | bundled with toolchain |
 | deadcode | From repo root: `deadcode -json ./...` (whole-program reachability -- `./...` walks the module). Needs a BUILDABLE `main` to anchor reachability; a pure library yields fewer/no results (note that as a coverage limit, not "clean"). No config. **Exit:** 0 always (success doesn't signal findings) -- parse the emitted JSON list to determine findings; a build/usage failure (nonzero) is INVALID, fix and re-run. | whole-program reachability for unused functions -- `golangci`'s `unused` does NOT cover this | default-on | operator follow-up (not run by Sniff) (`golang.org/x/tools/cmd/deadcode`) |
 | staticcheck / gocyclo / gocognit (standalone) | Opt-in and **REDUNDANT** -- all three are already bundled in golangci-lint above, so normally do NOT run them separately (only if golangci-lint itself won't install/run). From repo root: `staticcheck ./...` / `gocyclo .` / `gocognit .` (staticcheck walks the module via `./...`; gocyclo/gocognit take a path). **Exit:** nonzero = findings present (parse stdout) · 0 = clean · usage/crash = INVALID. | bugs / cyclomatic + cognitive complexity, run individually | opt-in (redundant -- bundled in golangci-lint) | manual: `go install honnef.co/go/tools/cmd/staticcheck@latest` (and the gocyclo/gocognit cmds) |
 | gosec | `gosec -fmt json ./...` | security issues (injection, weak crypto, file perms) | opt-in (security, not smell) | manual: `go install github.com/securego/gosec/v2/cmd/gosec@latest` |
 
-Notes: golangci-lint is the single entry point -- it already wraps `go vet` and
-makes **lizard and jscpd redundant for Go** (gocyclo/gocognit cover complexity,
-`dupl` covers token duplication). **But its defaults are minimal** -- only
+Notes: golangci-lint is the single entry point -- it already wraps `go vet` (its
+default `govet` linter), so do not recommend a separate `go vet` follow-up beside
+it, and it covers what lizard and jscpd would add for Go (gocyclo/gocognit cover
+complexity, `dupl` covers token duplication). **But its defaults are minimal** -- only
 `errcheck`/`govet`/`ineffassign`/`staticcheck`/`unused` run out of the box, so the
 smell linters sniff relies on (`gocyclo`, `gocognit`, `dupl`, `revive`,
 `unparam`, `gocritic`, `misspell`) must be `--enable`d explicitly (unless the repo
 already enables them in `.golangci.yml`). Respect `.golangci.yml`: if the project
-disables a linter, do not re-flag what it intentionally suppresses. Always run
+disables a linter, do not re-flag what it intentionally suppresses. Always recommend
 `deadcode` -- it does whole-program unreachable-function detection that golangci's
-file-local `unused` linter does **not** cover; note the gap if it is not
-installed. Running standalone `staticcheck`/`gocyclo`/`gocognit` or `gosec` is
+file-local `unused` linter does **not** cover; record it as a gap either way.
+Standalone `staticcheck`/`gocyclo`/`gocognit` or `gosec` is
 opt-in: the first three are already bundled in golangci-lint (redundant), and
 `gosec` is a security scanner rather than a smell detector.
 
@@ -50,7 +53,7 @@ idiomatic Go alternative. Go intentionally avoids deep abstraction -- keep fixes
 | Ignored `context.Context` | A `ctx` param accepted then never passed down / never checked for cancellation | Thread `ctx` through call chain; honor `ctx.Done()` / pass to downstream calls. |
 | Goroutine leak / missing timeout | `go f()` with no lifecycle owner; blocking channel/IO with no `ctx` or deadline | Bound with `ctx` + `context.WithTimeout`; ensure every goroutine has an exit path. |
 | Stuttering name | `pkg.PkgThing`, `http.HTTPServer`, `user.UserService` | Drop the package prefix from the identifier -- `pkg.Thing`, `http.Server`. |
-| Capitalized/punctuated error string | `errors.New("Failed to open.")` | Lowercase, no trailing punctuation: `errors.New("open config: %w")` style. |
+| Capitalized/punctuated error string | `errors.New("Failed to open.")` | Lowercase, no trailing punctuation: `errors.New("open config")`, or `fmt.Errorf("open config: %w", err)` when wrapping (`errors.New` does not format verbs). |
 | Mutable package-level state | Exported `var` mutated at runtime; shared globals | Pass dependencies explicitly; confine state to a struct the caller owns. |
 
 ## Idioms & style authorities

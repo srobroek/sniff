@@ -39,8 +39,8 @@ runnable from its recipe alone, not improvised:
    have compiled (clippy) is also INVALID.
 4. **Don't emit default-noise the project never opted into.** When a tool's
    defaults are stricter than the repo's actual rules and there's no project
-   config, suppress the defaults inline (e.g. yamllint with no `.yamllint`/
-   `.editorconfig`: `yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable}}" -f parsable <paths>` -- GitHub workflows routinely exceed 80 cols; 80-col + document-start are NOT project rules). The per-tool recipe states its specific default-noise suppression.
+   config, suppress the defaults inline (e.g. yamllint with no `.yamllint`:
+   `yamllint -s -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: {level: warning, check-keys: false}}}" -f parsable <paths>` -- GitHub workflows routinely exceed 80 cols; 80-col + document-start are NOT project rules, while `relaxed` disables `truthy` and demotes most rules to warnings, so re-enable `truthy` and pass `-s` to get a non-zero exit on warnings). Suppress only the noise: never disable a rule whose dimension the doc still claims to cover. The per-tool recipe states its specific default-noise suppression.
 5. **Flag exactly as written.** Tool flag styles differ (Go tools use single-dash
    `-format`, not `--format`; many use `--`). Copy the recipe's flags verbatim;
    do not normalize or guess a flag.

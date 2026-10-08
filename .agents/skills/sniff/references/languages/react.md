@@ -15,8 +15,11 @@ How sniff knows React is present.
 
 ## Tools
 
-Run ESLint with the React plugin stack first; it is the meta-linter and the only
-tool that flags the highest-value hook smell (`exhaustive-deps`).
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Recommend ESLint with the React plugin stack
+first; it is the meta-linter and the only tool that flags the highest-value hook
+smell (`exhaustive-deps`). The fixed `lizard:complexity` recipe is the Sniff
+coverage for component function complexity (it scans `.jsx`/`.tsx`).
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|

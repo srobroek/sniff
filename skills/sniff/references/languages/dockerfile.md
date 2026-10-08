@@ -13,8 +13,12 @@ How sniff knows a Dockerfile is present: key files, extensions, config.
 
 ## Tools
 
-Primary first. Exact invocation + machine-readable flag. Canonical detail in
-`../tooling.md`; this is the runnable subset.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag; shared run-rules live in
+`../tooling.md`. The static rows read the Dockerfile only; never build or pull
+an image for the audit -- `trivy image` applies only to an image the operator
+already has locally.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
@@ -25,7 +29,7 @@ Primary first. Exact invocation + machine-readable flag. Canonical detail in
 Notes: `hadolint` is the primary AST linter and already runs `shellcheck` over
 every `RUN` body, so do not separately shellcheck a Dockerfile. `trivy config`
 reads the Dockerfile statically; `trivy image` needs a built image and surfaces
-CVEs/secrets baked into layers -- run it on a deep pass when an image is available.
+CVEs/secrets baked into layers -- recommend it on a deep pass when an image is available.
 `trivy config` and hadolint overlap on a few rules (root user, HEALTHCHECK); treat
 hadolint as authoritative for build-time style and trivy for the security gate.
 

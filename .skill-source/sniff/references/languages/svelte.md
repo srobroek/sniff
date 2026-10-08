@@ -16,13 +16,23 @@ How sniff knows Svelte is present.
 
 ## Tools
 
-Run `eslint-plugin-svelte` first, then `svelte-check` for compiler-level
-template + type diagnostics ESLint does not produce.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Recommend `eslint-plugin-svelte` first, then
+`svelte-check` for compiler-level template + type diagnostics ESLint does not
+produce.
+
+**Trust gate.** Both tools execute project code: ESLint loads the repo's
+`eslint.config.*`, and `svelte-check` loads `svelte.config.js` and its
+preprocessors. Recommend them only for a trusted local target, never a remote
+one, and only against the target's own installed `devDependencies` (`npx --no`
+fails instead of downloading a missing package). Installing dependencies
+(`npm ci`) is a separate step that needs its own approval; without it, record
+both as coverage gaps.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| ESLint + `eslint-plugin-svelte` | **An ESLint plugin, not a separate binary.** **Run:** ensure `eslint-plugin-svelte` is in the repo's eslint config (it adds the `.svelte` parser + reactivity rules), then the single `npx eslint --format json .` run executes it (file set = trailing `.`). **Config:** auto-uses the repo's eslint config -- no flag; if the plugin isn't configured, `.svelte` files are skipped (coverage gap -- note it). **Exit:** 0 = clean · **1 = lint errors → parse the JSON** · **2 = config/crash → INVALID.** **Gotcha:** needs `node_modules` present (`npm ci` in a fresh worktree). | component smells: `svelte/require-each-key`, `svelte/no-reactive-reassign`, `svelte/no-dom-manipulating`, reactivity rules | default-on | operator follow-up (not run by Sniff) |
-| `svelte-check` | **Run:** `npx svelte-check --output machine` from the repo root (the Svelte compiler's own diagnostic pass -- types + a11y + unused-CSS across markup that ESLint can't see). It discovers `.svelte` files via `svelte.config.js` + tsconfig; no path args. **Config:** `svelte.config.js`/tsconfig govern; `--output machine` gives the parseable line format (`ERROR`/`WARNING` rows) -- **parse the machine output**, not human text. **Exit:** 0 = no errors · nonzero = diagnostics (parse the machine rows) · a config-load/crash error = INVALID. **Gotcha:** needs deps installed -- it loads the svelte compiler + language tools and resolves `@types/*`; a worktree without `npm ci` mis-reports. | compiler diagnostics + TS across markup, missing keys, unused props, a11y warnings | default-on | operator follow-up (not run by Sniff) |
+| ESLint + `eslint-plugin-svelte` | **An ESLint plugin, not a separate binary.** **Run:** ensure `eslint-plugin-svelte` is in the repo's eslint config (it adds the `.svelte` parser + reactivity rules), then the single `npx --no eslint --format json .` run executes it (file set = trailing `.`). **Config:** auto-uses the repo's eslint config -- no flag; if the plugin isn't configured, `.svelte` files are skipped (coverage gap -- note it). **Exit:** 0 = clean · **1 = lint errors → parse the JSON** · **2 = config/crash → INVALID.** **Gotcha:** needs `node_modules` present; see the trust gate above before any `npm ci`. | component smells: `svelte/require-each-key`, `svelte/no-reactive-reassign`, `svelte/no-dom-manipulating`, reactivity rules | default-on | operator follow-up (not run by Sniff) |
+| `svelte-check` | **Run:** `npx --no svelte-check --output machine` from the repo root (the Svelte compiler's own diagnostic pass -- types + a11y + unused-CSS across markup that ESLint can't see). It discovers `.svelte` files via `svelte.config.js` + tsconfig; no path args. **Config:** `svelte.config.js`/tsconfig govern; `--output machine` gives the parseable line format (`ERROR`/`WARNING` rows) -- **parse the machine output**, not human text. **Exit:** 0 = no errors · nonzero = diagnostics (parse the machine rows) · a config-load/crash error = INVALID. **Gotcha:** needs deps installed -- it loads the svelte compiler + language tools and resolves `@types/*`; a worktree without installed deps mis-reports (see the trust gate above). | compiler diagnostics + TS across markup, missing keys, unused props, a11y warnings | default-on | operator follow-up (not run by Sniff) |
 
 Notes: `eslint-plugin-svelte` is the Svelte meta-linter (parses `.svelte`).
 `svelte-check` is the compiler's own diagnostic pass -- it surfaces template/type
@@ -41,7 +51,7 @@ split -- flag *mixing* the two reactivity models in one component.
 | Store where local state suffices | `writable(0)` for a counter used only inside one component | Local `let` (legacy) or `$state` (runes) -- stores are for *cross-component* shared state |
 | Missing reactive declaration | Manually recomputing a value in handlers instead of deriving it | `$: doubled = count * 2` (legacy) or `$derived(count * 2)` (runes) |
 | Mixing runes and legacy reactivity | `$:` reactive statements alongside `$state`/`$derived` in one component | Commit to one model per component (runes for Svelte 5 code) |
-| Unnecessary reactivity | `$:` / `$effect` wrapping work that runs once or belongs in an event handler | Plain statement in setup, or do it in the `on:click` handler |
+| Unnecessary reactivity | `$:` / `$effect` wrapping work that runs once or belongs in an event handler | Plain statement in setup, or do it in the event handler (`onclick={...}` in Svelte 5; `on:click` only in legacy-mode components) |
 | Logic that belongs in a module | Data fetching / transforms / parsing inline in `<script>` | Extract to a `.ts`/`.svelte.ts` module function; import it |
 | Mutating props | Reassigning an `export let` prop / a `$props()` value in the child | Use `bind:` from the parent, or emit/callback; treat props as inputs |
 | Missing `{#each}` key | `{#each items as item}` with no `(item.id)` on a dynamic list | `{#each items as item (item.id)}` |

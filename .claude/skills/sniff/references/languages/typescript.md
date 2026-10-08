@@ -16,7 +16,11 @@ How sniff knows this language/format is present: key files, extensions, config.
 
 ## Tools
 
-The analyzers to run, primary first. Exact invocation + machine-readable flag.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag. The fixed `lizard:complexity`
+recipe is the Sniff coverage for TS/JS function complexity (it scans
+`.ts`/`.tsx`/`.js`/`.jsx`).
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|

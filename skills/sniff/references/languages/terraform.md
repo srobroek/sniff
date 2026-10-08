@@ -15,26 +15,28 @@ How sniff knows Terraform is present: key files, extensions, config.
 
 ## Tools
 
-Primary first. Exact invocation + machine-readable flag. Canonical detail in
-`../tooling.md`; this is the runnable subset.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag; shared run-rules live in
+`../tooling.md`. None of them is installed or initialized during a Sniff run.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| tflint | **Run recipe.** Either `cd` to the module dir and run `tflint --format json`, or from the repo root run `tflint --recursive --format json` to walk every module. Run `tflint --init` first to load the provider ruleset (AWS/GCP/Azure). Auto-reads `.tflint.hcl` for enabled plugins/rules (project config governs). **Exit:** 0 = clean · 2 = issues found → parse the JSON `issues[]` (each has `rule`/`message`/`range`) · 1 = a tflint error (bad config, plugin load failure) = INVALID, never "clean". **Gotcha:** without `--init` the provider rules are silently absent -- coverage gap, not a clean run. | provider-aware rules: deprecated syntax, unpinned providers, invalid instance types, unused declarations, naming | default-on | operator follow-up (not run by Sniff) |
+| tflint | **Run recipe.** Either `cd` to the module dir and run `tflint --format json`, or from the repo root run `tflint --recursive --format json` to walk every module. Auto-reads `.tflint.hcl` for enabled plugins/rules (project config governs); the bundled `terraform` ruleset needs no install. **Plugin install is gated:** `tflint --init` downloads the provider rulesets (AWS/GCP/Azure) declared in `.tflint.hcl` from GitHub and installs executables under `~/.tflint.d/plugins` -- that is installation of target-selected code, not a probe, so run it only with separate install approval on a trusted target, never on a remote one. **Exit:** 0 = clean · 2 = issues found → parse the JSON `issues[]` (each has `rule`/`message`/`range`) · 1 = a tflint error (bad config, `Plugin "x" not found. Did you run "tflint --init"?`) = INVALID, never "clean". **Gotcha:** without approved plugins, run with `--config` pointing at an empty temporary file so only the bundled `terraform` ruleset loads, and record the provider-specific rules as a coverage gap, not a clean run. | provider-aware rules: deprecated syntax, unpinned providers, invalid instance types, unused declarations, naming | default-on | operator follow-up (not run by Sniff) |
 | terraform fmt | **Run recipe.** `terraform fmt -check -recursive` from repo root -- `-check` reports drift without rewriting, `-recursive` descends into submodules; it prints the paths of mis-formatted files. **Exit:** 0 = all canonical · non-zero = drift (the listed files are the finding, advisory style only) · a parse error on malformed HCL = INVALID. Built-in toolchain, no config. | canonical formatting (style); built-in toolchain | default-on | bundled toolchain |
-| terraform validate | **Run recipe.** `terraform validate -json` from inside the module dir -- it validates type/reference correctness against an **initialized** module, so `terraform init` (or `-backend=false`) must have run first. **Exit:** 0 = valid (read `valid`/`diagnostics` in the JSON) · 1 = validation diagnostics → parse `diagnostics[]`. **Gotcha:** if the module is not initialized, validate errors out -- do NOT report that as a finding; note "validate skipped, module not initialized" as a coverage gap and lean on tflint instead (CI often lacks init). | type/reference validity within an initialized module; built-in toolchain | default-on | bundled toolchain |
+| terraform validate | **Run recipe.** `terraform validate -json` from inside the module dir -- it validates type/reference correctness against an **already initialized** module. Never run `terraform init` (even `-backend=false`) for the audit: it downloads providers/modules and writes `.terraform/` and `.terraform.lock.hcl` into the target. **Exit:** 0 = valid (read `valid`/`diagnostics` in the JSON) · 1 = validation diagnostics → parse `diagnostics[]`. **Gotcha:** if the module is not initialized, validate errors out -- do NOT report that as a finding; note "validate skipped, module not initialized" as a coverage gap and lean on tflint instead. | type/reference validity within an initialized module; built-in toolchain | default-on | bundled toolchain |
 | trivy | **Run recipe (opt-in, security).** `trivy config --format json <dir>` from repo root -- `<dir>` is the Terraform root/module dir (trivy walks it for `.tf`). No tflint-style init needed; reads `.trivyignore` for suppressions. **Exit:** by default 0 even with findings unless `--exit-code 1` is set -- so **do not infer clean from exit 0**; parse the JSON `Results[].Misconfigurations[]` (each has `ID`/`Severity`/`Message`) · a scan/parse crash = INVALID. Security pass, not a code smell. | IaC misconfig: open ingress, public buckets, missing encryption, IAM `*` | opt-in (security pass, not a smell) | operator follow-up (not run by Sniff) |
 | checkov | **Run recipe (opt-in, security).** `checkov -d <dir> -o json` from repo root -- `-d` points at the Terraform dir (recurses). Reads `.checkov.yaml` for skips/config if present. **Exit:** 0 = no failed checks · non-zero = failed checks → parse the JSON `results.failed_checks[]` (`check_id`/`check_name`/`file_path`) · a crash = INVALID. Overlaps trivy heavily; reserve checkov for benchmark-grade policy runs. | deep policy checks (1000+ rules): CIS benchmarks, encryption, logging | opt-in (security pass, not a smell) | operator follow-up (not run by Sniff) |
 
-Notes: `tflint` is the provider-aware meta-linter (init plugins with `tflint --init`
-to load the AWS/GCP/Azure ruleset); it plus `terraform fmt -check` and
-`terraform validate` are the default-on correctness/style pass. `trivy config` and
+Notes: `tflint` is the provider-aware meta-linter (provider rulesets need the
+gated `tflint --init` install above); it plus `terraform fmt -check` and
+`terraform validate` are the default-on correctness/style follow-ups. `trivy config` and
 `checkov` are the **security** pass (opt-in, not smell): they overlap heavily on
-misconfig -- run both on a deep pass, but if one is present trivy is faster and
+misconfig -- recommend both on a deep pass, but if one is present trivy is faster and
 covers the same top-severity findings; reserve checkov for benchmark-grade policy
 runs. **tfsec is deprecated -- its rules folded into `trivy config`; use trivy, not
-tfsec.** `terraform validate` only checks an *initialized* module (`terraform init`
-must have run); skip in CI where init is unavailable and lean on tflint instead.
+tfsec.** `terraform validate` only checks an *already initialized* module; where
+`.terraform/` is absent, record the gap and lean on tflint instead.
 
 ## Smell checklist
 
@@ -46,7 +48,7 @@ Beyond what tools flag. Each: what it looks like + the idiomatic alternative.
 | Copy-paste resources | Near-identical `resource` blocks differing by name/env | Extract a module; iterate with `for_each` |
 | `count` vs `for_each` misuse | `count` over a list whose order changes → destroy/recreate churn | `for_each` over a map/set for keyed, stable resources |
 | Missing lifecycle guard | Stateful resource (RDS, S3, DynamoDB) with no `prevent_destroy` | `lifecycle { prevent_destroy = true }` on stateful/data resources |
-| No remote state / locking | Default local backend, `terraform.tfstate` in repo | `backend "s3"` + DynamoDB lock table (or `gcs`/`azurerm` native locking) |
+| No remote state / locking | Default local backend, `terraform.tfstate` in repo; or an S3 backend locking only through the deprecated `dynamodb_table` | `backend "s3"` with `use_lockfile = true` (S3-native locking, GA in Terraform 1.11; DynamoDB locking is deprecated), or `gcs`/`azurerm` native locking |
 | Overly permissive IAM | `Action = "*"`, `Resource = "*"`, `Principal = "*"` | Scope actions/resources; least privilege |
 | Public ingress | `cidr_blocks = ["0.0.0.0/0"]` on SSH/RDP/DB ports | Restrict to known CIDRs; use SG references / bastions |
 | Missing tags | Resources with no `tags` (cost/ownership/compliance) | `default_tags` in provider + per-resource `tags` |
@@ -89,6 +91,9 @@ fix is composition + `for_each`, not inheritance.
   secret, not every literal.
 - A single local-state throwaway/sandbox module legitimately skips remote backend;
   weight the "no remote state" smell by whether the code looks production-bound.
+- A `dynamodb_table` S3 backend is not a finding when `required_version` still
+  allows Terraform < 1.10 (no S3-native locking there), or while both are set
+  during a migration; flag it only as a deprecation once `use_lockfile` is available.
 - Security smells (public `0.0.0.0/0` ingress on admin ports, IAM `*:*`, plaintext
   secrets) are rarely false positives -- weight them high in the severity column.
 

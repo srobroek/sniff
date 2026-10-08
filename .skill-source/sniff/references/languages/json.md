@@ -16,14 +16,18 @@ How sniff knows JSON is present: key files, extensions, config.
 
 ## Tools
 
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag.
+
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| biome | **Run recipe.** `npx biome lint --reporter=json <files>` from repo root -- pass the resolved `.json`/`.jsonc` paths explicitly. Auto-reads `biome.json`/`biome.jsonc` from the repo for enabled rules + formatter settings; with no config biome applies its built-in recommended rules (dup-key detection is on by default). **Exit:** 0 = clean · 1 = lint diagnostics found → parse the JSON `diagnostics` array · any usage/crash (e.g. `npx` cannot resolve biome, bad config) = INVALID, never "clean". **Gotcha:** the binary is `@biomejs/biome`; if `npx biome` is not provisioned record a coverage gap rather than guessing a path. | duplicate keys, formatting, basic structure | default-on | operator follow-up (not run by Sniff) |
+| biome | **Run recipe.** `npx --no biome check --reporter=json <files>` from repo root -- pass the resolved `.json`/`.jsonc` paths explicitly. `check` runs the formatter **and** the linter without writing (`biome lint` alone skips formatting, so it cannot report format drift). Auto-reads `biome.json`/`biome.jsonc` from the repo for enabled rules + formatter settings; with no config biome applies its built-in recommended rules (dup-key detection is on by default). **Exit:** 0 = clean · 1 = diagnostics found (lint or format) → parse the JSON `diagnostics` array · any usage/crash (bad config, unresolvable binary) = INVALID, never "clean". **Gotcha:** the package is `@biomejs/biome`, a project-local `devDependency`; `npx --no` fails instead of downloading it -- if it is not installed, record a coverage gap rather than guessing a path. | duplicate keys, formatting, basic structure | default-on | operator follow-up (not run by Sniff) |
 | check-jsonschema | **Run recipe (opt-in).** `check-jsonschema --schemafile <schema> <files>` from repo root -- `<schema>` is a local schema path or a registered URL, `<files>` the explicit JSON paths to validate against it. No project config of its own; the schema you pass IS the config (resolve it from the file's `$schema` field or a known schema-backed config like GitHub workflows / Renovate). **Exit:** 0 = conforms · 1 = validation errors → parse the per-instance error output · 2 = usage error (missing/unresolvable schema) = INVALID, fix the `--schemafile`. Only run when a schema actually exists; absent one, this is not a finding. | schema conformance against a JSON Schema | opt-in (only when a `$schema` field or a known schema-backed config -- GitHub workflows, Renovate, etc. -- is present) | operator follow-up (not run by Sniff) |
 
 Notes: biome is the primary format linter and catches the high-value duplicate-key
-case plus formatting; it also covers JSON inside JS/TS projects already using
-biome. check-jsonschema is the conformance gate when a schema exists (point
+case plus formatting drift (through `biome check`); it also covers JSON inside
+JS/TS projects already using biome. check-jsonschema is the conformance gate when a schema exists (point
 `--schemafile` at a local schema or a registered URL). **jq is NOT a linter and is
 excluded from the tool tiers** -- it is for ad-hoc exploration and one-off
 extraction in the analysis itself (`jq -e <filter> <file>`); never treat jq exit
@@ -73,8 +77,11 @@ format/structure issues better cited to the JSON Schema spec than the catalog.
   not authored source -- do not flag their formatting, key order, or size.
 - Casing is dictated by external APIs/protocols; matching an upstream's
   `snake_case` is correct even if the rest of the repo is `camelCase`.
-- **Honor `.editorconfig` before flagging indentation.** Tools won't read it; a
-  declared `[*.json] indent_size` overrides a linter's default expectation, so a
-  mismatch there is config-driven, not a smell.
+- **Honor `.editorconfig` before flagging indentation.** Biome reads
+  `.editorconfig` (indent style/size, line endings, final newline) only when
+  `formatter.useEditorconfig` is `true` (default `false`), and `biome.json`
+  settings take precedence. When it is off, a declared `[*.json] indent_size`
+  still overrides a linter's default expectation, so a mismatch there is
+  config-driven, not a smell.
 
 **Execution routing:** Sniff coverage comes only from fixed recipes run through `sniff_run_analyzer` (`lizard:complexity`, `opengrep:hardcoded-values`, `gitleaks:tracked-history`). Every tool in this table is an operator follow-up: never run it during a Sniff run. Record each dimension it would cover as a `gap` coverage entry naming the tool, and list its command as a follow-up the user may run outside Sniff.

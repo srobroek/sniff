@@ -17,8 +17,9 @@ How sniff knows a GraphQL contract is present.
 
 ## Tools
 
-Primary first. graphql-eslint lints SDL design; graphql-inspector diffs two
-schema versions for breaking changes.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). graphql-eslint lints SDL design;
+graphql-inspector diffs two schema versions for breaking changes.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|

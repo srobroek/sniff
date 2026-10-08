@@ -9,8 +9,8 @@ type-coercion smells. This doc is the format-only reference.
 > - CI/CD pipelines (GitHub Actions, etc.) → `ci-cd.md` (actionlint, zizmor, pinact).
 >
 > This doc covers ONLY format/encoding issues that apply to any YAML file
-> (config, fixtures, data). For a k8s manifest or a workflow file, run the
-> functional tools from those docs *in addition to* yamllint.
+> (config, fixtures, data). For a k8s manifest or a workflow file, also apply
+> those docs' checklists and operator follow-ups *in addition to* yamllint.
 
 ## Detect
 
@@ -23,19 +23,24 @@ How sniff knows YAML is present: key files, extensions, config.
 
 ## Tools
 
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag.
+
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| yamllint | **Run recipe:** if the repo has a `.yamllint`/`.yamllint.yaml`, use it: `yamllint -f parsable <paths>`. If it has **no** yamllint/`.editorconfig` config, the defaults (80-col `line-length`, `document-start`) are NOT the project's rules and produce pure noise (GitHub workflows routinely exceed 80 cols) -- suppress them inline: `yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable}}" -f parsable <paths>`. Pass explicit paths, not `.`. **Exit:** 0 clean · 1 = problems (parse). | Norway/truthy coercion, tabs, indent consistency, duplicate keys (NOT line-length/document-start unless the project enables them) | default-on | operator follow-up (not run by Sniff) |
+| yamllint | **Run recipe:** if the repo has a `.yamllint`/`.yamllint.yaml`/`.yamllint.yml`, use it: `yamllint -s -f parsable <paths>`. If it has **no** yamllint config, the `default` preset's 80-col `line-length` and `document-start` are NOT the project's rules and produce pure noise (GitHub workflows routinely exceed 80 cols), while the `relaxed` preset disables `truthy` outright -- so start from `relaxed` and re-enable `truthy` explicitly: `yamllint -s -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: {level: warning, check-keys: false}}}" -f parsable <paths>` (`check-keys: false` keeps GitHub Actions' `on:` key from being flagged). Pass explicit paths, not `.`. **Exit:** without `-s` yamllint exits 0 when only warnings occur, and `relaxed` demotes most rules to warnings, so always pass `-s`: 0 = no errors or warnings · 1 = errors (parse) · 2 = warnings only (parse) · a crash/bad `-d` config = INVALID. **Gotcha:** if the project's own config disables `truthy` (as a bare `extends: relaxed` does), Norway detection is off by project choice -- record it as not covered rather than claiming it. | Norway/truthy coercion, tabs, indent consistency, duplicate keys (NOT line-length/document-start unless the project enables them) | default-on | operator follow-up (not run by Sniff) |
 | check-jsonschema | `check-jsonschema --schemafile <schema> <file>` | schema conformance for schema-backed YAML configs | opt-in (only when a schema-backed config is present) | operator follow-up (not run by Sniff) |
 
 Notes: yamllint is the primary and essentially only format analyzer here; the
-`truthy` rule catches the Norway problem and the `key-duplicates` rule catches
-duplicate keys. Use `-f parsable` for machine-readable line:col output, and run
-it relaxed/tuned to the project's `.yamllint`. check-jsonschema is the conformance
+`truthy` rule catches the Norway problem (only when enabled -- see the row above)
+and the `key-duplicates` rule catches duplicate keys. Use `-f parsable` for
+machine-readable line:col output, and keep it tuned to the project's `.yamllint`.
+check-jsonschema is the conformance
 gate when a schema-backed config exists. yq is **NOT a linter** -- it is for
 ad-hoc exploration in the analysis itself (`yq eval '<expr>' <file>`), not a
 source of findings, and is excluded from the tool tiers. For k8s/CI files, do not
-stop at yamllint -- also run the functional tools named in `kubernetes.md` /
+stop at yamllint -- also recommend the functional tools named in `kubernetes.md` /
 `ci-cd.md`. No grep fallback; if yamllint is absent, record a coverage gap.
 
 ## Smell checklist
@@ -83,10 +88,11 @@ or yamllint rather than the OO catalog for syntax/coercion findings.
 - Respect `.yamllint`: if the project relaxed `line-length` or `truthy`, those
   are deliberate choices, not findings.
 - **Honor `.editorconfig` before flagging indentation/line-length.** yamllint
-  does not read `.editorconfig`, so its defaults (e.g. expecting 4-space indent
-  or an 80-col limit) will contradict a repo that declares `[*.{yml,yaml}]
-  indent_size = 2` / `max_line_length`. Check `.editorconfig` first; a tool-default
-  mismatch with a declared editorconfig value is config-driven, not a smell.
+  does not read `.editorconfig`, so its defaults (an 80-col `line-length`; any
+  indent width as long as each file is consistent) can contradict a repo that
+  declares `[*.{yml,yaml}] indent_size = 2` / `max_line_length`. Check
+  `.editorconfig` first; a tool-default mismatch with a declared editorconfig
+  value is config-driven, not a smell.
 - **Functional smells are out of scope here.** Anything about k8s resource
   limits, probes, `runAsNonRoot`, or CI action pinning / injection is NOT a YAML
   format finding -- route it to `kubernetes.md` or `ci-cd.md`. Do not invent

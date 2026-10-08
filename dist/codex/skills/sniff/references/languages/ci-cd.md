@@ -17,8 +17,11 @@ How sniff knows a CI/CD pipeline is present: key files.
 
 ## Tools
 
-Primary first. Exact invocation + machine-readable flag. Canonical detail in
-`../tooling.md`; this is the runnable subset.
+Operator follow-ups, primary first: Sniff never runs these tools (see
+**Execution routing** at the end). Each row is the exact command an operator runs
+outside Sniff, with its machine-readable flag; shared run-rules live in
+`../tooling.md`. pinact needs a GitHub token and network access, so it also needs
+the operator's separate approval.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
@@ -43,7 +46,7 @@ Beyond what tools flag. Each: what it looks like + the idiomatic alternative.
 | Unpinned action ref | `uses: actions/checkout@v4` or `@main` | Pin to a full commit SHA: `uses: actions/checkout@<40-char-sha>` (+ comment the version) |
 | `pull_request_target` + untrusted checkout | `on: pull_request_target` then `actions/checkout` of the PR head | Use `pull_request`; never check out + run untrusted PR code with write/secret access |
 | Plaintext secrets / secret leak | Secret echoed to logs, written to a file, or hardcoded | Reference via `${{ secrets.X }}`, mask, never `echo` a secret |
-| Over-broad `permissions:` | No `permissions:` block (defaults to broad `write`) | Set least-privilege at workflow top: `permissions: { contents: read }`, widen per-job |
+| Over-broad `permissions:` | No `permissions:` block, so the `GITHUB_TOKEN` scope falls back to the repo/org default -- read-only for enterprises, orgs and repos created since Feb 2023, but still read/write for older ones unless changed -- or an explicit `permissions: write-all` | Set least-privilege explicitly at workflow top: `permissions: { contents: read }`, widen per-job; don't rely on the inherited default |
 | No job timeout | Job with no `timeout-minutes` | Add `timeout-minutes:` (prevents hung jobs burning runner minutes) |
 | No concurrency control | Re-pushes trigger redundant overlapping runs | `concurrency: { group: …, cancel-in-progress: true }` |
 | Script injection via `${{ }}` | `run: echo "${{ github.event.pull_request.title }}"` interpolated into shell | Pass via `env:` then reference `"$VAR"` (quote it); never inline untrusted expr into `run:` |
