@@ -1,6 +1,6 @@
 {
   "name": "sniff",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
   "owner": {
     "name": "srobroek"
@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "sniff",
-      "version": "0.3.1",
+      "version": "0.3.2",
       "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
       "source": "./",
       "skills": "./skills/",

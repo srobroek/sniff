@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.2](https://github.com/srobroek/sniff/compare/sniff-v0.3.1...sniff-v0.3.2) (2026-10-08)
+
+
+### Bug Fixes
+
+* **agents:** bloodhound never runs analyzers directly ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+* **install:** require digest-bound interactive confirmation for OMP installs ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+* **omp:** load the OMP skill tree instead of the Claude copy ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+* **omp:** mount only the native tools by declaring no MCP servers ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+* **report:** keep report page details consistent with delivered content ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+* **skill:** correct language reference follow-ups and tool facts ([#42](https://github.com/srobroek/sniff/issues/42)) ([261f568](https://github.com/srobroek/sniff/commit/261f56877283d71bc6f2e3b158aebc807c36d003))
+* **skill:** correct workflow references and reject mechanical breaking changes ([#41](https://github.com/srobroek/sniff/issues/41)) ([4fd8738](https://github.com/srobroek/sniff/commit/4fd87385edb01575ec94548255d629f82d53a4ab))
+* **skill:** treat language-doc tools as operator follow-ups and correct tool facts ([78d6852](https://github.com/srobroek/sniff/commit/78d68521c208a56fbbb97f4f35eff1b52cebf012))
+
 ## [0.3.1](https://github.com/srobroek/sniff/compare/sniff-v0.3.0...sniff-v0.3.1) (2026-09-29)
 
 
