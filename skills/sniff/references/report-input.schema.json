@@ -98,6 +98,10 @@
           }
         }
       },
+      "if": { "properties": { "compatibility": { "type": "object", "properties": { "kind": { "const": "breaking" } } } } },
+      "then": {
+        "properties": { "applyTier": { "description": "A breaking change needs review, so it is never mechanical.", "enum": ["assisted", "manual"] } }
+      },
       "dependentRequired": {
         "smell": ["refactoring"],
         "refactoring": ["smell"]

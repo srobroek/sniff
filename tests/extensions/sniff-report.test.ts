@@ -206,6 +206,13 @@ describe("structured Sniff reports", () => {
     );
   });
 
+  test("rejects a mechanical apply tier for breaking compatibility", () => {
+    const breaking = { kind: "breaking", surface: "exported parseRequest signature" } as const;
+    expect(() => buildSniffReport(reportInput([finding({ compatibility: breaking, applyTier: "mechanical" })]))).toThrow("/findings/0/applyTier");
+    expect(buildSniffReport(reportInput([finding({ compatibility: breaking, applyTier: "assisted" })])).findings).toHaveLength(1);
+    expect(buildSniffReport(reportInput([finding({ applyTier: "mechanical" })])).findings).toHaveLength(1);
+  });
+
   test("renders Markdown and receipts deterministically without writing", () => {
     const report = buildSniffReport(reportInput());
     const first = createReportArtifacts(report);

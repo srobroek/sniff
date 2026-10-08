@@ -11,25 +11,29 @@ govern how an agent uses it.
 
 1. Run `sniff_install_tools` in `probe` mode. The result lists each tool and its
    installation state.
-2. Present every viable tool for the detected stack. Keep each recommended tool
-   selected unless the user removes it.
+2. Present every viable tool for the detected stack in two groups. Recipe tools
+   (`lizard`, `opengrep`, `gitleaks`) produce Sniff coverage. Every other
+   catalog tool serves operator follow-ups only: installing it does not add
+   Sniff coverage. Keep each recommended tool selected unless the user removes
+   it.
 3. Explain overlaps with facts from `references/tooling.md`. Do not replace the
    full selection with lean, full, or custom depth tiers.
 4. After the user approves the selection, install each selected tool. Pass
-   `bundles` or `all` to `install` mode.
+   `bundles` or `all` to `install` mode. The host confirms the exact plan
+   before installing; headless sessions cannot install.
 5. When the user asks to inspect commands, pass `dryRun`. A dry run does not
    change tool state.
-6. Invoke each selected analyzer through `sniff_run_analyzer`. Installation does
-   not authorize analyzer execution.
+6. Invoke each recipe through `sniff_run_analyzer`. Installation does not
+   authorize analyzer execution.
 
 ### Selection format
 
 ```text
 Detected stack: Go, TypeScript, Dockerfile, GitHub Actions
-Installed: golangci-lint [ready], eslint [ready]
-Missing and selected: opengrep, hadolint, actionlint
-Optional: jscpd
-Reason: jscpd adds TypeScript coverage not supplied by the Go duplicate checker.
+Sniff recipes: lizard [ready], gitleaks [ready], opengrep [missing, selected]
+Operator follow-ups (no Sniff coverage): golangci-lint [ready], hadolint [missing, selected], actionlint [missing, selected]
+Optional follow-up: jscpd
+Reason: jscpd adds cross-language duplicate detection that no Sniff recipe covers.
 ```
 
 Sniff verifies each command through its catalog route. After the bundle
@@ -63,21 +67,23 @@ configuration, Sniff returns `unavailable-route`. Resolved tool directories
 precede shim directories in `PATH` to stop stale shims from winning command
 lookup.
 
-OpenGrep uses its verified download route. Project-local npm tools use the target
-repository. Rustup components store Cargo and Rustup state in the bundle toolkit.
-Sniff installs stable as the toolkit default and nightly for `cargo-udeps`.
-When Sniff installs a Rustup component, Rustup reads the target repository's
-`rust-toolchain.toml`.
+OpenGrep uses its verified download route. Rustup components store Cargo and
+Rustup state in the bundle toolkit. Sniff installs stable as the toolkit default
+and nightly for `cargo-udeps`. When Sniff installs a Rustup component, Rustup
+reads the target repository's `rust-toolchain.toml`.
 
 ## Project-local tools
 
 The target repository owns JavaScript analyzers in `devDependencies`. The
-installer lists the required packages but does not install them globally.
-`sniff_run_analyzer` resolves these commands from the target
-`node_modules/.bin` directory.
+installer neither installs them globally nor runs them: a probe that finds a
+`node_modules/.bin` launcher reports it as `policy-blocked` inventory, because
+Sniff never runs executables inside the target. No Sniff recipe covers these
+tools; record them as `gap` coverage entries with the command for the operator
+to run.
 
 ## Rust tools
 
-Use Clippy for standard Rust checks. Offer `cargo-machete` as an extra tool. When
-the user requests a deep pass, offer `cargo-udeps`. It requires the nightly Rust
+These are operator follow-ups; no Sniff recipe runs them. Offer Clippy for
+standard Rust checks and `cargo-machete` as an extra tool. When the user
+requests a deep pass, offer `cargo-udeps`. It requires the nightly Rust
 toolchain.
