@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	accessSync,
 	closeSync,
@@ -1279,5 +1279,60 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	}
 	lines.push("", `install: ${tools.length - failures.length} usable, ${failures.length} failure(s) after verification`);
 	return { ok: failures.length === 0, report: lines.join("\n"), tools };
+}
+
+export type SniffInstallPlanTool = {
+	readonly bundle: BundleName;
+	readonly tool: string;
+	readonly bin: string;
+	readonly status: SniffToolStatus;
+	readonly resolvedPath: string | null;
+	readonly routes: readonly { readonly argv: readonly string[]; readonly exitCode: number | null; readonly timeoutMs: number }[];
+};
+
+/** The exact installation plan a host must show and the digest its confirmation must echo. */
+export type SniffInstallAuthorizationRequest = {
+	readonly mode: "install";
+	readonly bundles: readonly BundleName[];
+	readonly all: boolean;
+	readonly dryRun: boolean;
+	readonly toolkitCacheRoot: string;
+	readonly tools: readonly SniffInstallPlanTool[];
+	readonly digest: string;
+};
+
+function stableInstallValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(stableInstallValue);
+	if (value !== null && typeof value === "object") {
+		return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableInstallValue((value as Record<string, unknown>)[key])]));
+	}
+	return value;
+}
+
+/**
+ * Diagnose the selected bundles and bind the resulting installation plan to a
+ * SHA-256 digest. Every adapter confirms this request with the user before it
+ * calls `runSniffInstall` in install mode; an adapter without an interactive
+ * confirmation channel must refuse installation instead.
+ */
+export async function sniffInstallAuthorizationRequest(opts: Omit<SniffInstallOptions, "mode">): Promise<SniffInstallAuthorizationRequest> {
+	const plan = await runSniffInstall({ ...opts, mode: "diagnose" });
+	const tools = plan.tools.map((tool): SniffInstallPlanTool => ({
+		bundle: tool.bundle,
+		tool: tool.tool,
+		bin: tool.bin,
+		status: tool.status,
+		resolvedPath: tool.resolvedPath,
+		routes: tool.attempts.map((attempt) => ({ argv: attempt.argv, exitCode: attempt.exitCode, timeoutMs: attempt.timeoutMs })),
+	}));
+	const authorization = {
+		mode: "install" as const,
+		bundles: [...new Set(plan.tools.map((tool) => tool.bundle))],
+		all: opts.all ?? false,
+		dryRun: opts.dryRun ?? false,
+		toolkitCacheRoot: resolveSniffToolkitCacheRoot({ ...process.env, ...opts.env }, opts.runtime),
+		tools,
+	};
+	return { ...authorization, digest: createHash("sha256").update(JSON.stringify(stableInstallValue(authorization))).digest("hex") };
 }
 

@@ -9,9 +9,9 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "mcp": "bun run adapters/mcp/server.ts",
-    "skills:check": "bun run scripts/generate-harness-skills.ts --check",
-    "bundles": "bun run scripts/build-harness-bundles.ts",
-    "bundles:check": "bun run scripts/build-harness-bundles.ts --check"
+    "skills:check": "bun run tools/generate-harness-skills.ts --check",
+    "bundles": "bun run tools/build-harness-bundles.ts",
+    "bundles:check": "bun run tools/build-harness-bundles.ts --check"
   },
   "omp": {
     "extensions": [

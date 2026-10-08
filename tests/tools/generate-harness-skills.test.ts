@@ -9,9 +9,9 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
-import { generateHarnessSkills } from "./generate-harness-skills.ts";
+import { generateHarnessSkills } from "../../tools/generate-harness-skills.ts";
 
-const repoRoot = resolve(import.meta.dir, "..");
+const repoRoot = resolve(import.meta.dir, "..", "..");
 const authoredRoot = join(repoRoot, ".skill-source", "sniff");
 const ompRoot = join(repoRoot, "skills", "sniff");
 const generatedRoots = [

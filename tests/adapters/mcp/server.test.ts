@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import Ajv2020 from "ajv/dist/2020.js";
-import { BoundedStdioTransport, Semaphore } from "./server.ts";
+import { BoundedStdioTransport, Semaphore, tools } from "../../../adapters/mcp/server.ts";
+import { sniffInstallApproval, sniffIntakeApproval, sniffReportApproval, sniffToolInputSchemas } from "../../../src/core/tool-schemas.ts";
 
-const serverPath = new URL("./server.ts", import.meta.url).pathname;
+const serverPath = new URL("../../../adapters/mcp/server.ts", import.meta.url).pathname;
 setDefaultTimeout(30_000);
 
 type Message = Record<string, unknown>;
@@ -234,7 +235,7 @@ describe("MCP transport and concurrency units", () => {
 describe("MCP Sniff server", () => {
 
   test("parses the Claude stdio manifest with a plugin-root-safe path", () => {
-    const claude = object(JSON.parse(readFileSync(new URL("../../claude-mcp.json", import.meta.url), "utf8")));
+    const claude = object(JSON.parse(readFileSync(new URL("../../../claude-mcp.json", import.meta.url), "utf8")));
     const claudeServer = object(object(claude.mcpServers).sniff);
     expect(claudeServer.command).toBe("bun");
     expect(claudeServer.args).toEqual(["run", `\${CLAUDE_PLUGIN_ROOT}/dist/claude/server.js`]);
@@ -893,7 +894,6 @@ sleep 1; exit 0
 
 describe("shared tool contracts", () => {
   test("shared schemas enforce the complete seven-tool contract", async () => {
-    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
     const required: Record<string, string[]> = {
       sniff_intake: ["input"], sniff_cancel: ["capability", "manifestId"], sniff_install_tools: [],
       sniff_run_analyzer: ["capability", "manifestId", "analyzer"], sniff_report: ["capability", "manifestId", "report"],
@@ -925,8 +925,6 @@ describe("shared tool contracts", () => {
   });
 
   test("MCP advertises the shared schema objects and they compile", async () => {
-    const { tools } = await import("./server.ts");
-    const { sniffToolInputSchemas } = await import("../../src/core/tool-schemas.ts");
     for (const tool of tools) {
       expect(tool.inputSchema).toEqual(sniffToolInputSchemas[tool.name as keyof typeof sniffToolInputSchemas]);
       new Ajv2020({ strict: false }).compile(tool.inputSchema as Record<string, unknown>);
@@ -934,7 +932,6 @@ describe("shared tool contracts", () => {
   });
 
   test("approval policies select the least-privileged tier for representative arguments", async () => {
-    const { sniffInstallApproval, sniffIntakeApproval, sniffReportApproval } = await import("../../src/core/tool-schemas.ts");
     expect(sniffInstallApproval({ mode: "probe" })).toBe("read");
     expect(sniffInstallApproval({ mode: "diagnose" })).toBe("read");
     expect(sniffInstallApproval({ mode: "list" })).toBe("read");

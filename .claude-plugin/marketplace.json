@@ -12,6 +12,7 @@
       "version": "0.3.1",
       "description": "Portable code-smell auditing with analyzer preflight and adversarial review.",
       "source": "./",
+      "skills": "./.claude/skills/",
       "category": "development"
     }
   ]

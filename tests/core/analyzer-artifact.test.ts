@@ -10,8 +10,8 @@ import {
   publicAnalyzerDescriptors,
   readAnalyzerArtifact,
   registerAnalyzerArtifacts,
-} from "./analyzer-artifact-registry.ts";
-import { parseOpenGrepOutput } from "./opengrep.ts";
+} from "../../src/core/analyzer-artifact-registry.ts";
+import { parseOpenGrepOutput } from "../../src/core/opengrep.ts";
 
 type Observation = { ruleId: string; path: string; start: { line: number; column: number }; message: string; severity: string };
 const observation = (index: number, path = "src/example.ts"): Observation => ({ ruleId: "rule/test", path, start: { line: index + 1, column: 1 }, message: `finding ${index}`, severity: "WARNING" });

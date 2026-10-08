@@ -3,16 +3,16 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { ANALYZER_TIMEOUT_MS, runSniffAnalyzer, runSniffInstall, type SniffInstallRuntime, TOOLKIT_LOCK_STALE_MS, withToolkitLock } from "../src/core/install.ts";
-import { createRunManifest, type RunManifest } from "../src/core/intake.ts";
-import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePublicResult, type SniffIntakeToolResult } from "../src/core/intake-use-case.ts";
-import { processAlive } from "../src/core/process-control.ts";
-import type { ReportInput } from "../src/core/report.ts";
-import { runSniffReportTool } from "../src/core/report-use-case.ts";
-import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../src/core/run-registry.ts";
-import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../src/core/target.ts";
-import { detectProvider, withResolvedTarget } from "../src/core/target-provider.ts";
-import sniffIntakeExtension from "./sniff-intake-tool.ts";
+import sniffIntakeExtension from "../../extensions/sniff-intake-tool.ts";
+import { ANALYZER_TIMEOUT_MS, runSniffAnalyzer, runSniffInstall, type SniffInstallRuntime, TOOLKIT_LOCK_STALE_MS, withToolkitLock } from "../../src/core/install.ts";
+import { createRunManifest, type RunManifest } from "../../src/core/intake.ts";
+import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePublicResult, type SniffIntakeToolResult } from "../../src/core/intake-use-case.ts";
+import { processAlive } from "../../src/core/process-control.ts";
+import type { ReportInput } from "../../src/core/report.ts";
+import { runSniffReportTool } from "../../src/core/report-use-case.ts";
+import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../../src/core/run-registry.ts";
+import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../../src/core/target.ts";
+import { detectProvider, withResolvedTarget } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
 const sha = (value: string) => value.repeat(40);

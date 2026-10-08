@@ -3,14 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import sniffIntakeExtension from "../../extensions/sniff-intake-tool.ts";
 import {
   buildNoninteractiveManifest,
   canonicalConfirmationRequest,
   createRunManifest,
   decisionFrontier,
-} from "../src/core/intake.ts";
-import { canonicalReportTargetIdentity, publicConfirmationSummary, publicSniffIntakeResult, runSniffIntakeTool } from "../src/core/intake-use-case.ts";
-import { SecurityScopeError, selectSecurityAnalyzers } from "../src/core/security.ts";
+} from "../../src/core/intake.ts";
+import { canonicalReportTargetIdentity, publicConfirmationSummary, publicSniffIntakeResult, runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
+import { SecurityScopeError, selectSecurityAnalyzers } from "../../src/core/security.ts";
 import {
   type ArgvResult,
   type ArgvRunner,
@@ -19,9 +20,8 @@ import {
   runArgv,
   TargetResolutionError,
   withTemporaryCheckout,
-} from "../src/core/target.ts";
-import { resolveGitHubRelease, resolveGitLabRelease, resolveTarget, withResolvedTarget } from "../src/core/target-provider.ts";
-import sniffIntakeExtension from "./sniff-intake-tool.ts";
+} from "../../src/core/target.ts";
+import { resolveGitHubRelease, resolveGitLabRelease, resolveTarget, withResolvedTarget } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
 const sha = (character: string) => character.repeat(40);
@@ -453,7 +453,7 @@ describe("history semantics", () => {
 
 describe("extension reachability", () => {
   test("registers sniff_intake in the package and extension API", () => {
-    const packageJson = JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8"));
+    const packageJson = JSON.parse(readFileSync(join(import.meta.dir, "..", "..", "package.json"), "utf8"));
     expect(packageJson.omp.extensions).toContain("./dist/omp/sniff-plugin.js");
     let definition: { name?: string } | undefined;
     const schema = { describe() { return this; } };

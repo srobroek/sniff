@@ -4,13 +4,14 @@ Route each detected **target** to its self-contained reference doc. "Target"
 means any sniffable surface -- a programming language, a config/data format, an
 API contract, OR an infra target (Terraform, Dockerfile, Kubernetes, CI). The
 directory is named `languages/` for history, but it holds docs for ALL of these;
-treat infra/config/contract docs as first-class, not afterthoughts. In step 1,
+treat infra/config/contract docs as first-class, not afterthoughts. In step 2,
 map the detected stack to these docs; load (or hand to a `bloodhound`) only the
 docs for targets actually present.
 
-Each doc is independent and follows `_template.md`. To add a language, copy the
-template, fill it, and add a row here -- nothing else in the package needs to
-change.
+Each doc is independent and follows `_template.md`. Adding a row here adds
+reference-only support: a smell checklist and operator follow-ups. Runnable
+Sniff coverage additionally needs a fixed recipe in `src/core/analyzer-recipes.json`
+and a catalog entry in `src/core/catalog.ts`.
 
 ## Core languages
 

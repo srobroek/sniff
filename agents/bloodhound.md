@@ -22,11 +22,12 @@ skill directory. Analyzer observations are supplied by the caller's brief; repor
    your checklist -- do not resolve `references/languages/...` from the target
    repository's working directory or otherwise improvise a path. Prefer
    `skill://sniff/references/languages/<lang>.md` when the Brief names that URI.
-2. Use the static-analysis findings the Brief hands you -- do not re-run those
-   tools. Verify and contextualize them (confirm each against the code, drop
-   false positives), but do NOT re-invoke clippy/ruff/eslint. Only run a tool
-   yourself if the Brief lists it under "Tools to run YOURSELF". A tool neither
-   handed nor listed is a coverage gap -- record it.
+2. Use the analyzer findings the Brief hands you -- do not run analyzers
+   yourself. Verify and contextualize them (confirm each against the code, drop
+   false positives). Analyzers run only through `sniff_run_analyzer` with the
+   lead's issued capability, so never invoke clippy, ruff, eslint, or any other
+   analyzer, linter, or type-checker directly. A dimension no handed result
+   covers is a coverage gap -- record it.
 3. Read the code for what tools cannot see: naming, cohesion, abstraction level,
    design smells, non-idiomatic constructs, duplication. Confirm each at a
    specific line.
@@ -36,7 +37,6 @@ skill directory. Analyzer observations are supplied by the caller's brief; repor
 ## What you CAN do
 
 - Read any file in scope; read config and tests for context.
-- Run read-only analyzers, linters, type-checkers, complexity/duplication tools.
 - Grep for usages, call sites, and duplication to confirm blast radius.
 
 ## What you MUST NOT do

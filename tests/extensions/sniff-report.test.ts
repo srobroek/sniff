@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createRunManifest } from "../src/core/intake.ts";
-import { canonicalReportTargetIdentity, publicSniffIntakeResult } from "../src/core/intake-use-case.ts";
+import sniffReportTool from "../../extensions/sniff-report-tool.ts";
+import { createRunManifest } from "../../src/core/intake.ts";
+import { canonicalReportTargetIdentity, publicSniffIntakeResult } from "../../src/core/intake-use-case.ts";
 import {
   buildSniffReport,
   createReportArtifacts,
@@ -16,12 +17,11 @@ import {
   renderSniffMarkdown,
   saveReportArtifacts,
   validateSniffReport,
-} from "../src/core/report.ts";
-import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../src/core/report-artifact-registry.ts";
-import { runSniffReportTool } from "../src/core/report-use-case.ts";
-import { issueRunLease } from "../src/core/run-registry.ts";
-import { validateResolvedTarget } from "../src/core/target.ts";
-import sniffReportTool from "./sniff-report-tool.ts";
+} from "../../src/core/report.ts";
+import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../../src/core/report-artifact-registry.ts";
+import { runSniffReportTool } from "../../src/core/report-use-case.ts";
+import { issueRunLease } from "../../src/core/run-registry.ts";
+import { validateResolvedTarget } from "../../src/core/target.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -379,6 +379,7 @@ describe("structured Sniff reports", () => {
     let offset = 0;
     let assembled = "";
     let eof = false;
+    let shortenedPages = 0;
     for (let pageCount = 0; pageCount < 128; pageCount += 1) {
       const pageOutput = await readerTool.execute("read", {
         readCapability: metadata.readCapability,
@@ -403,6 +404,9 @@ describe("structured Sniff reports", () => {
       expect(page.offset).toBe(offset);
       expect(Buffer.byteLength(page.content, "utf8")).toBe(page.bytes);
       expect(Buffer.from(page.content, "utf8").toString("utf8")).toBe(page.content);
+      // Details-based clients continue from details, so they must describe the delivered content.
+      expect(pageOutput.details).toMatchObject({ offset: page.offset, nextOffset: page.nextOffset, eof: page.eof, bytes: page.bytes });
+      if (!page.eof && page.bytes < 64 * 1024) shortenedPages += 1;
       assembled += page.content;
       if (page.eof) {
         eof = true;
@@ -413,6 +417,7 @@ describe("structured Sniff reports", () => {
       offset = page.nextOffset;
     }
     expect(eof).toBe(true);
+    expect(shortenedPages).toBeGreaterThan(0);
     expect(assembled).toContain("# Sniff Refactoring Plan");
     expect(createHash("sha256").update(assembled).digest("hex")).toBe(descriptor.sha256);
   });
