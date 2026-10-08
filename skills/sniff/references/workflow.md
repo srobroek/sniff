@@ -1,21 +1,11 @@
-# Workflow
+# Workflow concepts
 
-The operational sequence lives in `../SKILL.md`. Read that skill before every run.
+`SKILL.md` owns the step sequence. This file defines the terms it relies on.
 
-## Concepts
+- **Lease.** `sniff_intake` binds one capability and manifest ID to an exact file set, immutable refs, and a trust route. `sniff_report` or `sniff_cancel` releases it; an abandoned lease expires on its own.
+- **Recipe.** Sniff coverage comes only from the fixed host recipes `lizard:complexity`, `opengrep:hardcoded-values`, and `gitleaks:tracked-history`. Each runs at most once per lease, after the host revalidates root, files, executable, scope, and budget.
+- **Modes.** `full` runs every selected recipe and the challenge pass. `quick` also omits `gitleaks:tracked-history`. `plan-only` executes no analyzer: every recipe is skipped, so the report rests on reading alone. Say so before the user picks it.
+- **Approvals.** Intake confirmation authorizes analysis of the confirmed plan only. Installing tools and saving a report each need the host's own confirmation of the exact plan, which a headless session cannot give. Applying changes needs explicit user approval at step 7.
+- **Remote targets** run only config-free, remote-safe recipes. Never load their executable configuration or dependencies.
 
-- Intake resolves `target`, `intent`, `scopeMode`, `objectives`, and `budget`, then gets confirmation and an authenticated lease.
-- Target resolution produces an exact file set, immutable refs where applicable, and a trust route. Non-Git trees use `files` or `directory`, not `whole-repo` or `working-tree`.
-- Detection maps the resolved files to language references. Tool probing reports availability and versions; installation and analysis require their own approvals.
-- Each analyzer runs once through its issued capability and fixed recipe. The host revalidates the lease root, files, executable, scope, budget, and recipe before spawning.
-- Analyzer previews and report artifacts are paged with `nextOffset` until `eof`; each UTF-8-safe page is at most 64 KiB.
-- Full mode includes a separate challenge pass. Quick mode skips the full sweep and challenge. Plan-only mode never applies changes.
-- Reporting validates the authenticated manifest, renders or saves artifacts, and releases the lease. Cancellation releases unfinished runs.
-
-## Safety boundaries
-
-- Remote targets use host-owned, config-free recipes and never load target executable configuration or dependencies.
-- Credentials, caller-controlled analyzer execution, out-of-root files, and replayed capabilities are rejected.
-- Save, install, analysis, and refactor actions retain separate approval boundaries.
-
-See `intake.md`, `targeting.md`, `security-scope.md`, `report-template.md`, and `report-input.schema.json` for exact contracts.
+Exact contracts: `intake.md`, `targeting.md`, `security-scope.md`, `report-template.md`, and `report-input.schema.json`.

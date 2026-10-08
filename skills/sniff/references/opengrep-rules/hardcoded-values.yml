@@ -4,11 +4,12 @@
 # one structural rule for debug prints. Test-path exclusions are defined per
 # rule; tracked-tech-debt-marker intentionally scans tests.
 #
-# Run with:
-#   opengrep --config "$SNIFF_SKILL_DIR/references/opengrep-rules/hardcoded-values.yml" --json <files>
+# The `opengrep:hardcoded-values` recipe loads this file host-side through
+# `sniff_run_analyzer`; agents never pass its path.
 #
 # These heuristics require human judgment. Credential detection belongs to
-# gitleaks or trufflehog; these rules flag obvious connection-string shapes.
+# the `gitleaks:tracked-history` recipe; these rules flag obvious
+# connection-string shapes.
 
 rules:
   - id: hardcoded-ip-address
@@ -16,8 +17,15 @@ rules:
     severity: INFO
     message: >-
       Hardcoded IP address. Move to config/env unless this is a documented
-      loopback or reserved-range default.
-    pattern-regex: '(?<![\d.])((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])'
+      reserved-range default.
+    patterns:
+      - pattern-regex: '(?<![\d.])((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)(?![\d.])'
+      # Loopback and the unspecified address are conventional defaults.
+      - pattern-not-regex: '(?<![\d.])(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0)(?![\d.])'
+      # Four-part version strings such as `version = "1.2.3.4"`.
+      - pattern-not-regex: '(?i)version[^\n]*'
+      # Comment lines document addresses rather than configure them.
+      - pattern-not-regex: '(?m)^\s*(#|//|/\*|\*|--|;)[^\n]*'
     paths:
       exclude:
         - "*_test.*"
@@ -33,7 +41,13 @@ rules:
     message: >-
       Hardcoded http(s) URL. Externalize endpoints to config/env so they are not
       baked into the build.
-    pattern-regex: 'https?://[A-Za-z0-9._~:/?#@!$&%*+,;=-]+'
+    patterns:
+      - pattern-regex: "https?://[A-Za-z0-9._~:/?#@!$&%*+,;=-]+"
+      # XML namespaces and schema identifiers are names, not endpoints.
+      - pattern-not-regex: 'https?://(www\.)?(w3\.org|json-schema\.org|schemas\.[A-Za-z0-9.-]+)/[A-Za-z0-9._~:/?#@!$&%*+,;=-]*'
+      - pattern-not-regex: 'xmlns(:[A-Za-z0-9_-]+)?\s*=\s*["''][^"'']*["'']'
+      # Comment lines document URLs rather than configure them.
+      - pattern-not-regex: '(?m)^\s*(#|//|/\*|\*|--|;)[^\n]*'
     paths:
       exclude:
         - "*_test.*"
@@ -50,7 +64,10 @@ rules:
     message: >-
       Hardcoded absolute filesystem path. Prefer a configurable base dir or a
       temp-dir API; absolute paths break portability and tests.
-    pattern-regex: '["''](/(home|users|usr|opt|var|etc|tmp)/[^"''\n]+|[A-Za-z]:\\\\[^"''\n]+)["'']'
+    # Covers Linux and macOS home, volume, and temp roots (`/Users`, `/private`,
+    # `/Volumes`) plus Windows drive paths. System binaries under `/usr` are
+    # standard locations, not portability smells.
+    pattern-regex: '["''](/(home|[Uu]sers|root|opt|var|etc|tmp|mnt|srv|private|Volumes)/[^"''\n]+|[A-Za-z]:\\\\[^"''\n]+)["'']'
     paths:
       exclude:
         - "*_test.*"
@@ -64,8 +81,9 @@ rules:
     severity: WARNING
     message: >-
       Connection-string-shaped literal. Move to config/env; if it embeds
-      credentials, run the secrets-scan package (gitleaks/trufflehog).
-    pattern-regex: '\b(postgres|postgresql|mysql|mongodb(\+srv)?|redis|amqp|jdbc:[a-z]+)://[^\s"'']+'
+      credentials, the gitleaks:tracked-history recipe reports committed secrets.
+    # Optional `+driver` covers SQLAlchemy-style URLs such as `postgresql+psycopg2://`.
+    pattern-regex: '\b(postgres|postgresql|mysql|mariadb|mssql|sqlserver|sqlite|oracle|mongodb(\+srv)?|redis|rediss|amqp|amqps|jdbc:[a-z]+)(\+[a-z0-9]+)?://[^\s"'']+'
     paths:
       exclude:
         - "*_test.*"
@@ -98,9 +116,12 @@ rules:
     languages: [generic]
     severity: INFO
     message: >-
-      Tech-debt marker (TODO/FIXME/HACK/XXX). Catalog it; a marker without a
-      tracking reference tends to rot.
-    pattern-regex: '\b(TODO|FIXME|HACK|XXX|BUG)\b'
+      Tech-debt marker (TODO/FIXME/HACK/XXX) without a tracking reference.
+      Catalog it; an untracked marker tends to rot.
+    patterns:
+      - pattern-regex: '\b(TODO|FIXME|HACK|XXX|BUG)\b'
+      # A marker that cites an issue (`TODO(#12)`, `FIXME(ABC-123)`, or a URL) is tracked.
+      - pattern-not-regex: '\b(TODO|FIXME|HACK|XXX|BUG)\s*\(\s*(#\d+|[A-Z][A-Z0-9]+-\d+|https?://[^)\s]+)\s*\)'
     paths:
       exclude:
         - "**/*.md"

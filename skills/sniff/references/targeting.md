@@ -14,6 +14,7 @@
 ## Target kinds
 
 | Kind | Resolution | Materialization |
+|------|------------|-----------------|
 | Whole repo | committed `HEAD` tree (full SHA and every committed file) | temporary checkout |
 | Language or area | matching extensions or area globs | in place or layered |
 | Module or directory | subtree glob | in place |
@@ -41,45 +42,29 @@ The core request kind is exact and closed: `whole-repo`, `working-tree`, `files`
 - Contract paths: `git diff <base>...<head> -- <public modules>`
 - Hunk paths: `git diff -U0`
 
-- Before analysis, resolve each ref.
-- Resolve branch names to commit SHAs.
-- Peel annotated repository tags.
-- Peel annotated tags from history windows.
-- Compare and fetch commit SHAs, not tag-object SHAs.
-- Use `git clone`, `fetch`, and `checkout --detach` through argv arrays.
-- Do not build a shell command string.
+## Refs and transport
 
-- Reject URL userinfo and embedded credentials.
-- Reject unsupported repository schemes and whitespace.
-- Reject a repository value that starts with a dash.
-- Reject leading options in refs, tags, and dates.
+- Before analysis, resolve each ref. Resolve branch names to commit SHAs, and peel annotated tags in repository and history targets.
+- Compare and fetch commit SHAs, not tag-object SHAs.
+- Use `git clone`, `fetch`, and `checkout --detach` through argv arrays; do not build a shell command string.
+- Reject URL userinfo, embedded credentials, query and fragment values, unsupported schemes, and whitespace.
+- Reject a repository value, ref, tag, or date that starts with a dash.
 - Reject invalid counts, PR numbers, and MR IIDs.
 - Use the provider credential store. Do not persist transport credentials.
+- When a CLI is absent or authentication fails, report a gap. `providers.md` lists the failure codes.
 
-- When a CLI is absent, report a gap.
-- When authentication fails, report a gap.
+## Provider support
+
+- `git` supports local and remote refs, history, and temporary checkout. A non-Git tree supports only `files` and `directory` targets.
+- `gh` adds GitHub PR and release targets; `glab` adds GitLab MR and release targets.
+- Capture each remote ref as a full commit SHA before materialization, and fetch enough ancestry and tags for every requested window.
+- Run history commands only against captured SHAs or fetched release tags. Date and count windows use the captured head; release windows use the captured release and head commits. The default compares the captured head with its parent.
 
 ## File reduction
 
-
-- Drop vendored directories.
-- Drop build directories.
-- Drop tool directories.
-- Drop scaffolding directories.
-- Drop `package-lock.json`.
-- Drop `Cargo.lock`.
-- Drop `poetry.lock`.
-- Drop `uv.lock`.
-- Drop `pnpm-lock.yaml`.
-- Drop `*.min.js`.
-- Drop `*.pb.go`.
-- Drop `*_pb2.py`.
-- Drop paths marked `linguist-generated` in `.gitattributes`.
-- Drop binaries.
-- Drop data blobs.
-- Drop images.
-- Drop `.onnx` files.
-- Drop archives.
+- Drop vendored, build, tool, and scaffolding directories.
+- Drop lockfiles (`package-lock.json`, `Cargo.lock`, `poetry.lock`, `uv.lock`, `pnpm-lock.yaml`) and generated code (`*.min.js`, `*.pb.go`, `*_pb2.py`, paths marked `linguist-generated` in `.gitattributes`).
+- Drop binaries, data blobs, images, `.onnx` files, and archives.
 - Echo counts for first-party files after reduction.
 
 `.gitignore` does not cover committed vendor or generated trees. A language or
@@ -108,36 +93,17 @@ file set, not from prose in the request.
 - An empty file set selects no file-scoped analyzer.
 - Record incompatible recipes as skipped. Never widen the target to make a recipe runnable.
 
-## Analyzer commands
+## Sniff recipes
 
-- Ruff: `ruff check --output-format json <files>`
-- ESLint: `npx eslint --format json <files>`
-- ShellCheck: `shellcheck -f json <files>`
-- OpenGrep: `opengrep --config <ruleset> --json <files-or-dirs>`
-- Go: `golangci-lint run --out-format json <dirs-of-target-.go-files>`
-- Protobuf: `buf breaking --against ".git#ref=<base-ref>,subdir=<proto-dir>"`
-- GraphQL: `graphql-inspector diff <base-schema> <head-schema>`
-- OpenAPI: use `oasdiff` for base versus head.
-- OpenAPI: use `openapi-diff` for base versus head.
-- Duplication: run `jscpd` on the target and its directory.
-- Filter `golangci-lint` JSON to target paths.
-- Report `jscpd` blocks that touch a target file.
+Only these fixed recipes produce Sniff coverage. Pass the recipe ID to `sniff_run_analyzer`; the host supplies the command, rules, and files.
 
-## Provider dependencies
+| Recipe ID | Scope class | Covers | Remote targets |
+|-----------|-------------|--------|----------------|
+| `lizard:complexity` | scoped files | cyclomatic complexity, function length, parameter count | yes |
+| `opengrep:hardcoded-values` | scoped files | hardcoded IPs, URLs, paths, connection strings, debug prints, untracked debt markers | yes |
+| `gitleaks:tracked-history` | repository-wide | secrets in committed history | no |
 
-- `git` supports local refs.
-- `git` supports remote refs.
-- `git` supports history.
-- `git` supports temporary checkout.
-- `gh` supports GitHub PR and release targets.
-- `glab` supports GitLab MR and release targets.
-- Capture each remote ref as a full commit SHA before materialization.
-- Fetch enough ancestry and tags for every requested window.
-- Run materialized history commands only against captured SHAs or fetched release tags.
-- Date and count windows use the captured head.
-- Release windows use the captured release and head commits.
-- The context-aware default compares the captured head with its parent.
-- A non-Git repository supports file targets.
+Every other dimension, including lint, type checks, duplication, dead code, and contract diffs (`buf breaking`, `graphql-inspector diff`, `oasdiff`), is an operator follow-up. Record it as a `gap` coverage entry and list its command from the language reference. Never run it during a Sniff run.
 
 ## Apply boundary
 
@@ -150,14 +116,6 @@ file set, not from prose in the request.
 
 ## Examples
 
-- For `sniff PR #128`, run `gh pr diff 128 --name-only`.
-- For that PR, detect TypeScript and Protobuf.
-- For TypeScript, run ESLint.
-- For Protobuf, run `buf breaking --against ".git#ref=<base>,subdir=<proto-dir>"`.
-- For `sniff the parser module`, use `src/parser/**`.
-- For that module, run Rust tools on the crate.
-- Filter module paths to `src/parser/`.
-- For `sniff since main`, isolate `HEAD`.
-- For that history window, run `git diff --name-only main...HEAD`.
-- Scope local tools.
-- Compare contracts with `main`.
+- `sniff PR #128` resolves to `{"kind":"pr","repository":"<url>","number":"128"}`; `gh` captures the changed paths and base/head SHAs. Run `lizard:complexity` and `opengrep:hardcoded-values`; each receives only its compatible TypeScript and Protobuf files. Skip `gitleaks:tracked-history`, which is repository-wide. Record ESLint and `buf breaking --against ".git#ref=<base>,subdir=<proto-dir>"` as gaps with those commands.
+- `sniff the parser module` resolves to `{"kind":"module","root":"<repo-root>","path":"src/parser"}` in place. The scoped-files recipes receive only files under `src/parser/`.
+- `sniff since main` resolves to `{"kind":"branch","root":"<repo-root>","branch":"HEAD","base":"main"}`, isolating the changed paths from `git diff --name-only main...HEAD`. Compare contracts with `main` only as recorded follow-ups.

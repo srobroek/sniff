@@ -1,19 +1,27 @@
-# Refactor-Challenger Brief Template
+# Challenge Brief Template
 
-Use this to construct the prompt for the `refactor-challenger` agent in step 6.
+Use this to build the step-6 prompt for `refactor-challenger`.
 The challenger's whole value comes from **isolation**: give it the findings and
 the observable evidence, but NOT your reasoning, your preferred plan, or your
 confidence. Let it reach its own verdict so it does not inherit your blind spots.
 
-Spawn once over the consolidated finding set. The agent is read-only.
+Spawn one challenger over the consolidated finding set; never split the
+challenge across parallel agents. The agent is read-only.
 
 ---
 
 ```
 You are stress-testing a set of refactoring recommendations produced for this
-repository. For each, decide KEEP / DOWNGRADE / DROP per your agent definition.
+repository. Stay read-only: verify the cited code, but never edit or apply.
+For each finding, decide:
+- KEEP: the smell is real and the fix earns its cost.
+- DOWNGRADE: the smell is real but low-value, or you are unsure the fix earns
+  its cost.
+- DROP: a false positive, or a fix that would make the code worse.
 Bias toward pragmatism and idiom: a real but low-value or non-idiomatic-but-fine
-finding should not survive as a high-priority recommendation.
+finding should not survive as a high-priority recommendation. Any change to a
+public signature, wire format, config key, or documented behavior is never
+low-risk.
 
 ## Findings under test
 For each finding (facts only — verify them yourself):
@@ -37,9 +45,11 @@ I am deliberately withholding which findings I think matter most and why. Reach
 your own verdicts from the code.
 
 ## Return
-Your Refactor Critique Report: a verdict table (KEEP/DOWNGRADE/DROP with
-evidence and adjusted severity), the dropped/downgraded rationale, back-compat
-hazards, confirmed strong findings, and any gaps you noticed.
+1. One line: `VERDICT: KEEP|DOWNGRADE|DROP -- K keep / D downgrade / X drop`.
+2. A table with one row per finding: ID, finding, verdict, cited evidence
+   (file:line, command output, or convention source).
+3. For each DOWNGRADE or DROP, one evidence-backed rationale line.
+Never reprint code, diffs, or file contents.
 ```
 
 ---
@@ -52,8 +62,10 @@ hazards, confirmed strong findings, and any gaps you noticed.
   clearly too complex" is a conclusion -- give the former.
 - **Name the public surfaces** you know about so the challenger can judge
   back-compat accurately; it cannot always infer what is published.
-- **Apply the verdicts** when it returns: DROP → remove, DOWNGRADE → lower
-  priority/severity, KEEP → carry into the plan. Record drops/downgrades in the
-  report's transparency section.
-- For a very large finding set, you may batch by language across multiple
-  challenger spawns -- but keep each batch's evidence complete.
+- **Apply the verdicts** when it returns: DROP → `adversarial.verdict: "drop"`,
+  DOWNGRADE → `"downgrade"` with lower priority, KEEP → `"keep"`. Copy each
+  rationale into `adversarial.reason`; the report lists drops and downgrades in
+  its transparency section.
+- **Large finding sets stay in one brief.** Keep every finding's evidence
+  complete and let the challenger page through it; cross-language interactions
+  are lost when the set is split.
