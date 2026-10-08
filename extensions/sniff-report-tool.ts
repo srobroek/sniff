@@ -50,27 +50,31 @@ function reportRenderContent(publicArtifacts: PublicReportArtifacts): string {
   return encode(boundedDescriptors, utf8Prefix(publicArtifacts.summary, summaryBudget));
 }
 
-function reportArtifactEnvelope(result: ReportArtifactReadResult): string {
-  const metadata = { relativePath: result.relativePath, offset: result.offset };
-  const encode = (content: string, consumed: number): string => JSON.stringify({
-    ...metadata,
-    nextOffset: result.offset + consumed,
-    eof: result.eof && consumed === result.bytes,
-    bytes: consumed,
-    content,
-  });
-  const originalBytes = Buffer.byteLength(result.content, "utf8");
-  const original = encode(result.content, originalBytes);
-  if (Buffer.byteLength(original, "utf8") <= MAX_MODEL_CONTENT_BYTES) return original;
+type ReportArtifactPage = { readonly nextOffset: number; readonly eof: boolean; readonly bytes: number };
 
+/**
+ * Encode one report page within the model content bound. JSON escaping can
+ * push a full 64 KiB page past the bound, so the content may be shortened at a
+ * UTF-8 boundary; the returned page fields describe the delivered content and
+ * must be the ones a caller continues from.
+ */
+function reportArtifactEnvelope(result: ReportArtifactReadResult): { readonly text: string; readonly page: ReportArtifactPage } {
+  const encode = (content: string) => {
+    const consumed = Buffer.byteLength(content, "utf8");
+    const page = { nextOffset: result.offset + consumed, eof: result.eof && consumed === result.bytes, bytes: consumed };
+    return { text: JSON.stringify({ relativePath: result.relativePath, offset: result.offset, ...page, content }), page };
+  };
+  const original = encode(result.content);
+  if (Buffer.byteLength(original.text, "utf8") <= MAX_MODEL_CONTENT_BYTES) return original;
+
+  const originalBytes = Buffer.byteLength(result.content, "utf8");
   let low = 0;
   let high = originalBytes;
-  let best = encode("", 0);
+  let best = encode("");
   while (low <= high) {
     const middle = Math.floor((low + high) / 2);
-    const content = utf8Prefix(result.content, middle);
-    const candidate = encode(content, Buffer.byteLength(content, "utf8"));
-    if (Buffer.byteLength(candidate, "utf8") <= MAX_MODEL_CONTENT_BYTES) {
+    const candidate = encode(utf8Prefix(result.content, middle));
+    if (Buffer.byteLength(candidate.text, "utf8") <= MAX_MODEL_CONTENT_BYTES) {
       best = candidate;
       low = middle + 1;
     } else high = middle - 1;
@@ -93,16 +97,15 @@ function registerReportArtifactReader(pi: ExtensionAPI): void {
       try {
         const { readCapability, ...options } = params;
         const result = readReportArtifact({ ...options, capability: readCapability });
+        const { text, page } = reportArtifactEnvelope(result);
         return {
-          content: [{ type: "text", text: reportArtifactEnvelope(result) }],
+          content: [{ type: "text", text }],
           details: {
             ok: true,
             reportId: result.reportId,
             relativePath: result.relativePath,
             offset: result.offset,
-            nextOffset: result.nextOffset,
-            eof: result.eof,
-            bytes: result.bytes,
+            ...page,
             totalBytes: result.totalBytes,
             sha256: result.sha256,
           },

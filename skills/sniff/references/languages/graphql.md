@@ -22,8 +22,8 @@ schema versions for breaking changes.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| graphql-eslint | **Run recipe.** `npx eslint --format json .` from repo root -- graphql-eslint is an ESLint **plugin**, not a standalone binary, so it runs through ESLint and needs the project's ESLint config to (a) load `@graphql-eslint/eslint-plugin`, (b) set its parser, and (c) add a `*.graphql`/`*.gql` override applying the GraphQL processor. Reads that ESLint config from the repo (project config governs). **Exit:** 0 = clean · 1 = lint problems → parse the JSON (per-file `messages[]` with `ruleId`/`message`/`severity`) · a usage/parse error = INVALID. **Gotcha:** if no ESLint config wires up the GraphQL plugin + parser, eslint will silently lint nothing for `.graphql` -- record that as a coverage gap, not a clean pass. | SDL smells: naming, nullability hints, deprecation, descriptions, unused types | default-on (when an ESLint/Node toolchain is present) | operator-direct (run documented command; output is not Sniff coverage) |
-| graphql-inspector | **Run recipe (opt-in, baseline target).** `graphql-inspector diff <base-schema> <new-schema>` from repo root -- `<base-schema>` is the prior SDL (vendored `schema.prev.graphql`, a git-ref checkout, or a registry export) and `<new-schema>` the current one. No project config; the baseline you pass IS the comparison. **Exit:** 0 = no breaking changes · non-zero = breaking/dangerous changes → parse the output; each change is tagged `BREAKING` / `DANGEROUS` / `NON_BREAKING`, which maps straight to the back-compat column · failure to load either schema = INVALID. Only run when a real baseline exists. | breaking-/dangerous-/non-breaking-change classification between two schema versions | opt-in (needs a baseline schema / git ref, CI) | operator-direct (run documented command; output is not Sniff coverage) |
+| graphql-eslint | **Run recipe.** `npx eslint --format json .` from repo root -- graphql-eslint is an ESLint **plugin**, not a standalone binary, so it runs through ESLint and needs the project's ESLint config to (a) load `@graphql-eslint/eslint-plugin`, (b) set its parser, and (c) add a `*.graphql`/`*.gql` override applying the GraphQL processor. Reads that ESLint config from the repo (project config governs). **Exit:** 0 = clean · 1 = lint problems → parse the JSON (per-file `messages[]` with `ruleId`/`message`/`severity`) · a usage/parse error = INVALID. **Gotcha:** if no ESLint config wires up the GraphQL plugin + parser, eslint will silently lint nothing for `.graphql` -- record that as a coverage gap, not a clean pass. | SDL smells: naming, nullability hints, deprecation, descriptions, unused types | default-on (when an ESLint/Node toolchain is present) | operator follow-up (not run by Sniff) |
+| graphql-inspector | **Run recipe (opt-in, baseline target).** `graphql-inspector diff <base-schema> <new-schema>` from repo root -- `<base-schema>` is the prior SDL (vendored `schema.prev.graphql`, a git-ref checkout, or a registry export) and `<new-schema>` the current one. No project config; the baseline you pass IS the comparison. **Exit:** 0 = no breaking changes · non-zero = breaking/dangerous changes → parse the output; each change is tagged `BREAKING` / `DANGEROUS` / `NON_BREAKING`, which maps straight to the back-compat column · failure to load either schema = INVALID. Only run when a real baseline exists. | breaking-/dangerous-/non-breaking-change classification between two schema versions | opt-in (needs a baseline schema / git ref, CI) | operator follow-up (not run by Sniff) |
 
 Notes: graphql-eslint runs **through ESLint** -- it needs an ESLint config with a
 `*.graphql`/`*.gql` override applying the GraphQL processor and parser; if the
@@ -77,9 +77,10 @@ for vocabulary, but the fix is a schema edit.
   Removing a field, removing an enum value, or changing a field's type is
   breaking -- **always flag in the back-compat column**.
 - **Nullability direction matters.** On an **output** field, non-null→nullable is
-  safe (clients already handle null); nullable→non-null is **breaking**. On an
-  **input** arg the reverse holds: non-null→nullable is safe; nullable→non-null
-  (or adding a required input) is **breaking**. State the direction explicitly.
+  **breaking** (clients relied on the non-null guarantee); nullable→non-null is
+  safe. On an **input** arg the reverse holds: non-null→nullable (required to
+  optional) is safe; nullable→non-null (or adding a required input) is
+  **breaking**. State the direction explicitly.
 - **Deprecate before removing.** A field marked `@deprecated` for a release cycle
   before deletion is the idiomatic path; flag direct removal of a live field.
 - Don't demand non-null everywhere. Nullable is often the correct, resilient
@@ -89,4 +90,4 @@ for vocabulary, but the fix is a schema edit.
 - Adding an enum value can still break clients with exhaustive switches; note it
   as `DANGEROUS` rather than always-safe.
 
-**Execution routing:** all tools in this table are operator-direct: invoke each documented command directly. Their output is not Sniff coverage.
+**Execution routing:** Sniff coverage comes only from fixed recipes run through `sniff_run_analyzer` (`lizard:complexity`, `opengrep:hardcoded-values`, `gitleaks:tracked-history`). Every tool in this table is an operator follow-up: never run it during a Sniff run. Record each dimension it would cover as a `gap` coverage entry naming the tool, and list its command as a follow-up the user may run outside Sniff.

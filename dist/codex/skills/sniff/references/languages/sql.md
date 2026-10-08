@@ -18,9 +18,9 @@ How sniff knows SQL is present: key files, extensions, config.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| sqlfluff | **Run recipe:** `cd` to the repo root FIRST (sqlfluff resolves `.sqlfluff`/`setup.cfg` and templater state from cwd -- a leaked subdir cwd from a prior step is the "ran against frontend/" bug), then pass **absolute or repo-root-relative** paths: `sqlfluff lint --format json --dialect <d> <abs-paths>`. **`--dialect` is MANDATORY** -- sqlfluff errors without it unless `.sqlfluff` sets one; detect the dialect (postgres/mysql/sqlite/bigquery/snowflake/ansi) from the repo, else default `ansi`. **Exit:** 0 clean · 1 = lint violations (parse JSON) · 2 = usage/config error → INVALID. | dialect-aware style + anti-patterns (`SELECT *`, implicit joins, ambiguous refs, layout) | default-on | operator-direct (run documented command; output is not Sniff coverage) |
-| squawk | `squawk <migration.sql>` | dangerous Postgres migrations (locking ALTER, table rewrite, NOT NULL without default) | opt-in (only when Postgres migration files are present) | operator-direct (run documented command; output is not Sniff coverage) |
-| jscpd | `jscpd --reporters json --silent --min-tokens 50 <path>` | cross-file query duplication (no native SQL dup detector) | default-on | operator-direct (run documented command; output is not Sniff coverage) |
+| sqlfluff | **Run recipe:** `cd` to the repo root FIRST (sqlfluff resolves `.sqlfluff`/`setup.cfg` and templater state from cwd -- a leaked subdir cwd from a prior step is the "ran against frontend/" bug), then pass **absolute or repo-root-relative** paths: `sqlfluff lint --format json --dialect <d> <abs-paths>`. **`--dialect` is MANDATORY** -- sqlfluff errors without it unless `.sqlfluff` sets one; detect the dialect (postgres/mysql/sqlite/bigquery/snowflake/ansi) from the repo, else default `ansi`. **Exit:** 0 clean · 1 = lint violations (parse JSON) · 2 = usage/config error → INVALID. | dialect-aware style + anti-patterns (`SELECT *`, implicit joins, ambiguous refs, layout) | default-on | operator follow-up (not run by Sniff) |
+| squawk | `squawk <migration.sql>` | dangerous Postgres migrations (locking ALTER, table rewrite, NOT NULL without default) | opt-in (only when Postgres migration files are present) | operator follow-up (not run by Sniff) |
+| jscpd | `jscpd --reporters json --silent --min-tokens 50 <path>` | cross-file query duplication (no native SQL dup detector) | default-on | operator follow-up (not run by Sniff) |
 
 Notes: sqlfluff is primary and is dialect-aware (`postgres`, `bigquery`,
 `snowflake`, `mysql`, `tsql`, `ansi`, …) -- always pass the project's real dialect.
@@ -83,4 +83,4 @@ use the catalog only for true duplication/length structure:
 - Migration warnings from squawk assume large tables under load; on a tiny or
   empty table a "rewriting" ALTER is harmless.
 
-**Execution routing:** all tools in this table are operator-direct: invoke each documented command directly. Their output is not Sniff coverage.
+**Execution routing:** Sniff coverage comes only from fixed recipes run through `sniff_run_analyzer` (`lizard:complexity`, `opengrep:hardcoded-values`, `gitleaks:tracked-history`). Every tool in this table is an operator follow-up: never run it during a Sniff run. Record each dimension it would cover as a `gap` coverage entry naming the tool, and list its command as a follow-up the user may run outside Sniff.

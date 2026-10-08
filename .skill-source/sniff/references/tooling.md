@@ -1,10 +1,15 @@
 # Tool Catalog
 
-The detection engine. The agent (or `bloodhound`) selects tools from here, runs
-them with the listed invocation + machine-readable flag, respects project
-config, and **skips + warns + records the install hint** for any absent tool.
-There is no built-in grep fallback: detection uses real tools, and missing tools
-become reported coverage gaps, not silent guesses.
+The detection catalog. Sniff coverage comes only from the fixed analyzer recipes
+listed under "Where the tiers live", run through `sniff_run_analyzer` with the
+issued capability. Every other tool in this catalog and in the language docs is
+an **operator follow-up**: the agent and `bloodhound` never run it during a
+Sniff run, because it would execute project configuration or code, write build
+output, or fetch packages outside the lease, budget, and trust checks. Record
+each dimension such a tool would cover as a `gap` coverage entry that names the
+tool, and list its documented command as a follow-up the user may run outside
+Sniff. The runtime rejects `ran` coverage for any tool without a completed
+`sniff_run_analyzer` reservation. There is no grep fallback.
 
 Install via `sniff_install_tools` (see `installer.md`). Probe first:
 `sniff_install_tools` with `{"mode":"probe"}`.
@@ -23,7 +28,7 @@ runnable from its recipe alone, not improvised:
    repo-relative paths -- do not let a previous step's cwd leak in. Shipped assets
    (opengrep rules, configs) live at `skill://sniff/references/opengrep-rules/` and
    must be passed as an absolute filesystem path when a tool needs `--config`.
-2. **Project config wins (Step 2.5).** If the repo configures the tool, run it so
+2. **Project config wins (step 3).** If the repo configures the tool, run it so
    that config governs; the recipe's flags are the *no-project-config* form. A
    rule the project disabled is advisory at most.
 3. **Exit codes are a contract, not failure.** For most linters, non-zero =
@@ -41,16 +46,16 @@ runnable from its recipe alone, not improvised:
    do not normalize or guess a flag.
 
 ## Where the tiers live (source of truth)
-The executable analyzer recipes are `lizard:complexity`, `opengrep:hardcoded-values`, and `gitleaks:tracked-history`; these IDs are the registry keys used by `sniff_run_analyzer`.
+The executable analyzer recipes are `lizard:complexity`, `opengrep:hardcoded-values`, and `gitleaks:tracked-history`; these IDs are the registry keys used by `sniff_run_analyzer`. They are the only Sniff coverage.
 
-
-
-**Per-target default-on / opt-in lists are authoritative in each target's doc**
-(`references/languages/<target>.md`, its `## Tools` table with the **Tier**
-column). This file is the **cross-cutting index + overlap map** -- the
-cross-language tools, the precedence rules, the analysis classes, and what
-subsumes what. When you build the Step-2 tool proposal: pull each detected
-target's table from its doc, then add the cross-language default-on set below.
+The per-target **Tier** column in each language doc
+(`references/languages/<target>.md`, `## Tools` table) ranks operator
+follow-ups: `default-on` rows are the standard follow-up recommendations,
+`opt-in` rows apply only when their stated reason does. This file is the
+cross-cutting index and overlap map -- the cross-language tools, the
+precedence rules, the analysis classes, and what subsumes what. When you build
+the step 3 plan, list the selected recipes, then each detected target's
+follow-ups as coverage gaps.
 
 ## Cross-language default-on set (offer on every run, any stack)
 

@@ -13,15 +13,15 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../src/core/analyzer-artifact-registry.ts";
-import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../src/core/analyzer-output.ts";
-import { SNIFF_ANALYZER_RECIPES } from "../src/core/analyzer-recipes.ts";
-import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../src/core/catalog.ts";
-import type { CommandResult, SniffInstallRuntime } from "../src/core/install.ts";
-import { renderMiseToolkit, runSniffInstall } from "../src/core/install.ts";
-import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../src/core/opengrep.ts";
-import { SECURITY_ANALYZER_CATALOG } from "../src/core/security.ts";
-import sniffInstallTool from "./sniff-install-tool.ts";
+import sniffInstallTool from "../../extensions/sniff-install-tool.ts";
+import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../../src/core/analyzer-artifact-registry.ts";
+import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
+import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
+import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
+import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
+import { renderMiseToolkit, runSniffInstall } from "../../src/core/install.ts";
+import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../../src/core/opengrep.ts";
+import { SECURITY_ANALYZER_CATALOG } from "../../src/core/security.ts";
 
 const temps: string[] = [];
 afterAll(() => {
@@ -116,9 +116,9 @@ test("analyzer recipe registry matches security catalog and documented IDs", () 
 		const section = markdown.slice(headingStart, nextHeading === -1 ? undefined : nextHeading);
 		return [...section.matchAll(/`([a-z0-9-]+:[a-z0-9-]+)`/g)].map((match) => match[1]).sort();
 	};
-	const tooling = readFileSync(join(import.meta.dir, "../skills/sniff/references/tooling.md"), "utf8");
+	const tooling = readFileSync(join(import.meta.dir, "../../skills/sniff/references/tooling.md"), "utf8");
 	expect(documentedRecipeIds(tooling, "Where the tiers live (source of truth)")).toEqual(registryIds);
-	const types = readFileSync(join(import.meta.dir, "../docs/sniff-types.md"), "utf8");
+	const types = readFileSync(join(import.meta.dir, "../../docs/sniff-types.md"), "utf8");
 	expect(documentedRecipeIds(types, "Analyzer recipes")).toEqual(registryIds);
 });
 
@@ -1166,6 +1166,75 @@ describe("sniff tools integration", () => {
 		expect(out.isError).toBe(true);
 		expect(out.details.tools.length).toBeGreaterThan(0);
 		expect(out.details.tools[0]).toHaveProperty("status");
+	});
+
+	test("install mode requires a digest-bound interactive confirmation and a host-owned cwd", async () => {
+		type InstallOutput = { content: Array<{ type: string; text: string }>; details: { ok: boolean; error?: string; tools: unknown[] }; isError?: boolean };
+		type InstallContext = { cwd: string; hasUI: boolean; ui?: { confirm: (title: string, message: string) => Promise<boolean> } };
+		type RegisteredInstallTool = { name: string; execute: (id: string, params: Record<string, unknown>, signal: unknown, onUpdate: unknown, context: InstallContext) => Promise<InstallOutput> };
+		const captured = new Map<string, RegisteredInstallTool>();
+		sniffInstallTool({ registerTool: (definition: RegisteredInstallTool) => captured.set(definition.name, definition), on: () => {} } as never);
+		const tool = captured.get("sniff_install_tools");
+		if (!tool) throw new Error("sniff_install_tools was not registered");
+
+		const root = tempDir("sniff-omp-install-");
+		const bin = join(root, "bin");
+		const marker = join(root, "install-called");
+		executable(join(bin, "jscpd"), "exit 17");
+		executable(join(bin, "mise"), `case "$1" in
+  install)
+    printf called > ${marker}
+    printf '#!/bin/sh\\nexit 0\\n' > ${join(bin, "jscpd")}
+    chmod +x ${join(bin, "jscpd")}
+    ;;
+  env)
+    printf '%s\\n' '{"PATH":"${bin}"}'
+    ;;
+esac
+exit 0`);
+		const saved = { PATH: process.env.PATH, HOME: process.env.HOME, SNIFF_TOOLKIT_CACHE_DIR: process.env.SNIFF_TOOLKIT_CACHE_DIR };
+		process.env.PATH = `${bin}${delimiter}${saved.PATH ?? ""}`;
+		process.env.HOME = root;
+		process.env.SNIFF_TOOLKIT_CACHE_DIR = join(root, "toolkits");
+		const prompts: string[] = [];
+		const interactive = (answer: boolean): InstallContext => ({
+			cwd: root,
+			hasUI: true,
+			ui: { confirm: async (title, message) => { prompts.push(`${title}\n${message}`); return answer; } },
+		});
+		try {
+			const headless = await tool.execute("id", { mode: "install", all: true }, undefined, undefined, { cwd: root, hasUI: false });
+			expect(headless.isError).toBe(true);
+			expect(headless.details.error).toContain("headless sessions cannot install");
+			expect(existsSync(marker)).toBe(false);
+			expect(existsSync(join(root, "toolkits"))).toBe(false);
+
+			const forgedCwd = await tool.execute("id", { mode: "install", bundles: ["dup"], path: root }, undefined, undefined, interactive(true));
+			expect(forgedCwd.isError).toBe(true);
+			expect(forgedCwd.details.error).toContain("caller-controlled cwd");
+			expect(prompts).toHaveLength(0);
+			expect(existsSync(marker)).toBe(false);
+
+			const denied = await tool.execute("id", { mode: "install", bundles: ["dup"] }, undefined, undefined, interactive(false));
+			expect(denied.isError).toBe(true);
+			expect(denied.details.error).toContain("authorization was denied");
+			expect(prompts).toHaveLength(1);
+			expect(prompts[0]).toContain("dup/jscpd");
+			expect(prompts[0]).toMatch(/Install digest: [0-9a-f]{64}$/);
+			expect(existsSync(marker)).toBe(false);
+
+			const approved = await tool.execute("id", { mode: "install", bundles: ["dup"] }, undefined, undefined, interactive(true));
+			expect(approved.isError).toBe(false);
+			expect(approved.details.ok).toBe(true);
+			expect(prompts).toHaveLength(2);
+			expect(prompts[1]).toBe(prompts[0]);
+			expect(existsSync(marker)).toBe(true);
+		} finally {
+			for (const [key, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
 	});
 });
 

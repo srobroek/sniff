@@ -47,28 +47,29 @@ These files register the native adapter:
 - `extensions/sniff-intake-tool.ts`
 - `extensions/sniff-install-tool.ts`
 - `extensions/sniff-report-tool.ts`
-- `extensions/sniff-intake-manifest.ts`
-- `extensions/sniff-target-checkout.ts`
 
 MCP registration lives in these files:
 
 - `adapters/mcp/server.ts`
-- `adapters/mcp/server.test.ts`
+- `tests/adapters/mcp/server.test.ts`
 - `claude-mcp.json`
 - `dist/claude/server.js`
 - `dist/codex/server.js`
 - `dist/codex/mcp.json`
+
 Plugin manifests live in these files:
 
-- `.omp-plugin/plugin.json`
+- `.omp-plugin/plugin.json` (declares no MCP servers, so OMP uses only the native extension tools)
+- `.omp-plugin/marketplace.json` (OMP catalog; loads the OMP skill tree in `skills/`)
 - `.claude-plugin/plugin.json`
+- `.claude-plugin/marketplace.json` (Claude Code catalog; loads the Claude skill tree in `.claude/skills/`)
 - `.agents/plugins/marketplace.json`
 - `dist/codex/plugin.json`
 
 Generated skill evidence uses these paths:
 
 - `.skill-source/sniff/`
-- `scripts/generate-harness-skills.ts`
+- `tools/generate-harness-skills.ts`
 - `skills/sniff/`
 - `.claude/skills/sniff/`
 - `.agents/skills/sniff/`
@@ -77,9 +78,10 @@ Generated skill evidence uses these paths:
 Run the focused protocol suite with this command:
 
 ```sh
-bun test extensions/sniff-adaptive-intake.test.ts extensions/sniff-install-tool.test.ts extensions/sniff-runtime-boundaries.test.ts extensions/sniff-report.test.ts adapters/mcp/server.test.ts scripts/generate-harness-skills.test.ts scripts/packaging-shape.test.ts
+bun test tests/
 ```
-The suite covers approval, cancellation, expiry, replay, MCP dispatch, generated skills, and bundle shape.
+The suite covers approval, cancellation, expiry, replay, MCP dispatch, generated skills, and bundle shape. Tests live in `tests/` and the skill and bundle generators live in `tools/`; no test or developer-only file ships inside an installed component directory (`extensions/`, `src/`, `adapters/`, `skills/`).
+
 ## Cross-harness verification
 
 Run `bun run bundles:check` to verify generated harness bundles and the OpenGrep rule copy. Run `bun run check` before publishing an adapter or portable-core change.

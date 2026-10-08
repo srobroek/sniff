@@ -54,7 +54,7 @@ The intake response issues a capability and manifest ID for one lease-backed mat
 - MUST classify each analyzer by scope class.
 - MUST headline base-ref breaks. Skip invalid scoped global runs and record them.
 - MUST resolve shipped assets through this skill's `references/` directory.
-- MUST run each selected analyzer only through `sniff_run_analyzer`.
+- MUST run each selected analyzer only through `sniff_run_analyzer`. Only its fixed recipes produce Sniff coverage. Tools in the language docs are operator follow-ups: never run them during a Sniff run; record each as a `gap` coverage entry and list its command as a follow-up.
 - MUST pass only the issued capability, manifest ID, and recipe ID.
 - MUST keep evidence tier separate from impact.
 - MUST preserve challenged findings and coverage data.

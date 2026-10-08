@@ -1,13 +1,15 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { type AnalyzerArtifactDescriptor, type AnalyzerArtifactReadOptions, type AnalyzerObservationPreview, readAnalyzerArtifact } from "../src/core/analyzer-artifact-registry.ts";
 import type { AnalyzerCapture, AnalyzerObservation } from "../src/core/analyzer-output.ts";
 import {
   runSniffAnalyzer,
   runSniffInstall,
   type SniffAnalyzerOutcome,
+  type SniffInstallAuthorizationRequest,
   type SniffInstallMode,
   type SniffToolResult,
+  sniffInstallAuthorizationRequest,
 } from "../src/core/install.ts";
 import { sniffInstallApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
@@ -176,6 +178,37 @@ function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
   });
 }
 
+type SniffInstallParams = { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; path?: string };
+
+function installConfirmationMessage(request: SniffInstallAuthorizationRequest): string {
+  const tools = request.tools.map((tool) => `  - ${tool.bundle}/${tool.tool}: ${tool.status}${tool.resolvedPath ? ` (${tool.resolvedPath})` : ""}`).join("\n");
+  return [
+    `Bundles: ${request.bundles.join(", ") || "<none>"}`,
+    `All bundles: ${request.all}`,
+    `Dry run: ${request.dryRun}`,
+    `Sniff-owned toolkit cache: ${request.toolkitCacheRoot}`,
+    `Tools (${request.tools.length}):`,
+    tools || "  - <none>",
+    `Install digest: ${request.digest}`,
+  ].join("\n");
+}
+
+/**
+ * Installation mirrors the MCP adapter: the host owns the cwd, the exact
+ * diagnosed plan is shown with its digest, and only an interactive user can
+ * approve it. Headless sessions (including subagents under yolo) are refused.
+ */
+async function confirmedInstall(params: SniffInstallParams, signal: AbortSignal | undefined, ctx: ExtensionContext | undefined) {
+  if (params.path !== undefined) throw new Error("Install mode does not accept a caller-controlled cwd");
+  if (!ctx?.hasUI) throw new Error("Installation requires interactive confirmation of the exact plan; headless sessions cannot install");
+  const options = { bundles: params.bundles, all: params.all, dryRun: params.dryRun, cwd: ctx.cwd ?? process.cwd(), signal };
+  const request = await sniffInstallAuthorizationRequest(options);
+  const approved = await ctx.ui.confirm("Authorize this exact Sniff installation plan", installConfirmationMessage(request));
+  if (!approved) throw new Error("Sniff installation authorization was denied");
+  if (signal?.aborted) throw new Error("operation aborted");
+  return runSniffInstall({ ...options, mode: "install" });
+}
+
 export default function sniffInstallTool(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "sniff_install_tools",
@@ -183,9 +216,11 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
     description: "Probe, diagnose, list, or install sniff analyzer catalog entries. Diagnose is inventory-only and never authorizes execution. Managed installs require mise and are re-probed from a Sniff-owned toolkit. Never sudo or bypass trust policy. Default mode is probe.",
     approval: sniffInstallApproval,
     parameters: sniffToolInputSchemas.sniff_install_tools as unknown as TSchema,
-    execute: async (_id, params: { mode?: SniffInstallMode; bundles?: string[]; all?: boolean; dryRun?: boolean; path?: string }, signal, _onUpdate, ctx) => {
+    execute: async (_id, params: SniffInstallParams, signal, _onUpdate, ctx) => {
       try {
-        const result = await runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd(), signal });
+        const result = params.mode === "install"
+          ? await confirmedInstall(params, signal, ctx)
+          : await runSniffInstall({ ...params, cwd: params.path ?? ctx?.cwd ?? process.cwd(), signal });
         return { content: [{ type: "text", text: result.report }], details: { ok: result.ok, tools: result.tools }, isError: !result.ok };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import { Server } from "@modelcontextprotocol/sdk/server";
 import type { Transport, TransportSendOptions } from "@modelcontextprotocol/sdk/shared/transport";
@@ -21,7 +20,6 @@ import {
   intakeInput,
   publicSniffIntakeResult,
   releaseAllRunLeases,
-  resolveSniffToolkitCacheRoot,
   runSniffAnalyzer,
   runSniffInstall,
   runSniffIntakeTool,
@@ -31,6 +29,7 @@ import {
   type SniffIntakePublicResult,
   type SniffReportMode,
   type SniffToolResult,
+  sniffInstallAuthorizationRequest,
 } from "../../src/core/index.ts";
 import type { ReportInput } from "../../src/core/report.ts";
 import { readReportArtifact } from "../../src/core/report-artifact-registry.ts";
@@ -417,16 +416,6 @@ function toolSuccess(value: JsonObject, text: string): ToolResponse {
   return { content: [{ type: "text", text: boundedString(text) }], structuredContent: structured, ...(isError ? { isError: true } : {}) };
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (isObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-  return JSON.stringify(value);
-}
-
-function digest(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
-}
-
 function abortError(): Error {
   return new DOMException("The MCP request was cancelled.", "AbortError");
 }
@@ -688,11 +677,7 @@ async function install(args: JsonObject, signal: AbortSignal): Promise<ToolRespo
   };
   if (selectedMode === "install") {
     if (!supportsFormElicitation()) return toolError("sniff_install_tools", new SniffMcpError("confirmation_required", "MCP form elicitation is required before installation"));
-    const plan = await runSniffInstall({ ...options, mode: "diagnose", signal });
-    const planTools = plan.tools.map((tool) => ({ bundle: tool.bundle, tool: tool.tool, bin: tool.bin, status: tool.status, resolvedPath: tool.resolvedPath, routes: tool.attempts.map((attempt) => ({ argv: attempt.argv, exitCode: attempt.exitCode, timeoutMs: attempt.timeoutMs })) }));
-    const plannedBundles = [...new Set(plan.tools.map((tool) => tool.bundle))];
-    const authorization = { mode: "install", bundles: plannedBundles, all: options.all ?? false, dryRun: options.dryRun ?? false, toolkitCacheRoot: resolveSniffToolkitCacheRoot(), tools: planTools };
-    const request = { ...authorization, digest: digest(authorization) };
+    const request = await sniffInstallAuthorizationRequest(options);
     let accepted: false | { acceptedDigest: string; actor?: string; reason?: string };
     try {
       accepted = await elicitDigest(request, signal, "Authorize this exact Sniff installation plan (Sniff-owned toolkit cache). ");

@@ -25,8 +25,8 @@ How sniff knows YAML is present: key files, extensions, config.
 
 | Tool | Invocation | Covers | Tier | Installed via |
 |------|-----------|--------|------|---------------|
-| yamllint | **Run recipe:** if the repo has a `.yamllint`/`.yamllint.yaml`, use it: `yamllint -f parsable <paths>`. If it has **no** yamllint/`.editorconfig` config, the defaults (80-col `line-length`, `document-start`) are NOT the project's rules and produce pure noise (GitHub workflows routinely exceed 80 cols) -- suppress them inline: `yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable}}" -f parsable <paths>`. Pass explicit paths, not `.`. **Exit:** 0 clean · 1 = problems (parse). | Norway/truthy coercion, tabs, indent consistency, duplicate keys (NOT line-length/document-start unless the project enables them) | default-on | operator-direct (run documented command; output is not Sniff coverage) |
-| check-jsonschema | `check-jsonschema --schemafile <schema> <file>` | schema conformance for schema-backed YAML configs | opt-in (only when a schema-backed config is present) | operator-direct (run documented command; output is not Sniff coverage) |
+| yamllint | **Run recipe:** if the repo has a `.yamllint`/`.yamllint.yaml`, use it: `yamllint -f parsable <paths>`. If it has **no** yamllint/`.editorconfig` config, the defaults (80-col `line-length`, `document-start`) are NOT the project's rules and produce pure noise (GitHub workflows routinely exceed 80 cols) -- suppress them inline: `yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable}}" -f parsable <paths>`. Pass explicit paths, not `.`. **Exit:** 0 clean · 1 = problems (parse). | Norway/truthy coercion, tabs, indent consistency, duplicate keys (NOT line-length/document-start unless the project enables them) | default-on | operator follow-up (not run by Sniff) |
+| check-jsonschema | `check-jsonschema --schemafile <schema> <file>` | schema conformance for schema-backed YAML configs | opt-in (only when a schema-backed config is present) | operator follow-up (not run by Sniff) |
 
 Notes: yamllint is the primary and essentially only format analyzer here; the
 `truthy` rule catches the Norway problem and the `key-duplicates` rule catches
@@ -91,3 +91,5 @@ or yamllint rather than the OO catalog for syntax/coercion findings.
   limits, probes, `runAsNonRoot`, or CI action pinning / injection is NOT a YAML
   format finding -- route it to `kubernetes.md` or `ci-cd.md`. Do not invent
   format objections to functional content.
+
+**Execution routing:** Sniff coverage comes only from fixed recipes run through `sniff_run_analyzer` (`lizard:complexity`, `opengrep:hardcoded-values`, `gitleaks:tracked-history`). Every tool in this table is an operator follow-up: never run it during a Sniff run. Record each dimension it would cover as a `gap` coverage entry naming the tool, and list its command as a follow-up the user may run outside Sniff.

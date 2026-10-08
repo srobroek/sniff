@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ArgvRunner, resolveTarget, runArgv } from "./target.ts";
-import { resolveTargetLease } from "./target-provider.ts";
+import { type ArgvRunner, resolveTarget, runArgv } from "../../src/core/target.ts";
+import { resolveTargetLease } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
 

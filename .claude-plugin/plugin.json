@@ -5,6 +5,5 @@
   "author": {
     "name": "srobroek"
   },
-  "skills": "./.claude/skills/",
   "mcpServers": "./claude-mcp.json"
 }

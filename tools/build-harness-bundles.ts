@@ -199,7 +199,7 @@ export async function buildHarnessBundles(
 async function runFromCli(): Promise<void> {
 	const args = process.argv.slice(2);
 	if (args.some((argument) => argument !== "--check")) {
-		throw new Error("Usage: bun scripts/build-harness-bundles.ts [--check]");
+		throw new Error("Usage: bun tools/build-harness-bundles.ts [--check]");
 	}
 	const check = args.includes("--check");
 	const result = await buildHarnessBundles({ check });

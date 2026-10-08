@@ -205,7 +205,7 @@ export function generateHarnessSkills(
 function runFromCli(): void {
 	const args = process.argv.slice(2);
 	if (args.some((argument) => argument !== "--check")) {
-		throw new Error("Usage: bun scripts/generate-harness-skills.ts [--check]");
+		throw new Error("Usage: bun tools/generate-harness-skills.ts [--check]");
 	}
 	const result = generateHarnessSkills({ check: args.includes("--check") });
 	const action = args.includes("--check")

@@ -18,7 +18,7 @@ type JsonObject = Record<string, unknown>;
 
 setDefaultTimeout(30_000);
 
-const repoRoot = resolve(import.meta.dir, "..");
+const repoRoot = resolve(import.meta.dir, "..", "..");
 const codexRoot = join(repoRoot, "dist", "codex");
 const claudeServerPath = join(repoRoot, "dist", "claude", "server.js");
 const codexServerPath = join(codexRoot, "server.js");
@@ -56,6 +56,9 @@ const codexMcp = JSON.parse(
 ) as JsonObject;
 const claudeCatalog = JSON.parse(
 	readFileSync(join(repoRoot, ".claude-plugin", "marketplace.json"), "utf8"),
+) as JsonObject;
+const ompCatalog = JSON.parse(
+	readFileSync(join(repoRoot, ".omp-plugin", "marketplace.json"), "utf8"),
 ) as JsonObject;
 const codexCatalog = JSON.parse(
 	readFileSync(
@@ -424,11 +427,34 @@ test("Claude metadata discovers its generated skill and shared MCP config", () =
 	expect(claudeManifest.name).toBe("sniff");
 	expect(claudeManifest.version).toBe(packageJson.version);
 	expect(ompManifest.version).toBe(packageJson.version);
-	expect(claudeManifest.skills).toBe("./.claude/skills/");
+	// OMP also reads .claude-plugin/plugin.json skill paths, so the Claude tree is
+	// declared only in the Claude catalog entry, which OMP never selects.
+	expect(claudeManifest).not.toHaveProperty("skills");
+	expect(pluginEntry(claudeCatalog).skills).toBe("./.claude/skills/");
 	expect(claudeManifest.mcpServers).toBe("./claude-mcp.json");
 	expect(existsSync(join(repoRoot, ".mcp.json"))).toBe(false);
 	expect(claudeManifest).not.toHaveProperty("agents");
 	expect(claudeManifest).not.toHaveProperty("rules");
+});
+
+test("OMP metadata mounts no MCP server and loads only the OMP skill tree", () => {
+	// OMP reads mcpServers from .omp-plugin/plugin.json before .claude-plugin/plugin.json;
+	// an inline empty map stops the fallthrough to claude-mcp.json, so the native
+	// extension is the only route and leases never split across processes.
+	expect(ompManifest.mcpServers).toEqual({});
+	// OMP prefers .omp-plugin/marketplace.json; for a "./" source its skill paths
+	// replace the default tree, so skill://sniff resolves to skills/sniff.
+	const ompEntry = pluginEntry(ompCatalog);
+	const claudeEntry = pluginEntry(claudeCatalog);
+	expect(ompCatalog.name).toBe(claudeCatalog.name);
+	expect(ompEntry.name).toBe(claudeEntry.name);
+	expect(ompEntry.description).toBe(claudeEntry.description);
+	expect(ompEntry.source).toBe("./");
+	expect(ompEntry.skills).toBe("./skills/");
+	const ompSkill = readFileSync(join(repoRoot, "skills", "sniff", "SKILL.md"), "utf8");
+	expect(ompSkill).toContain("skill://sniff/references/");
+	expect(ompSkill).toContain("`bloodhound`");
+	expect(ompSkill).toContain("`refactor-challenger`");
 });
 
 test("Codex package uses the Agent Plugins 1.0 manifest and fixed paths", () => {
@@ -487,7 +513,10 @@ test("MCP configs launch the cache-local bundled servers", () => {
 test("All published version declarations match package.json", () => {
 	const claudeEntry = pluginEntry(claudeCatalog);
 	const codexEntry = pluginEntry(codexCatalog);
+	const ompEntry = pluginEntry(ompCatalog);
 	expect(ompManifest.version).toBe(packageJson.version);
+	expect(ompCatalog.version).toBe(packageJson.version);
+	expect(ompEntry.version).toBe(packageJson.version);
 	expect(claudeManifest.version).toBe(packageJson.version);
 	expect(claudeCatalog.version).toBe(packageJson.version);
 	expect(claudeEntry.version).toBe(packageJson.version);

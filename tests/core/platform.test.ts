@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { OPENGREP_ASSETS, openGrepAsset } from "./opengrep.ts";
-import { platformConstants } from "./report-native-persistence.ts";
+import { OPENGREP_ASSETS, openGrepAsset } from "../../src/core/opengrep.ts";
+import { platformConstants } from "../../src/core/report-native-persistence.ts";
 
 describe("OpenGrep platform assets", () => {
   test.each([
