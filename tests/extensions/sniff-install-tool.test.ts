@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test, vi } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -19,8 +19,9 @@ import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, pars
 import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
-import { renderMiseToolkit, runSniffInstall } from "../../src/core/install.ts";
+import { renderMiseToolkit, runCommand, runSniffInstall } from "../../src/core/install.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../../src/core/opengrep.ts";
+import { processAlive, TERMINATION_GRACE_MS } from "../../src/core/process-control.ts";
 import { SECURITY_ANALYZER_CATALOG } from "../../src/core/security.ts";
 
 const temps: string[] = [];
@@ -307,6 +308,71 @@ describe("probe timeouts", () => {
 			statuses.push(result.tools.find((tool) => tool.tool === "opengrep")?.status ?? "");
 		}
 		expect(statuses).toEqual(["unrunnable", "unrunnable"]);
+	});
+});
+
+describe("bounded command execution", () => {
+	// Forks a sleeper into its own session that inherits stdout, prints its PID, then lets the parent continue.
+	const SETSID_SLEEPER = 'use POSIX; my $pid = fork(); if ($pid == 0) { POSIX::setsid(); sleep 30; exit 0; } print "$pid\\n"; STDOUT->flush();';
+	const sleepers: number[] = [];
+	afterAll(() => {
+		for (const pid of sleepers) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+	});
+
+	test("returns once the child exits even while a setsid descendant holds stdout open", async () => {
+		const startedAt = Date.now();
+		const result = await runCommand(["perl", "-e", SETSID_SLEEPER], tmpdir(), process.env, 20_000);
+		const elapsed = Date.now() - startedAt;
+		const sleeper = Number(result.stdout.trim());
+		sleepers.push(sleeper);
+		expect(processAlive(sleeper)).toBe(true);
+		expect(elapsed).toBeLessThan(5_000);
+		expect(result.exitCode).toBe(0);
+		expect(result.timedOut).toBe(false);
+		expect(result.stdoutTruncated).toBe(true);
+	});
+
+	test("returns after a timeout even while a setsid descendant holds stdout open", async () => {
+		const startedAt = Date.now();
+		const result = await runCommand(["perl", "-e", `${SETSID_SLEEPER} sleep 30;`], tmpdir(), process.env, 200);
+		sleepers.push(Number(result.stdout.trim()));
+		expect(Date.now() - startedAt).toBeLessThan(5_000);
+		expect(result.timedOut).toBe(true);
+		expect(result.stdoutTruncated).toBe(true);
+	});
+
+	test("keeps complete output when the child closes its streams", async () => {
+		const result = await runCommand(["sh", "-c", "printf complete; printf err >&2"], tmpdir(), process.env, 5_000);
+		expect(result).toMatchObject({ exitCode: 0, stdout: "complete", stderr: "err", stdoutTruncated: false, stderrTruncated: false, timedOut: false });
+	});
+
+	test("terminates once when a timeout is followed by an abort", async () => {
+		const controller = new AbortController();
+		const signals: Array<string | number | undefined> = [];
+		let childPid = 0;
+		const realKill = process.kill.bind(process);
+		const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+			if (Math.abs(pid) === childPid) signals.push(signal);
+			return realKill(pid, signal);
+		}) as typeof process.kill);
+		try {
+			const pending = runCommand(["sh", "-c", 'trap "" TERM; sleep 5'], tmpdir(), process.env, 30, controller.signal, undefined, (spawned) => {
+				childPid = spawned.pid;
+			});
+			setTimeout(() => controller.abort(), 60);
+			const result = await pending;
+			expect(result.timedOut).toBe(true);
+			await Bun.sleep(TERMINATION_GRACE_MS * 3);
+			expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+		} finally {
+			kill.mockRestore();
+		}
 	});
 });
 

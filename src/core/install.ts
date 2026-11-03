@@ -111,15 +111,33 @@ export type SniffInstallResult = {
 };
 
 
-async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<{ text: string; truncated: boolean }> {
+/** How long output may keep draining once the child exited; an escaped descendant can hold a pipe open indefinitely. */
+export const OUTPUT_DRAIN_MS = 250;
+
+const ABANDONED = Symbol("abandoned");
+
+/**
+ * Reads one output stream up to the byte limit. Once `abandon` settles, the read stops, the
+ * reader is cancelled, and the result is marked truncated because the stream never reached EOF.
+ */
+async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean }> {
 	if (!stream) return { text: "", truncated: false };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let retained = 0;
 	let truncated = false;
+	let abandoned = false;
+	const abandonRead = abandon?.then((): typeof ABANDONED => ABANDONED);
 	try {
 		for (;;) {
-			const next = await reader.read();
+			const pending = reader.read();
+			const next = abandonRead ? await Promise.race([pending, abandonRead]) : await pending;
+			if (next === ABANDONED) {
+				abandoned = true;
+				// The cancelled read settles later; it must never surface as an unhandled rejection.
+				pending.catch(() => undefined);
+				break;
+			}
 			if (next.done) break;
 			const chunk = next.value;
 			if (retained < outputLimitBytes) {
@@ -130,7 +148,12 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 			if (retained >= outputLimitBytes && chunk.byteLength > 0) truncated = true;
 		}
 	} finally {
-		reader.releaseLock();
+		if (abandoned) reader.cancel().catch(() => undefined);
+		try {
+			reader.releaseLock();
+		} catch {
+			// A cancelled reader may still own a settling read.
+		}
 	}
 	const output = new Uint8Array(retained);
 	let offset = 0;
@@ -138,12 +161,12 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 		output.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return { text: Buffer.from(output).toString("utf8"), truncated };
+	return { text: Buffer.from(output).toString("utf8"), truncated: truncated || abandoned };
 }
 
 
 
-async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult> {
+export async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult> {
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
@@ -151,23 +174,48 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
 	let timedOut = false;
 	let aborted = false;
+	let stopping = false;
+	let reaped = false;
 	let forceKill: ReturnType<typeof setTimeout> | undefined;
+	let drainTimer: ReturnType<typeof setTimeout> | undefined;
+	const drain = Promise.withResolvers<void>();
+	// Termination runs once: a timeout followed by an abort must not schedule a second SIGKILL.
 	const stop = (reason: "timeout" | "abort") => {
+		if (reaped) {
+			// The child already exited; stop draining output an escaped descendant may hold open.
+			drain.resolve();
+			return;
+		}
 		if (reason === "timeout") timedOut = true;
 		if (reason === "abort") aborted = true;
+		if (stopping) return;
+		stopping = true;
+		clearTimeout(timeout);
 		terminateProcess(proc, "SIGTERM");
-		forceKill = setTimeout(() => terminateProcess(proc, "SIGKILL"), TERMINATION_GRACE_MS);
+		forceKill = setTimeout(() => {
+			if (!reaped) terminateProcess(proc, "SIGKILL");
+		}, TERMINATION_GRACE_MS);
 	};
 	const timeout = setTimeout(() => stop("timeout"), timeoutMs);
 	const onAbort = () => stop("abort");
 	signal?.addEventListener("abort", onAbort, { once: true });
+	const exited = proc.exited.then((code) => {
+		reaped = true;
+		// Never signal a reaped process group: its ID may already belong to someone else.
+		clearTimeout(forceKill);
+		clearTimeout(timeout);
+		drainTimer = setTimeout(drain.resolve, OUTPUT_DRAIN_MS);
+		return code;
+	});
 	const [stdout, stderr, exitCode] = await Promise.all([
-		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes),
-		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes),
-		proc.exited,
+		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+		exited,
 	]);
 	clearTimeout(timeout);
-	if (forceKill) clearTimeout(forceKill);
+	clearTimeout(forceKill);
+	clearTimeout(drainTimer);
+	drain.resolve();
 	signal?.removeEventListener("abort", onAbort);
 	return {
 		argv,
