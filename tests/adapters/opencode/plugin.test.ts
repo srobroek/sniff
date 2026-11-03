@@ -180,6 +180,7 @@ describe("approval policy", () => {
     expect(anchorTarget({ kind: "history", rootOrRepository: "missing-here", window: { kind: "last-commits", count: 1 } }, base)).toMatchObject({ rootOrRepository: join(base, "missing-here") });
     expect(anchorTarget({ kind: "repository", repository: "https://github.com/srobroek/sniff.git" }, base)).toEqual({ kind: "repository", repository: "https://github.com/srobroek/sniff.git" });
     expect(anchorTarget({ kind: "repository", repository: "git@github.com:srobroek/sniff.git" }, base)).toEqual({ kind: "repository", repository: "git@github.com:srobroek/sniff.git" });
+    expect(anchorTarget({ kind: "repository", repository: "  https://github.com/srobroek/sniff.git" }, base)).toEqual({ kind: "repository", repository: "  https://github.com/srobroek/sniff.git" });
     expect(anchorTarget({ kind: "commit", root: "/abs", commit: "HEAD" }, base)).toEqual({ kind: "commit", root: "/abs", commit: "HEAD" });
   });
 });

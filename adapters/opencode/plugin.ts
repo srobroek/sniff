@@ -54,7 +54,7 @@ export function anchorPath(path: string, base: string): string {
 const REMOTE_LOCATOR = /^(?:git@[^:/\s]+:|[A-Za-z][A-Za-z0-9+.-]*:\/\/)/;
 
 function anchorLocator(value: string, base: string): string {
-  return REMOTE_LOCATOR.test(value) ? value : anchorPath(value, base);
+  return REMOTE_LOCATOR.test(value.trim()) ? value : anchorPath(value, base);
 }
 
 /**
