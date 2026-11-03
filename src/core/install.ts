@@ -19,6 +19,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
 import { type AnalyzerCapture, type AnalyzerObservation, type AnalyzerParseResult, mergeAnalyzerResults, parseAnalyzerOutput } from "./analyzer-output.ts";
+import { recipeTargetSeparator } from "./analyzer-recipes.ts";
 import {
   BUNDLES,
   type BundleName,
@@ -1076,7 +1077,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
   const history = authorization.recipe.tool === "gitleaks"
     ? gitleaksHistoryBound(authorization.recipe.args, authorization.target.history?.capturedWindow ?? authorization.target.history?.window)
     : undefined;
-  const separator = "targetSeparator" in authorization.recipe ? [...(authorization.recipe.targetSeparator ?? [])] : ["--"];
+  const separator = recipeTargetSeparator(authorization.recipe);
   const batchSize = Math.max(1, authorization.maxFiles ?? DEFAULT_ANALYZER_SHARD_SIZE);
   const argvBatches: string[][] = authorization.recipe.scope === "scoped-files" && authorization.operands.length > batchSize
     ? Array.from({ length: Math.ceil(authorization.operands.length / batchSize) }, (_, index): string[] => [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.recipe.args, ...separator, ...authorization.operands.slice(index * batchSize, (index + 1) * batchSize)])

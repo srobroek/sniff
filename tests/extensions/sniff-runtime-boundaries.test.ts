@@ -472,6 +472,15 @@ describe("adaptive runtime boundaries", () => {
     expect(operand).toBeGreaterThan(separator);
     cancelRunLease(scoped.lease.capability, scoped.lease.manifestId);
   });
+  test("keeps the operand separator in every shard of a sharded scoped-files run", async () => {
+    const sharded = localLease({ files: ["-a.py", "b.py"], budget: { maxFiles: 1 } });
+    const calls: AnalyzerCall[] = [];
+    const result = await runSniffAnalyzer({ capability: sharded.lease.capability, manifestId: sharded.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(calls) });
+    expect(result.outcome).not.toBe("not-run");
+    const shards = calls.filter((call) => call.argv.includes("--csv"));
+    expect(shards.map((call) => call.argv.slice(-2))).toEqual([["--", "-a.py"], ["--", "b.py"]]);
+    await cancelRunLease(sharded.lease.capability, sharded.lease.manifestId);
+  });
   test("authorizes gitleaks for local whole-repo targets only", async () => {
     const wholeRepo = localLease({ kind: "whole-repo" });
     expect(wholeRepo.manifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("selected");

@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
+import { recipeTargetSeparator, SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
@@ -181,7 +181,7 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
     reservationId,
     target,
     recipe,
-    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...(recipe.targetSeparator ?? ["--"]), ...operands] : [])],
+    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...recipeTargetSeparator(recipe), ...operands] : [])],
     operands,
     ...(record.manifest.budget.maxFiles !== undefined ? { maxFiles: record.manifest.budget.maxFiles } : {}),
     acceptedExitCodes: recipe.acceptedExitCodes,
