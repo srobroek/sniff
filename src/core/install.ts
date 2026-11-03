@@ -1072,6 +1072,18 @@ function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | u
   return logOpts ? { args: [...args, "--log-opts", logOpts], bounded: true } : { args: [...args], bounded: false };
 }
 
+/** Maximum UTF-8 bytes of analyzer stderr quoted in a failed run's report. */
+export const ANALYZER_STDERR_TAIL_BYTES = 2_048;
+
+function boundedStderrTail(stderr: string): string {
+	const trimmed = stderr.trim();
+	const bytes = Buffer.from(trimmed, "utf8");
+	if (bytes.byteLength <= ANALYZER_STDERR_TAIL_BYTES) return trimmed;
+	let start = bytes.byteLength - ANALYZER_STDERR_TAIL_BYTES;
+	while (start < bytes.byteLength && ((bytes[start] ?? 0) & 0xc0) === 0x80) start += 1;
+	return `…${bytes.subarray(start).toString("utf8")}`;
+}
+
 export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<SniffAnalyzerRunResult> {
 	let authorization: AnalyzerRunAuthorization;
 	try {
@@ -1098,18 +1110,27 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		abandon();
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
-	const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
-	const toolkitScoped = usesToolkitEnvironment(catalog.rec);
-	const toolkit = toolkitScoped
-		? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
-		: { env: baseEnvironment, source: "process" as const };
-	if (toolkit.error) {
+	let env: ProcessEnvironment;
+	let preflight: SniffToolResult;
+	try {
+		const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
+		const toolkitScoped = usesToolkitEnvironment(catalog.rec);
+		const toolkit = toolkitScoped
+			? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
+			: { env: baseEnvironment, source: "process" as const };
+		if (toolkit.error) {
+			abandon();
+			const unavailable = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
+			return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${unavailable.status}; ${unavailable.remediation}`, preflight: unavailable, acceptedExitCodes, outcome: "not-run" };
+		}
+		env = environmentForTool(catalog.bundle, catalog.rec, toolkit, baseEnvironment, runtime);
+		preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
+	} catch (error) {
+		// Nothing was spawned yet: a throwing preflight must not strand the one-shot reservation.
 		abandon();
-		const preflight = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
-		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, report: `sniff analyzer preflight failed for ${authorization.recipe.tool}: ${message}`, preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
-	const env = environmentForTool(catalog.bundle, catalog.rec, toolkit, baseEnvironment, runtime);
-	const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
@@ -1181,27 +1202,34 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
     && (batches.length === argvBatches.length || rejected !== undefined);
   const incomplete = parsed?.capture.incomplete ?? false;
   const accepted = completed && !incomplete && rejected === undefined;
+  // A rejected exit outranks parse completeness: a crashed analyzer rarely leaves parseable output.
   const outcome: SniffAnalyzerOutcome = !completed
     ? "not-run"
-    : incomplete
-      ? "incomplete-output"
-      : accepted
-        ? exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
-        : "rejected-exit";
+    : rejected
+      ? "rejected-exit"
+      : incomplete
+        ? "incomplete-output"
+        : exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings";
   const artifacts = accepted && parsed ? createAnalyzerArtifacts(authorization.recipe.id, parsed.observations) : undefined;
   const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
   const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
   const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
   const historyNote = history && !history.bounded ? " (unbounded history scan)" : "";
+  const timeoutReason = authorization.remainingBudgetMs < ANALYZER_TIMEOUT_MS
+    ? `analyzer exhausted the run's remaining ${Math.max(1, Math.round(authorization.remainingBudgetMs / 1_000))}s budget (manifest maxMinutes or lease lifetime)`
+    : `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock`;
+  const deciding = rejected ?? batches.at(-1);
+  const stderrTail = accepted || !deciding ? "" : boundedStderrTail(deciding.result.stderr);
+  const diagnostics = stderrTail ? `; stderr tail: ${stderrTail}` : "";
   return {
     ok: accepted,
     report: !completed
-      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? runError ?? (timedOut ? `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock` : "no exit status")}`
-      : incomplete
-        ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
-        : accepted
-          ? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${exitCode})${historyNote}`
-          : `sniff analyzer rejected ${opts.analyzer}: exit ${exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
+      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? runError ?? (timedOut ? timeoutReason : "no exit status")}${diagnostics}`
+      : rejected
+        ? `sniff analyzer rejected ${opts.analyzer}: exit ${exitCode} is outside [${acceptedExitCodes.join(", ")}]${diagnostics}`
+        : incomplete
+          ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}${diagnostics}`
+          : `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${exitCode})${historyNote}`,
     preflight,
     acceptedExitCodes,
     outcome,
