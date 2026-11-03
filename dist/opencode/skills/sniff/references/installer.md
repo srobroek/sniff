@@ -1,0 +1,89 @@
+# Installer flow
+
+If Sniff cannot find a tool, it records a coverage gap. The run can continue.
+
+Sniff never invokes `sudo`. It keeps trust checks active.
+
+The `sniff_install_tools` tool manages the analyzer catalog. The steps below
+govern how an agent uses it.
+
+## First run
+
+1. Run `sniff_install_tools` in `probe` mode. The result lists each tool and its
+   installation state.
+2. Present every viable tool for the detected stack in two groups. Recipe tools
+   (`lizard`, `opengrep`, `gitleaks`) produce Sniff coverage. Every other
+   catalog tool serves operator follow-ups only: installing it does not add
+   Sniff coverage. Keep each recommended tool selected unless the user removes
+   it.
+3. Explain overlaps with facts from `references/tooling.md`. Do not replace the
+   full selection with lean, full, or custom depth tiers.
+4. After the user approves the selection, install each selected tool. Pass
+   `bundles` or `all` to `install` mode. The host confirms the exact plan
+   before installing; headless sessions cannot install.
+5. When the user asks to inspect commands, pass `dryRun`. A dry run does not
+   change tool state.
+6. Invoke each recipe through `sniff_run_analyzer`. Installation does not
+   authorize analyzer execution.
+
+### Selection format
+
+```text
+Detected stack: Go, TypeScript, Dockerfile, GitHub Actions
+Sniff recipes: lizard [ready], gitleaks [ready], opengrep [missing, selected]
+Operator follow-ups (no Sniff coverage): golangci-lint [ready], hadolint [missing, selected], actionlint [missing, selected]
+Optional follow-up: jscpd
+Reason: jscpd adds cross-language duplicate detection that no Sniff recipe covers.
+```
+
+Sniff verifies each command through its catalog route. After the bundle
+configuration exists, managed toolkit entries use the bundle's mise environment.
+Before Sniff runs an analyzer, it verifies that the command can run. An unusable
+command blocks only that analyzer. The result records diagnostic details and a
+repair instruction.
+
+## Bundles
+
+Bundles group catalog entries by target family. They do not define analyzer
+manifests or authorize execution. Run `sniff_install_tools` in `list` mode to
+read the catalog membership.
+
+## Managed toolkits
+
+Mise manages these catalog routes:
+
+- `brew`
+- `pipx`
+- `npm`
+- `cargo`
+- `go`
+
+If installation is not a dry run and the bundle contains managed entries, Sniff
+resolves the mise executable. After resolution, Sniff writes the bundle's
+`mise.toml`. Set `SNIFF_TOOLKIT_CACHE_DIR` to change the cache location. Before
+the configuration exists, mise-managed command checks use the process environment,
+and afterward they use the bundle environment. If mise cannot load an existing
+configuration, Sniff returns `unavailable-route`. Resolved tool directories
+precede shim directories in `PATH` to stop stale shims from winning command
+lookup.
+
+OpenGrep uses its verified download route. Rustup components store Cargo and
+Rustup state in the bundle toolkit. Sniff installs stable as the toolkit default
+and nightly for `cargo-udeps`. When Sniff installs a Rustup component, Rustup
+reads the target repository's `rust-toolchain.toml`.
+
+## Project-local tools
+
+The target repository owns JavaScript analyzers in `devDependencies`. The
+installer neither installs them globally nor runs them: a probe that finds a
+`node_modules/.bin` launcher reports it as `policy-blocked` inventory, because
+Sniff never runs executables inside the target. No Sniff recipe covers these
+tools; record them as `gap` coverage entries with the command for the operator
+to run.
+
+## Rust tools
+
+These are operator follow-ups; no Sniff recipe runs them. Offer Clippy for
+standard Rust checks and `cargo-machete` as an extra tool. When the user
+requests a deep pass, offer `cargo-udeps`. It requires the nightly Rust
+toolchain.

@@ -49,7 +49,7 @@ The interactive host asks questions.
 
 ## Interactive and noninteractive intake
 
-Adapters with elicitation support use it for confirmation.
+Adapters with elicitation support use it for confirmation. OpenCode uses a permission prompt instead, for interactive and noninteractive intake alike, so `interactive: false` never approves a plan on its own.
 
 Authorized noninteractive intake supplies `target` and `intent` through host authorization. The trusted host records the authorization receipt. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking frontier questions.
 

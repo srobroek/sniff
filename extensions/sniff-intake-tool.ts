@@ -1,6 +1,6 @@
 import type { TSchema } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { CanonicalConfirmationRequest } from "../src/core/intake.ts";
+import { intakeConfirmationText as confirmationMessage } from "../src/core/confirmation-text.ts";
 import type { SniffIntakeRuntime } from "../src/core/intake-use-case.ts";
 import {
 	intakeInput,
@@ -10,35 +10,6 @@ import {
 } from "../src/core/intake-use-case.ts";
 import { cancelRunLease } from "../src/core/run-registry.ts";
 import { sniffIntakeApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
-
-function confirmationMessage(request: CanonicalConfirmationRequest): string {
-	const target = request.target;
-	const immutableTarget = [
-		`kind=${target.kind}`,
-		`label=${target.label}`,
-		`root=${target.root}`,
-		...(target.repository ? [`repository=${target.repository}`] : []),
-		...(target.immutableRef ? [`immutableRef=${target.immutableRef}`] : []),
-		...(target.baseRef ? [`baseRef=${target.baseRef}`] : []),
-		...(target.headRef ? [`headRef=${target.headRef}`] : []),
-	].join(", ");
-	const files = request.files.map((file) => `  - ${file}`).join("\n");
-	const analyzers = request.analyzers.map((analyzer) => JSON.stringify(analyzer)).join("; ");
-	return [
-		`Immutable target/ref: ${immutableTarget}`,
-		`Files (${request.files.length}):`,
-		files || "  - <none>",
-		`Intent: ${request.intent}`,
-		`Scope mode: ${request.scopeMode}`,
-		`Objectives: ${JSON.stringify(request.objectives)}`,
-		`Exclusions: ${JSON.stringify(request.exclusions)}`,
-		`Analyzers/dispositions: ${analyzers || "<none>"}`,
-		`Budgets: ${JSON.stringify(request.budget)}`,
-		`Trust: ${request.trust}`,
-		`Materialization: ${request.materialization}`,
-		`Plan digest: ${request.digest}`,
-	].join("\n");
-}
 
 function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): SniffIntakeRuntime {
 	return {

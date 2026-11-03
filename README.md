@@ -14,7 +14,7 @@ Sniff uses a portable core. The core handles these concerns:
 
 The source skill generates native skill trees. It lives in `.skill-source/sniff/`.
 
-Claude Code and Codex load the bundled MCP server through plugin manifests.
+Claude Code and Codex load the bundled MCP server through plugin manifests. OMP and OpenCode load native plugins that host the core in-process.
 
 All adapters expose exactly seven tools:
 
@@ -67,6 +67,14 @@ codex plugin marketplace add https://github.com/srobroek/sniff.git
 codex plugin add sniff@sniff
 ```
 
+### OpenCode
+
+```sh
+opencode plugin add 'github:srobroek/sniff#main::path:dist/opencode'
+```
+
+OpenCode loads Sniff as a native V2 plugin with the seven tools, the skill, and the `bloodhound` and `refactor-challenger` subagents. It needs no MCP server. Approvals appear as OpenCode permission prompts. See [OpenCode](docs/opencode.md) for configuration, approvals, and local development.
+
 
 ## Use Sniff
 
@@ -108,12 +116,14 @@ See [Targets and providers](docs/targets-and-providers.md) for provider behavior
 
 ## Development
 
+Install the Bun version pinned in `.tool-versions` (`mise install` does this), then run:
+
 ```sh
 bun install
 bun run check
 ```
 
-The check validates generated harness skills. It validates MCP bundles. It runs TypeScript, Biome, and Bun tests.
+The check validates generated harness skills. It validates the MCP, OMP, and OpenCode bundles. It runs TypeScript, Biome, and Bun tests. Bundles are compared byte for byte, so `bun run bundles` refuses to run under a different Bun version.
 
 ## License
 

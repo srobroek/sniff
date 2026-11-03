@@ -15,6 +15,10 @@ const OMP_BUNDLE = {
 	entrypoint: join("extensions", "sniff-plugin.ts"),
 	output: join("dist", "omp", "sniff-plugin.js"),
 } as const;
+const OPENCODE_BUNDLE = {
+	entrypoint: join("adapters", "opencode", "index.ts"),
+	output: join("dist", "opencode", "index.js"),
+} as const;
 const OPENGREP_RULE_NAME = "sniff-opengrep-hardcoded-values.yml";
 const OPENGREP_RULE_SOURCE = join(
 	".skill-source",
@@ -28,6 +32,7 @@ const OPENGREP_RULE_OUTPUTS = [
   join("dist", "omp", OPENGREP_RULE_NAME),
   join("dist", "claude", OPENGREP_RULE_NAME),
   join("dist", "codex", OPENGREP_RULE_NAME),
+  join("dist", "opencode", OPENGREP_RULE_NAME),
 ] as const;
 
 const BUILTIN_MODULES: Record<string, true> = {
@@ -109,6 +114,18 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 	return true;
 }
 
+/**
+ * Minified bundle bytes differ between Bun releases, so the committed bundles are only
+ * reproducible with the Bun that `.tool-versions` pins for local mise and for CI.
+ */
+export function assertPinnedBun(repoRoot: string, actual: string = Bun.version): void {
+	const pinned = /^bun\s+(\S+)\s*$/m.exec(readFileSync(join(repoRoot, ".tool-versions"), "utf8"))?.[1];
+	if (!pinned) throw new Error(".tool-versions does not pin bun");
+	if (actual !== pinned) {
+		throw new Error(`Harness bundles must be built with the pinned Bun ${pinned}, not ${actual}; run \`mise install\` in the repository or \`mise exec bun@${pinned} -- bun run bundles\`.`);
+	}
+}
+
 function assertPortableBundle(bundle: Uint8Array, repoRoot: string): void {
 	const text = new TextDecoder().decode(bundle);
 	if (text.includes("sourceMappingURL") || text.includes("sourcesContent")) {
@@ -158,11 +175,14 @@ export async function buildHarnessBundles(
 	options: BuildOptions = {},
 ): Promise<BuildResult> {
 	const repoRoot = resolve(options.repoRoot ?? join(import.meta.dir, ".."));
+	assertPinnedBun(repoRoot);
 	const mcpBundle = await buildBundle(repoRoot, MCP_ENTRYPOINT);
 	const ompBundle = await buildBundle(repoRoot, OMP_BUNDLE.entrypoint);
+	const openCodeBundle = await buildBundle(repoRoot, OPENCODE_BUNDLE.entrypoint);
 	const bundles: BundleOutput[] = [
 		{ bundle: mcpBundle, paths: MCP_OUTPUTS.map((path) => join(repoRoot, path)) },
 		{ bundle: ompBundle, paths: [join(repoRoot, OMP_BUNDLE.output)] },
+		{ bundle: openCodeBundle, paths: [join(repoRoot, OPENCODE_BUNDLE.output)] },
 		{
 			bundle: new Uint8Array(readFileSync(join(repoRoot, OPENGREP_RULE_SOURCE))),
 			paths: OPENGREP_RULE_OUTPUTS.map((path) => join(repoRoot, path)),

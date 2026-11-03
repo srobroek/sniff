@@ -1,0 +1,16 @@
+{
+  "name": "@srobroek/opencode-sniff",
+  "version": "0.3.2",
+  "description": "Sniff code-smell audits for OpenCode: seven tools, the sniff skill, and the bloodhound and refactor-challenger subagents.",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "sniff-opengrep-hardcoded-values.yml",
+    "skills"
+  ]
+}

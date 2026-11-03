@@ -1,9 +1,10 @@
 # Cross-harness capabilities
 
-Sniff ships one portable core with three adapters.
+Sniff ships one portable core with four adapters.
 
-- The native adapter loads extension entrypoints.
+- The OMP adapter loads extension entrypoints.
 - The Claude Code and Codex adapters load the bundled MCP server from their plugin manifests.
+- The OpenCode adapter is a native V2 plugin that registers the tools, the skill, and the two subagents. See [OpenCode](opencode.md).
 
 Every adapter exposes exactly seven tools:
 
@@ -37,6 +38,8 @@ Target cleanliness | VERIFIED | VERIFIED | VERIFIED
 
 The native adapter uses extension tools. Claude Code and Codex use MCP transport. Adapter-specific transport does not change the portable contract.
 
+OpenCode is not in the matrix yet. On 2026-11-03, OpenCode 2.2.5 loaded the plugin from `dist/opencode` and registered the `sniff` skill and both subagents. A live session listed analyzers, approved and leased an intake, and cancelled it. `adapters/opencode/plugin.test.ts` and `scripts/packaging-shape.test.ts` cover the full lifecycle against a fixture analyzer.
+
 ## Evidence in the current tree
 
 The portable core lives in `src/core/`.
@@ -65,6 +68,9 @@ Plugin manifests live in these files:
 - `.claude-plugin/marketplace.json` (Claude Code catalog; loads the Claude skill tree in `.claude/skills/`)
 - `.agents/plugins/marketplace.json`
 - `dist/codex/plugin.json`
+- `dist/opencode/package.json`
+
+The OpenCode adapter lives in `adapters/opencode/` and builds to `dist/opencode/index.js`.
 
 Generated skill evidence uses these paths:
 
@@ -74,6 +80,7 @@ Generated skill evidence uses these paths:
 - `.claude/skills/sniff/`
 - `.agents/skills/sniff/`
 - `dist/codex/skills/sniff/`
+- `dist/opencode/skills/sniff/`
 
 Run the focused protocol suite with this command:
 
