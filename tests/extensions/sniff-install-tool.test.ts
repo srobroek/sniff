@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test, vi } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -15,7 +16,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import sniffInstallTool from "../../extensions/sniff-install-tool.ts";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../../src/core/analyzer-artifact-registry.ts";
-import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
+import { ANALYZER_MAX_OBSERVATIONS, mergeAnalyzerResults, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
 import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
@@ -251,7 +252,46 @@ describe("bounded analyzer output projections", () => {
 		const bounded = parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...rows].join("\n"), root);
 		expect(bounded.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
 		expect(bounded.capture.incomplete).toBe(true);
-		expect(bounded.capture.reason).toContain("2,000");
+		expect(bounded.capture.reason).toContain(ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US"));
+	});
+
+	test("bounds a sharded run by the same observation cap as a single run", () => {
+		const root = tempDir("sniff-analyzer-merge-");
+		const shard = (offset: number, count: number) => parseOpenGrepOutput(JSON.stringify({ results: Array.from({ length: count }, (_, index) => ({ check_id: "r", path: `src/${offset + index}`, start: { line: 1, col: 1 }, extra: { message: "m", severity: "I" } })) }), root);
+		const half = Math.ceil(2_501 / 2);
+		const merged = mergeAnalyzerResults([shard(0, half), shard(half, 2_501 - half)]);
+		const single = shard(0, 2_501);
+		expect(single.capture.incomplete).toBe(false);
+		expect(merged.observations).toHaveLength(single.observations.length);
+		expect(merged.capture.incomplete).toBe(false);
+		const full = { observations: Array.from({ length: ANALYZER_MAX_OBSERVATIONS }, (_, index) => ({ ruleId: "r", path: `src/${index}`, start: { line: 1, column: 1 }, message: "m", severity: "I" })), capture: { bytes: 0, truncated: false, digest: "", incomplete: false } };
+		const overflow = mergeAnalyzerResults([full, { ...full, observations: full.observations.slice(0, 1) }]);
+		expect(overflow.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
+		expect(overflow.capture.incomplete).toBe(true);
+	});
+
+	test("resolves each distinct finding path once per parse", () => {
+		const root = realpathSync(tempDir("sniff-analyzer-realpath-"));
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src", "main.ts"), "export {};\n");
+		const count = 500;
+		const parsers: Array<[string, () => { observations: readonly unknown[] }]> = [
+			["lizard", () => parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...Array.from({ length: count }, (_, index) => `1,11,1,0,1,${index + 1}-${index + 1},src/main.ts,fn${index},fn${index}`)].join("\n"), root)],
+			["gitleaks", () => parseGitleaksOutput(JSON.stringify(Array.from({ length: count }, (_, index) => ({ RuleID: "r", File: "src/main.ts", StartLine: index + 1 }))), root)],
+			["sarif", () => parseSarifOutput(JSON.stringify({ runs: [{ results: Array.from({ length: count }, (_, index) => ({ ruleId: "r", message: { text: "m" }, locations: [{ physicalLocation: { artifactLocation: { uri: "src/main.ts" }, region: { startLine: index + 1 } } }] })) }] }), root)],
+			["opengrep", () => parseOpenGrepOutput(JSON.stringify({ results: Array.from({ length: count }, (_, index) => ({ check_id: "r", path: "src/main.ts", start: { line: index + 1, col: 1 }, extra: { message: "m", severity: "I" } })) }), root)],
+		];
+		for (const [name, parse] of parsers) {
+			const realpath = vi.spyOn(fs, "realpathSync");
+			try {
+				const parsed = parse();
+				expect({ name, observations: parsed.observations.length }).toEqual({ name, observations: count });
+				// One call canonicalizes the root and one the single distinct path, however many observations share it.
+				expect({ name, boundedCalls: realpath.mock.calls.length <= 2 }).toEqual({ name, boundedCalls: true });
+			} finally {
+				realpath.mockRestore();
+			}
+		}
 	});
 });
 

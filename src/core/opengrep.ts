@@ -2,12 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { arch, homedir, platform } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { ANALYZER_MAX_OBSERVATIONS } from "./analyzer-limits.ts";
 
 export const OPENGREP_VERSION = "v1.30.0";
 export const OPENGREP_DOWNLOAD_TIMEOUT_MS = 120_000;
 export const OPENGREP_MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 export const OPENGREP_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
-export const OPENGREP_MAX_OBSERVATIONS = 50_000;
 const OPENGREP_MAX_FIELD_BYTES = 8_192;
 
 export type OpenGrepAsset = { readonly key: string; readonly name: string; readonly sha256: string };
@@ -125,9 +125,20 @@ export type OpenGrepCapture = { readonly bytes: number; readonly truncated: bool
 export type OpenGrepParseResult = { readonly observations: readonly OpenGrepObservation[]; readonly capture: OpenGrepCapture };
 
 
-function normalizeFindingPath(targetRoot: string, value: string): string | null {
-	if (value.includes("\0")) return null;
+/** Normalises each distinct finding path once per parse; repeated paths reuse the first verdict. */
+function findingPathNormalizer(targetRoot: string): (value: string) => string | null {
 	const root = resolve(targetRoot);
+	const memo = new Map<string, string | null>();
+	return (value) => {
+		if (memo.has(value)) return memo.get(value) ?? null;
+		const normalized = normalizeFindingPath(root, value);
+		memo.set(value, normalized);
+		return normalized;
+	};
+}
+
+function normalizeFindingPath(root: string, value: string): string | null {
+	if (value.includes("\0")) return null;
 	const candidate = value.replaceAll("\\", "/");
 	const absolute = isAbsolute(candidate) ? resolve(candidate) : resolve(root, candidate);
 	const path = relative(root, absolute);
@@ -176,11 +187,12 @@ export function parseOpenGrepOutput(stdout: string, targetRoot: string, truncate
 	try {
 		const payload = JSON.parse(stdout) as { results?: unknown };
 		if (!Array.isArray(payload.results)) throw new Error("OpenGrep JSON has no results array");
-		if (payload.results.length > OPENGREP_MAX_OBSERVATIONS) {
-			return { observations: [], capture: { bytes, truncated: false, digest, incomplete: true, reason: `OpenGrep observations exceeded the bounded limit of ${OPENGREP_MAX_OBSERVATIONS.toLocaleString("en-US")}` } };
+		if (payload.results.length > ANALYZER_MAX_OBSERVATIONS) {
+			return { observations: [], capture: { bytes, truncated: false, digest, incomplete: true, reason: `OpenGrep observations exceeded the bounded limit of ${ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US")}` } };
 		}
 		const observations: OpenGrepObservation[] = [];
 		const reasons: string[] = [];
+		const normalize = findingPathNormalizer(targetRoot);
 		for (const candidate of payload.results) {
 			if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
 				addParseReason(reasons, "OpenGrep result entry was malformed");
@@ -194,8 +206,8 @@ export function parseOpenGrepOutput(stdout: string, targetRoot: string, truncate
 			const message = projectedString(result.extra?.message, "message", reasons);
 			const severity = projectedString(result.extra?.severity, "severity", reasons);
 			if (ruleId === null || pathValue === null || line === null || column === null || message === null || severity === null) continue;
-			if (observations.length >= OPENGREP_MAX_OBSERVATIONS) break;
-			const path = normalizeFindingPath(targetRoot, pathValue);
+			if (observations.length >= ANALYZER_MAX_OBSERVATIONS) break;
+			const path = normalize(pathValue);
 			if (!ruleId || !path) {
 				addParseReason(reasons, !path ? "OpenGrep finding path escaped the authorized target root" : "OpenGrep finding had an empty rule ID");
 				continue;
