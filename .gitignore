@@ -16,5 +16,12 @@ dist/codex/*
 dist/omp/*
 !dist/omp/sniff-plugin.js
 !dist/omp/sniff-opengrep-hardcoded-values.yml
+!dist/opencode/
+dist/opencode/*
+!dist/opencode/package.json
+!dist/opencode/index.js
+!dist/opencode/sniff-opengrep-hardcoded-values.yml
+!dist/opencode/skills/
+!dist/opencode/skills/**
 *.log
 .DS_Store

@@ -62,7 +62,7 @@ function removeFixture(fixture: string): void {
 test("repository outputs pass check mode without writing", () => {
 	const result = generateHarnessSkills({ repoRoot, check: true });
 	expect(result.changed).toBe(false);
-	expect(result.targets).toHaveLength(4);
+	expect(result.targets).toHaveLength(5);
 });
 
 test("write mode writes only temporary output trees", () => {
@@ -70,7 +70,7 @@ test("write mode writes only temporary output trees", () => {
 	try {
 		const result = generateHarnessSkills({ repoRoot: fixture });
 		expect(result.files).toBeGreaterThan(1);
-		expect(result.targets).toHaveLength(4);
+		expect(result.targets).toHaveLength(5);
 		expect(generateHarnessSkills({ repoRoot: fixture, check: true }).changed).toBe(
 			false,
 		);
@@ -132,6 +132,19 @@ test("generated Codex trees are OMP-free and byte-identical", () => {
 test("generated OMP output preserves its native skill references", () => {
 	const skill = readFileSync(join(ompRoot, "SKILL.md"), "utf8");
 	expect(skill).toContain("skill://sniff/references/approval-gates.md");
+});
+
+test("generated OpenCode tree keeps its subagents and names the OpenCode mechanics", () => {
+	const openCodeRoot = join(repoRoot, "dist", "opencode", "skills", "sniff");
+	expect(filesUnder(openCodeRoot)).toEqual(filesUnder(ompRoot));
+	const skill = readFileSync(join(openCodeRoot, "SKILL.md"), "utf8");
+	expect(skill).not.toMatch(/skill:\/\//);
+	expect(skill).toContain("Launch each `bloodhound` with the `subagent` tool.");
+	expect(skill).toContain("launch it with the `subagent` tool");
+	expect(skill).toContain("absolute path of the matching `references/languages/<lang>.md`");
+	expect(skill).toContain("with the `question` tool");
+	expect(skill).toContain("OpenCode shows as a permission prompt");
+	expect(skill).toContain("- MUST resolve shipped assets through this skill's `references/` directory.");
 });
 
 test("check mode rejects stale temporary output without rewriting it", () => {

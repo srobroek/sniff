@@ -24,24 +24,35 @@ type GenerateResult = {
 	changed: boolean;
 };
 
+type Rewrite = "none" | "portable" | "opencode";
+
 type Target = {
 	directory: string;
-	rewrite: boolean;
+	rewrite: Rewrite;
 };
 
 const SOURCE_DIRECTORY = join(".skill-source", "sniff");
 const TARGETS: Target[] = [
-	{ directory: join("skills", "sniff"), rewrite: false },
-	{ directory: join(".claude", "skills", "sniff"), rewrite: true },
-	{ directory: join(".agents", "skills", "sniff"), rewrite: true },
-	{ directory: join("dist", "codex", "skills", "sniff"), rewrite: true },
+	{ directory: join("skills", "sniff"), rewrite: "none" },
+	{ directory: join(".claude", "skills", "sniff"), rewrite: "portable" },
+	{ directory: join(".agents", "skills", "sniff"), rewrite: "portable" },
+	{ directory: join("dist", "codex", "skills", "sniff"), rewrite: "portable" },
+	{ directory: join("dist", "opencode", "skills", "sniff"), rewrite: "opencode" },
 ];
 const MARKDOWN_EXTENSIONS: Record<string, true> = { ".md": true, ".mdx": true };
 
-function rewriteSkillText(contents: string): string {
+function rewriteSkillUris(contents: string): string {
 	return contents
 		.replaceAll(/skill:\/\/sniff\//g, "./")
 		.replaceAll(/skill:\/\/sniff/g, ".")
+		.replaceAll(
+			"- MUST resolve shipped assets through `./`.",
+			"- MUST resolve shipped assets through this skill's `references/` directory.",
+		);
+}
+
+function rewritePortableSkillText(contents: string): string {
+	return rewriteSkillUris(contents)
 		.replaceAll(/bloodhound/gi, "independent scout")
 		.replaceAll(/refactor-challenger/gi, "independent challenge reviewer")
 		.replaceAll(/a `independent scout`/g, "an independent scout")
@@ -56,16 +67,40 @@ function rewriteSkillText(contents: string): string {
 		.replaceAll(
 			"Build the `independent challenge reviewer` brief from `./references/adversarial-brief.md`.",
 			"Run an independent read-only challenge pass using `./references/adversarial-brief.md`.",
+		);
+}
+
+// OpenCode registers `bloodhound` and `refactor-challenger` as subagents, so the names stay.
+// A subagent starts in a fresh context, so it gets absolute paths rather than skill-relative ones.
+function rewriteOpenCodeSkillText(contents: string): string {
+	return rewriteSkillUris(contents)
+		.replaceAll(
+			"and include the matching `./references/languages/<lang>.md` path.",
+			"and include the absolute path of the matching `references/languages/<lang>.md` under this skill's base directory. Launch each `bloodhound` with the `subagent` tool.",
 		)
 		.replaceAll(
-			"- MUST resolve shipped assets through `./`.",
-			"- MUST resolve shipped assets through this skill's `references/` directory.",
+			"Build the `refactor-challenger` brief from `./references/adversarial-brief.md` and drop or downgrade refuted findings.",
+			"Build the `refactor-challenger` brief from `./references/adversarial-brief.md`, launch it with the `subagent` tool, and drop or downgrade refuted findings.",
 		)
+		.replaceAll(
+			"   - Ask only the highest-impact unresolved question.",
+			"   - Ask only the highest-impact unresolved question, with the `question` tool.",
+		)
+		.replaceAll(
+			"   - Probing is safe. Installing needs host confirmation.",
+			"   - Probing is safe. Installing needs host confirmation, which OpenCode shows as a permission prompt.",
+		);
 }
+
+const REWRITES: Record<Rewrite, (contents: string) => string> = {
+	none: (contents) => contents,
+	portable: rewritePortableSkillText,
+	opencode: rewriteOpenCodeSkillText,
+};
 
 function collectFiles(
 	sourceRoot: string,
-	rewrite: boolean,
+	rewrite: Rewrite,
 	currentDirectory = sourceRoot,
 ): GeneratedFile[] {
 	const entries = readdirSync(currentDirectory, { withFileTypes: true }).sort(
@@ -91,8 +126,8 @@ function collectFiles(
 		const sourceBytes = readFileSync(absolutePath);
 		const extension = absolutePath.slice(absolutePath.lastIndexOf("."));
 		const contents =
-			rewrite && MARKDOWN_EXTENSIONS[extension] === true
-				? Buffer.from(rewriteSkillText(sourceBytes.toString("utf8")), "utf8")
+			rewrite !== "none" && MARKDOWN_EXTENSIONS[extension] === true
+				? Buffer.from(REWRITES[rewrite](sourceBytes.toString("utf8")), "utf8")
 				: sourceBytes;
 		files.push({ relativePath, contents });
 	}

@@ -35,7 +35,12 @@ const opengrepRuleOutputPaths = [
 	join(repoRoot, "dist", "omp", OPENGREP_RULE_NAME),
 	join(repoRoot, "dist", "claude", OPENGREP_RULE_NAME),
 	join(repoRoot, "dist", "codex", OPENGREP_RULE_NAME),
+	join(repoRoot, "dist", "opencode", OPENGREP_RULE_NAME),
 ] as const;
+const openCodeRoot = join(repoRoot, "dist", "opencode");
+const openCodePackage = JSON.parse(
+	readFileSync(join(openCodeRoot, "package.json"), "utf8"),
+) as JsonObject;
 const packageJson = JSON.parse(
 	readFileSync(join(repoRoot, "package.json"), "utf8"),
 ) as JsonObject;
@@ -522,6 +527,50 @@ test("All published version declarations match package.json", () => {
 	expect(claudeEntry.version).toBe(packageJson.version);
 	expect(codexEntry.version).toBe(packageJson.version);
 	expect(codexManifest.version).toBe(packageJson.version);
+	expect(openCodePackage.version).toBe(packageJson.version);
+});
+
+test("OpenCode package exposes one self-contained V2 server entry", () => {
+	expect(openCodePackage.name).toBe("@srobroek/opencode-sniff");
+	expect(openCodePackage.type).toBe("module");
+	expect(openCodePackage.exports).toEqual({ ".": "./index.js" });
+	expect(openCodePackage).not.toHaveProperty("dependencies");
+	expect(openCodePackage).not.toHaveProperty("peerDependencies");
+	expect(openCodePackage).not.toHaveProperty("scripts");
+	const files = openCodePackage.files;
+	if (!Array.isArray(files)) throw new Error("OpenCode package files must be an array");
+	expect([...files].sort()).toEqual(readdirSync(openCodeRoot).filter((name) => name !== "package.json").sort());
+	assertPortableExtensionImports(join(openCodeRoot, "index.js"));
+});
+
+test("Copied OpenCode package loads its bundle, skill, and subagents from the cache", async () => {
+	const { fakeHost, toolContext } = await import("../adapters/opencode/fake-host.ts");
+	const cache = mkdtempSync(join(tmpdir(), "sniff-opencode-cache-"));
+	try {
+		const pluginRoot = join(cache, "node_modules", "@srobroek", "opencode-sniff");
+		mkdirSync(pluginRoot, { recursive: true });
+		cpSync(openCodeRoot, pluginRoot, { recursive: true });
+		expect(existsSync(join(pluginRoot, "node_modules"))).toBe(false);
+		assertOpenGrepResource(pluginRoot, OPENGREP_RULE_NAME);
+
+		const bundlePath = join(pluginRoot, "index.js");
+		const plugin = (await import(pathToFileURL(bundlePath).href)).default as { id: string; setup: (ctx: unknown) => Promise<() => Promise<void>> };
+		expect(plugin.id).toBe("srobroek.sniff");
+		const host = fakeHost(cache);
+		const cleanup = await plugin.setup(host.ctx);
+		expect([...host.tools.keys()].sort()).toEqual([...EXPECTED_TOOLS].sort());
+		const skill = host.skills.get("sniff");
+		expect(skill?.path).toBe(join(pluginRoot, "skills", "sniff", "SKILL.md"));
+		assertContained(pluginRoot, String(skill?.path));
+		expect([...host.agents.keys()].sort()).toEqual(["bloodhound", "refactor-challenger"]);
+
+		const listed = await host.tools.get("sniff_install_tools")?.execute({ mode: "list" }, toolContext());
+		expect(String(listed?.content)).toContain("[core]");
+		await cleanup();
+		expect(host.tools.size).toBe(0);
+	} finally {
+		rmSync(cache, { recursive: true, force: true });
+	}
 });
 
 test("Codex marketplace entries use the current local source policy", () => {

@@ -6,7 +6,7 @@ The canonical seven-tool contract is defined in [Capabilities](capabilities.md).
 
 Install Git.
 
-Install Bun for the bundled MCP server. Claude Code and Codex use Bun to run that server. The 2026-09-11 clean-room probes used Bun `1.4.2`.
+Install Bun for the bundled MCP server. Claude Code and Codex use Bun to run that server. The 2026-09-11 clean-room probes used Bun `1.4.2`. OpenCode and OMP load native plugins and need no separate Bun.
 
 ## Install an adapter
 
@@ -32,6 +32,14 @@ claude plugin install sniff@sniff --scope user --yes
 codex plugin marketplace add https://github.com/srobroek/sniff.git
 codex plugin add sniff@sniff
 ```
+
+### OpenCode
+
+```sh
+opencode plugin add 'github:srobroek/sniff#main::path:dist/opencode'
+```
+
+OpenCode runs the core in its server process, so it does not need a separate Bun install. Read [OpenCode](opencode.md) for approvals, options, and local development.
 
 After installation, start a new session in the repository that you want to inspect.
 

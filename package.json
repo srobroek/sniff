@@ -1,7 +1,7 @@
 {
   "name": "@srobroek/sniff",
   "version": "0.3.2",
-  "description": "Portable code-smell auditing for OMP, Claude Code, and Codex.",
+  "description": "Portable code-smell auditing for OMP, Claude Code, Codex, and OpenCode.",
   "private": true,
   "scripts": {
     "check": "bun run skills:check && bun run bundles:check && bun run typecheck && bun run lint && bun test",
@@ -22,6 +22,7 @@
     "@biomejs/biome": "2.5.13",
     "@oh-my-pi/pi-ai": "18.2.1",
     "@oh-my-pi/pi-coding-agent": "18.2.1",
+    "@opencode/plugin": "2.2.1",
     "@types/bun": "1.4.2",
     "typescript": "7.0.2"
   },
