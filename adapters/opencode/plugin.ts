@@ -7,8 +7,8 @@ import type { ToolContext } from "@opencode/plugin/promise/tool";
 import bloodhoundSource from "../../agents/bloodhound.md" with { type: "text" };
 import refactorChallengerSource from "../../agents/refactor-challenger.md" with { type: "text" };
 import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.ts";
-import { intakeConfirmationText, saveConfirmationText } from "../../src/core/confirmation-text.ts";
-import { resolveSniffToolkitCacheRoot, runSniffAnalyzer, runSniffInstall, type SniffInstallMode, type SniffInstallResult } from "../../src/core/install.ts";
+import { installConfirmationText, intakeConfirmationText, saveConfirmationText } from "../../src/core/confirmation-text.ts";
+import { runSniffAnalyzer, runSniffInstall, type SniffInstallMode, type SniffInstallResult, sniffInstallAuthorizationRequest } from "../../src/core/install.ts";
 import type { CanonicalConfirmationRequest, IntakeAuthorization, IntakeInput } from "../../src/core/intake.ts";
 import { intakeInput, publicSniffIntakeResult, runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
 import { analyzerArtifactPage, analyzerPageLimit, analyzerProjection, MAX_MODEL_CONTENT_BYTES, publicPreflight, reportArtifactPage, reportRenderContent, utf8Prefix } from "../../src/core/model-content.ts";
@@ -36,7 +36,6 @@ const MODEL_ROLE_HEADER = "x-opencode-model-role";
 const APPROVAL_ACTOR = "opencode-permission";
 const APPROVAL_REASON = "Approved through the OpenCode permission prompt.";
 const MAX_PROMPT_FILES = 200;
-const MAX_PROMPT_REPORT_BYTES = 8 * 1024;
 const INSTALL_MODES: ReadonlySet<string> = new Set(["probe", "diagnose", "list", "install"]);
 
 type ToolResult = { readonly content: string; readonly metadata?: Record<string, unknown> };
@@ -181,16 +180,6 @@ function bounded(text: string): string {
   return utf8Prefix(text, MAX_MODEL_CONTENT_BYTES);
 }
 
-function installPlanText(plan: SniffInstallResult, bundles: readonly string[], dryRun: boolean): string {
-  return [
-    `Install bundles: ${bundles.join(", ") || "<none>"}`,
-    `Toolkit cache: ${resolveSniffToolkitCacheRoot()}`,
-    `Dry run: ${dryRun ? "yes" : "no"}`,
-    "",
-    utf8Prefix(plan.report, MAX_PROMPT_REPORT_BYTES),
-  ].join("\n");
-}
-
 function planResource(plan: CanonicalConfirmationRequest): string {
   return `${plan.target.kind}:${plan.target.repository ?? plan.target.root}`;
 }
@@ -300,13 +289,12 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
         let result: SniffInstallResult;
         if (mode === "install") {
           if (params.path !== undefined) throw new Error("sniff_install_tools mode=install does not accept path; installs run from the session directory and a Sniff-owned toolkit");
-          if (params.dryRun !== true) {
-            const plan = await runSniffInstall({ ...common, mode: "diagnose", cwd: base });
-            const bundles = [...new Set(plan.tools.map((tool) => tool.bundle))].sort();
-            await approve(context, signal, CONFIRM_ACTIONS.install, bundles.length > 0 ? bundles : ["*"], installPlanText(plan, bundles, false));
-          }
+          // The core's digest-bound plan, confirmed exactly as the OMP and MCP adapters do, dry runs included.
+          const options = { ...common, cwd: base };
+          const request = await sniffInstallAuthorizationRequest(options);
+          await approve(context, signal, CONFIRM_ACTIONS.install, request.bundles.length > 0 ? [...request.bundles] : ["*"], installConfirmationText(request), request.digest);
           live(signal);
-          result = await runSniffInstall({ ...common, mode: "install", cwd: base });
+          result = await runSniffInstall({ ...options, mode: "install" });
         } else {
           result = await runSniffInstall({ ...common, mode, cwd: params.path === undefined ? base : anchorPath(params.path, base) });
         }

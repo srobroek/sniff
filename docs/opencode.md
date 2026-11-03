@@ -54,7 +54,7 @@ Sniff never trusts a tool argument as approval. Each approval is an OpenCode per
 | Permission action | Asked before | Resource |
 | --- | --- | --- |
 | `sniff_confirm_intake` | Issuing a run lease for a resolved plan, including `interactive: false` intake | `<target kind>:<root or repository>` |
-| `sniff_confirm_install` | Installing analyzer bundles (`mode: "install"` without `dryRun`) | Each bundle name |
+| `sniff_confirm_install` | Installing analyzer bundles (`mode: "install"`, dry runs included), showing the diagnosed plan and its digest | Each bundle name |
 | `sniff_confirm_save` | Writing a report to disk (`mode: "save"`) | The canonical report directory |
 
 OpenCode's default policy allows every action, so by default the plugin turns these three into prompts. A configured `deny` still blocks them:

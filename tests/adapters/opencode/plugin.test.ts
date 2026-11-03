@@ -292,7 +292,19 @@ describe("lifecycle", () => {
     };
     await expect(tool(host, "sniff_install_tools").execute({ mode: "install", bundles: ["core"] }, toolContext())).rejects.toThrow("unloaded");
     expect(host.asserts.map((entry) => entry.action)).toEqual([CONFIRM_ACTIONS.install]);
+    expect(host.asserts[0]?.message).toMatch(/^Bundles: core\n[\s\S]*\nInstall digest: [0-9a-f]{64}$/);
+    expect(host.asserts[0]?.metadata?.digest).toBe(/Install digest: ([0-9a-f]{64})$/.exec(host.asserts[0]?.message ?? "")?.[1]);
     expect(existsSync(join(scratch, "toolkits", "core"))).toBe(false);
+  });
+
+  test("a rejected install dry run is still gated", async () => {
+    const { host, cleanup } = await load(project());
+    host.decide = async () => {
+      throw new Error("The user rejected permission");
+    };
+    await expect(tool(host, "sniff_install_tools").execute({ mode: "install", bundles: ["core"], dryRun: true }, toolContext())).rejects.toThrow("rejected");
+    expect(host.asserts[0]?.message).toContain("Dry run: true");
+    await cleanup();
   });
 
   test("a tool snapshot captured before unload refuses to run afterwards", async () => {
