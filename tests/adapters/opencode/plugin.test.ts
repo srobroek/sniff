@@ -177,7 +177,9 @@ describe("approval policy", () => {
     const base = project();
     expect(anchorTarget({ kind: "files", root: ".", paths: ["source.ts"] }, base)).toEqual({ kind: "files", root: base, paths: ["source.ts"] });
     expect(anchorTarget({ kind: "history", rootOrRepository: ".", window: { kind: "last-commits", count: 1 } }, base)).toMatchObject({ rootOrRepository: base });
+    expect(anchorTarget({ kind: "history", rootOrRepository: "missing-here", window: { kind: "last-commits", count: 1 } }, base)).toMatchObject({ rootOrRepository: join(base, "missing-here") });
     expect(anchorTarget({ kind: "repository", repository: "https://github.com/srobroek/sniff.git" }, base)).toEqual({ kind: "repository", repository: "https://github.com/srobroek/sniff.git" });
+    expect(anchorTarget({ kind: "repository", repository: "git@github.com:srobroek/sniff.git" }, base)).toEqual({ kind: "repository", repository: "git@github.com:srobroek/sniff.git" });
     expect(anchorTarget({ kind: "commit", root: "/abs", commit: "HEAD" }, base)).toEqual({ kind: "commit", root: "/abs", commit: "HEAD" });
   });
 });
@@ -270,6 +272,46 @@ describe("lifecycle", () => {
     };
     await expect(tool(host, "sniff_intake").execute(plannedFiles(project()), toolContext(controller.signal))).rejects.toThrow();
     await cleanup();
+  });
+
+  test("an approval that resolves after unload never issues a lease", async () => {
+    const { host, cleanup } = await load(project());
+    let unloaded: Promise<void> | undefined;
+    host.decide = async () => {
+      unloaded = cleanup();
+      await unloaded;
+    };
+    await expect(tool(host, "sniff_intake").execute(plannedFiles(project()), toolContext())).rejects.toThrow("unloaded");
+    expect(unloaded).toBeDefined();
+  });
+
+  test("an install approval that resolves after unload never installs", async () => {
+    const { host, cleanup } = await load(project());
+    host.decide = async () => {
+      await cleanup();
+    };
+    await expect(tool(host, "sniff_install_tools").execute({ mode: "install", bundles: ["core"] }, toolContext())).rejects.toThrow("unloaded");
+    expect(host.asserts.map((entry) => entry.action)).toEqual([CONFIRM_ACTIONS.install]);
+    expect(existsSync(join(scratch, "toolkits", "core"))).toBe(false);
+  });
+
+  test("a tool snapshot captured before unload refuses to run afterwards", async () => {
+    const { host, cleanup } = await load(project());
+    const intake = tool(host, "sniff_intake");
+    const install = tool(host, "sniff_install_tools");
+    await cleanup();
+    await expect(intake.execute(plannedFiles(project()), toolContext())).rejects.toThrow("unloaded");
+    await expect(install.execute({ mode: "install", bundles: ["core"] }, toolContext())).rejects.toThrow("unloaded");
+    expect(host.asserts).toEqual([]);
+  });
+
+  test("a report call with a wrong manifest ID keeps ownership of the live lease", async () => {
+    const { host, cleanup } = await load(project());
+    const lease = json(await tool(host, "sniff_intake").execute(plannedFiles(project()), toolContext())).lease as { capability: string; manifestId: string };
+    await expect(tool(host, "sniff_report").execute({ capability: lease.capability, manifestId: "manifest-wrong", report: {} }, toolContext())).rejects.toThrow();
+    expect(readRunManifest(lease.capability, lease.manifestId).manifestId).toBe(lease.manifestId);
+    await cleanup();
+    expect(() => readRunManifest(lease.capability, lease.manifestId)).toThrow("cancelled");
   });
 
   test("a relative save path lands under the session directory after its own approval", async () => {

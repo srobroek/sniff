@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type { Plugin, Skill } from "@opencode/plugin";
 import type { PermissionEvaluation } from "@opencode/plugin/promise/permission";
@@ -51,23 +51,24 @@ export function anchorPath(path: string, base: string): string {
   return isAbsolute(path) ? path : resolve(base, path);
 }
 
-function anchorIfLocal(value: string, base: string): string {
-  if (isAbsolute(value)) return value;
-  const local = resolve(base, value);
-  return existsSync(local) ? local : value;
+// The remote forms the core accepts (validateRepository): `git@host:path` or a URL with a scheme.
+const REMOTE_LOCATOR = /^(?:git@[^:/\s]+:|[A-Za-z][A-Za-z0-9+.-]*:\/\/)/;
+
+function anchorLocator(value: string, base: string): string {
+  return REMOTE_LOCATOR.test(value) ? value : anchorPath(value, base);
 }
 
 /**
  * The target with every local path anchored to `base`. The OpenCode server is shared across
- * projects, so its process cwd never identifies the session's project: `root` is always
- * local, while `repository` and `rootOrRepository` are anchored only when they name an
- * existing path under `base` and stay remote locators otherwise.
+ * projects, so its process cwd never identifies the session's project. A `repository` or
+ * `rootOrRepository` in a remote form stays as written; anything else is a local path and is
+ * anchored even when it does not exist, so resolution fails instead of finding a server-side path.
  */
 export function anchorTarget(target: TargetRequest, base: string): TargetRequest {
   const record: Record<string, unknown> = { ...target };
   if (typeof record.root === "string") record.root = anchorPath(record.root, base);
-  if (typeof record.rootOrRepository === "string") record.rootOrRepository = anchorIfLocal(record.rootOrRepository, base);
-  if (typeof record.repository === "string") record.repository = anchorIfLocal(record.repository, base);
+  if (typeof record.rootOrRepository === "string") record.rootOrRepository = anchorLocator(record.rootOrRepository, base);
+  if (typeof record.repository === "string") record.repository = anchorLocator(record.repository, base);
   return record as TargetRequest;
 }
 
@@ -221,10 +222,28 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       // Leases this instance issued. The core registry is process-wide and shared with every other
       // location's instance, so unloading releases only these, never every run in the server.
       const owned = new Map<string, string>();
+      // Aborted on unload so in-flight installs, analyzers, and approvals stop with the instance.
+      const lifetime = new AbortController();
       let disposed = false;
+      const UNLOADED = "The Sniff plugin was unloaded";
 
-      const approve = async (context: ToolContext, action: string, resources: readonly string[], summary: string, digest?: string): Promise<void> => {
-        context.signal.throwIfAborted();
+      /** The call's signal joined with the instance lifetime; throws once either has ended. */
+      const begin = (context: ToolContext): AbortSignal => {
+        if (disposed) throw new Error(UNLOADED);
+        const signal = AbortSignal.any([context.signal, lifetime.signal]);
+        signal.throwIfAborted();
+        return signal;
+      };
+
+      const live = (signal: AbortSignal): void => {
+        if (disposed) throw new Error(UNLOADED);
+        signal.throwIfAborted();
+      };
+
+      // Checked before and after the prompt: an unload removes the escalation hook, so an approval
+      // that starts or resolves after cleanup must never reach the gated action.
+      const approve = async (context: ToolContext, signal: AbortSignal, action: string, resources: readonly string[], summary: string, digest?: string): Promise<void> => {
+        live(signal);
         await ctx.permission.assert({
           sessionID: context.sessionID,
           agent: context.agent,
@@ -233,29 +252,29 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           resources: [...resources],
           metadata: { summary, ...(digest ? { digest } : {}) },
         });
-        context.signal.throwIfAborted();
+        live(signal);
       };
 
       const adopt = async (lease: RunLeaseReceipt, signal: AbortSignal): Promise<void> => {
         if (disposed || signal.aborted) {
           await cancelRunLease(lease.capability, lease.manifestId).catch(() => undefined);
-          throw new Error(disposed ? "The Sniff plugin was unloaded; the run was released." : "The Sniff intake was cancelled; the run was released.");
+          throw new Error(disposed ? `${UNLOADED}; the run was released.` : "The Sniff intake was cancelled; the run was released.");
         }
         owned.set(lease.capability, lease.manifestId);
       };
 
       const intake = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        const signal = begin(context);
         const parsed = intakeInput((input as IntakeParams).input);
         const request: IntakeInput = parsed.target ? { ...parsed, target: anchorTarget(parsed.target, base) } : parsed;
-        context.signal.throwIfAborted();
         const confirmPlan = async (plan: CanonicalConfirmationRequest): Promise<IntakeAuthorization> => {
-          await approve(context, CONFIRM_ACTIONS.intake, [planResource(plan)], intakeConfirmationText(plan, { maxFiles: MAX_PROMPT_FILES }), plan.digest);
+          await approve(context, signal, CONFIRM_ACTIONS.intake, [planResource(plan)], intakeConfirmationText(plan, { maxFiles: MAX_PROMPT_FILES }), plan.digest);
           return { acceptedDigest: plan.digest, actor: APPROVAL_ACTOR, reason: APPROVAL_REASON };
         };
         // `interactive: false` only skips the adaptive interview; its plan still needs the same
         // host approval, so a model argument can never stand in for the user.
         const result = await runSniffIntakeTool({ input: request }, { confirmInteractive: confirmPlan, authority: { authorize: confirmPlan } });
-        if (result.lease) await adopt(result.lease, context.signal);
+        if (result.lease) await adopt(result.lease, signal);
         const publicResult = publicSniffIntakeResult(result);
         return { content: JSON.stringify(publicResult), metadata: { ok: true, leased: publicResult.lease !== undefined } };
       };
@@ -268,6 +287,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       };
 
       const install = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        const signal = begin(context);
         const params = input as InstallParams;
         const mode = params.mode ?? "probe";
         if (!INSTALL_MODES.has(mode)) throw new Error("sniff_install_tools mode must be probe, diagnose, list, or install");
@@ -275,7 +295,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           ...(params.bundles ? { bundles: [...params.bundles] } : {}),
           ...(params.all !== undefined ? { all: params.all } : {}),
           ...(params.dryRun !== undefined ? { dryRun: params.dryRun } : {}),
-          signal: context.signal,
+          signal,
         };
         let result: SniffInstallResult;
         if (mode === "install") {
@@ -283,8 +303,9 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           if (params.dryRun !== true) {
             const plan = await runSniffInstall({ ...common, mode: "diagnose", cwd: base });
             const bundles = [...new Set(plan.tools.map((tool) => tool.bundle))].sort();
-            await approve(context, CONFIRM_ACTIONS.install, bundles.length > 0 ? bundles : ["*"], installPlanText(plan, bundles, false));
+            await approve(context, signal, CONFIRM_ACTIONS.install, bundles.length > 0 ? bundles : ["*"], installPlanText(plan, bundles, false));
           }
+          live(signal);
           result = await runSniffInstall({ ...common, mode: "install", cwd: base });
         } else {
           result = await runSniffInstall({ ...common, mode, cwd: params.path === undefined ? base : anchorPath(params.path, base) });
@@ -294,8 +315,9 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       };
 
       const analyzer = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        const signal = begin(context);
         const { capability, manifestId, analyzer: recipe } = input as AnalyzerParams;
-        const result = await runSniffAnalyzer({ capability, manifestId, analyzer: recipe, signal: context.signal });
+        const result = await runSniffAnalyzer({ capability, manifestId, analyzer: recipe, signal });
         if (!result.ok) throw new Error(bounded(result.report));
         return {
           content: JSON.stringify(analyzerProjection(recipe, result)),
@@ -304,6 +326,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       };
 
       const report = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        const signal = begin(context);
         const params = input as ReportParams;
         try {
           const result = await runSniffReportTool({
@@ -314,7 +337,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
             ...(params.path !== undefined ? { path: anchorPath(params.path, base) } : {}),
             runtime: {
               authorizeSave: async (request) => {
-                await approve(context, CONFIRM_ACTIONS.save, [request.directory], saveConfirmationText(request), request.digest);
+                await approve(context, signal, CONFIRM_ACTIONS.save, [request.directory], saveConfirmationText(request), request.digest);
                 return { acceptedDigest: request.digest, actor: APPROVAL_ACTOR, reason: APPROVAL_REASON };
               },
             },
@@ -323,17 +346,21 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths } };
         } finally {
           // A malformed report keeps its lease for a corrected retry; every other outcome ends it.
-          if (!leaseIsLive(params.capability, params.manifestId)) owned.delete(params.capability);
+          // Liveness uses the recorded manifest ID: a call with a wrong ID must not drop ownership.
+          const manifestId = owned.get(params.capability);
+          if (manifestId !== undefined && !leaseIsLive(params.capability, manifestId)) owned.delete(params.capability);
         }
       };
 
-      const reportArtifact = async (input: unknown): Promise<ToolResult> => {
+      const reportArtifact = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        begin(context);
         const { readCapability, ...options } = input as ReportArtifactParams;
         const { text, page } = reportArtifactPage(readReportArtifact({ ...options, capability: readCapability }));
         return { content: text, metadata: { ok: true, nextOffset: page.nextOffset, eof: page.eof } };
       };
 
-      const analyzerArtifact = async (input: unknown): Promise<ToolResult> => {
+      const analyzerArtifact = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
+        begin(context);
         const { readCapability, maxBytes, ...options } = input as AnalyzerArtifactParams;
         if ((options.relativePath === undefined) === (options.sourcePath === undefined)) throw new Error("Provide exactly one of relativePath or sourcePath");
         const { text, page } = analyzerArtifactPage(readAnalyzerArtifact({ ...options, capability: readCapability }), analyzerPageLimit(maxBytes));
@@ -343,6 +370,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       const registrations: Registration[] = [];
       const cleanup = async (): Promise<void> => {
         disposed = true;
+        lifetime.abort(new Error(UNLOADED));
         const leases = [...owned];
         owned.clear();
         await Promise.allSettled(leases.map(([capability, manifestId]) => cancelRunLease(capability, manifestId)));
