@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type ArgvRunner, createTemporaryCheckout, resolveTarget, runArgv } from "./target.ts";
-import { resolveHistoryAtRoot } from "./target-provider.ts";
+import { type ArgvRunner, createTemporaryCheckout, resolveTarget, runArgv } from "../../src/core/target.ts";
+import { resolveHistoryAtRoot } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
 afterEach(() => {

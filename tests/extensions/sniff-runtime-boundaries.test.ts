@@ -133,11 +133,12 @@ function remoteRunner(repositoryUrl: string, providerKind: "git" | "github" | "g
       return { code: 0, stdout: JSON.stringify({ diff_refs: { head_sha: head, base_sha: base }, changes: [{ old_path: "a.ts", new_path: "a.ts" }] }), stderr: "" };
     }
     if (command.startsWith(`git ls-remote -- ${repositoryUrl} `)) {
-      const ref = argv.at(-2);
+      const name = argv[4] ?? "";
+      const ref = name.replace(/^refs\/(?:heads|tags)\//, "");
       const resolved = ref === "base" ? base : ref === "v1" ? release : head;
-      return { code: 0, stdout: `${resolved}\t${ref}\n`, stderr: "" };
+      return { code: 0, stdout: `${resolved}\t${name}\n`, stderr: "" };
     }
-    if (argv[1] === "clone") checkout = argv[5] ?? "";
+    if (argv.includes("clone")) checkout = argv.at(-1) ?? "";
     if (argv.includes("checkout") && checkout) writeFileSync(join(checkout, "a.ts"), "export const remote = true;\n");
     if (command.endsWith("rev-parse --verify HEAD^{commit}")) return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command.includes("rev-parse --verify")) {
@@ -151,7 +152,7 @@ function remoteRunner(repositoryUrl: string, providerKind: "git" | "github" | "g
     if (command.includes("describe --tags --abbrev=0") && command.endsWith("^")) return { code: 0, stdout: "v1\n", stderr: "" };
     if (command.includes("describe --tags --abbrev=0")) return { code: 0, stdout: "v2\n", stderr: "" };
     if (command.startsWith("git diff --name-status")) return { code: 0, stdout: "M\0a.ts\0", stderr: "" };
-    if (command.startsWith("git ls-tree")) return { code: 0, stdout: "a.ts\n", stderr: "" };
+    if (command.startsWith("git ls-tree")) return { code: 0, stdout: "a.ts\0", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   return { runner, calls, checkout: () => checkout, head, base, release };
@@ -291,7 +292,7 @@ describe("adaptive runtime boundaries", () => {
     };
     const runner: ArgvRunner = (argv, options) => {
       if (argv[0] === "git" && argv[1] === "ls-remote") {
-        const ref = argv.at(-2) ?? "";
+        const ref = (argv[4] ?? "").replace(/^refs\/(?:heads|tags)\//, "");
         const object = objects[ref];
         if (object) return { code: 0, stdout: `${object.tag}\trefs/tags/${ref}\n${object.commit}\trefs/tags/${ref}^{}\n`, stderr: "" };
       }

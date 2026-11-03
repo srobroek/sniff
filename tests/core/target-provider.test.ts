@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { ArgvRunner } from "./target.ts";
-import { resolveProviderTarget } from "./target-provider.ts";
+import type { ArgvRunner } from "../../src/core/target.ts";
+import { resolveProviderTarget } from "../../src/core/target-provider.ts";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
