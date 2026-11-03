@@ -15,7 +15,6 @@ import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.
 import {
   cancelRunLease,
   decisionFrontier,
-  finalizeRunLease,
   type IntakeInput,
   intakeInput,
   publicSniffIntakeResult,
@@ -99,6 +98,8 @@ export class BoundedStdioTransport implements Transport {
   private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
   private started = false;
   private closed = false;
+  /** True while skipping the rest of an oversized frame, up to and including its newline. */
+  private discarding = false;
   private writeQueue = Promise.resolve();
   private readonly onData = (chunk: Buffer | string) => this.consume(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   private readonly onEnd = () => void this.close();
@@ -127,9 +128,19 @@ export class BoundedStdioTransport implements Transport {
     this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
     for (;;) {
       const newline = this.buffer.indexOf(10);
+      if (this.discarding) {
+        if (newline < 0) {
+          this.buffer = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
+          return;
+        }
+        this.buffer = this.buffer.subarray(newline + 1) as Buffer<ArrayBufferLike>;
+        this.discarding = false;
+        continue;
+      }
       if (newline < 0) {
         if (this.buffer.length > this.maxFrameBytes) {
           this.buffer = Buffer.alloc(0) as Buffer<ArrayBufferLike>;
+          this.discarding = true;
           void this.sendProtocolError("Frame exceeds the maximum MCP input size");
         }
         return;
@@ -372,10 +383,13 @@ function errorDetails(error: unknown): { code: string; message: string } {
   return { code: "sniff_operation_failed", message: "Sniff could not complete the requested operation." };
 }
 
-function boundedString(value: string, max = MAX_OUTPUT_TEXT_BYTES): string {
+export function boundedString(value: string, max = MAX_OUTPUT_TEXT_BYTES): string {
   if (Buffer.byteLength(value) <= max) return value;
+  const marker = "\n[truncated]";
   const bytes = Buffer.from(value);
-  return `${bytes.subarray(0, max).toString("utf8")}\n[truncated]`;
+  let end = Math.max(0, max - Buffer.byteLength(marker));
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${marker}`;
 }
 
 function boundedValue(value: unknown, depth = 0): unknown {
@@ -437,6 +451,7 @@ async function raceWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Pro
 }
 
 export class Semaphore {
+  private closed: SniffMcpError | undefined;
   private permits = MAX_CONCURRENT_REQUESTS;
   private readonly waiters: Array<{ readonly signal: AbortSignal; readonly resolve: (release: () => void) => void; readonly reject: (error: Error) => void; readonly onAbort: () => void }> = [];
 
@@ -449,6 +464,7 @@ export class Semaphore {
   }
 
   async acquire(signal: AbortSignal): Promise<() => void> {
+    if (this.closed) throw this.closed;
     assertNotAborted(signal);
     if (this.permits > 0) {
       this.permits -= 1;
@@ -489,6 +505,7 @@ export class Semaphore {
 
   close(reason = "MCP server is shutting down"): void {
     const error = new SniffMcpError("server_closed", reason);
+    this.closed = error;
     for (const waiter of this.waiters.splice(0)) waiter.reject(error);
   }
 
@@ -512,8 +529,6 @@ const semaphore = new Semaphore();
 const server = new Server({ name: "sniff", version: SERVER_VERSION }, { capabilities: { tools: { listChanged: false } }, enforceStrictCapabilities: true });
 const SUPPORTED_SERVER_PROTOCOL_VERSIONS = ["2025-06-18", "2025-11-25"] as const;
 let negotiatedVersion: string | undefined;
-let shuttingDown = false;
-const activeLeases = new Set<string>();
 
 function supportsFormElicitation(): boolean {
   if (!negotiatedVersion) return false;
@@ -521,10 +536,6 @@ function supportsFormElicitation(): boolean {
   if (!isObject(capabilities?.elicitation)) return false;
   if (negotiatedVersion === "2025-06-18") return true;
   return isObject(capabilities.elicitation.form);
-}
-
-function leaseKey(capability: string, manifestId: string): string {
-  return `${capability}\0${manifestId}`;
 }
 
 function setClientHandshake(request: { params: { protocolVersion: string; capabilities?: unknown; clientInfo?: unknown } }, version: string): void {
@@ -551,18 +562,17 @@ server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
 async function elicitDigest(request: DigestRequest, signal: AbortSignal, label: string): Promise<false | { acceptedDigest: string; actor?: string; reason?: string }> {
   assertNotAborted(signal);
   if (!supportsFormElicitation()) return false;
-  const fields = Object.fromEntries(Object.entries(request).filter(([key]) => key !== "digest").map(([key, value]) => [key, { const: value }]));
+  // MCP form elicitation allows only flat primitive properties; the canonical
+  // request travels in `message` and the user confirms its digest.
   const requestedSchema = {
     type: "object" as const,
     properties: {
-      ...fields,
-      acceptedDigest: { type: "string" as const, const: request.digest },
+      acceptedDigest: { type: "string" as const, enum: [request.digest], default: request.digest },
       actor: stringSchema,
       reason: stringSchema,
     },
     required: ["acceptedDigest"],
-    additionalProperties: false,
-  } as ElicitRequestFormParams["requestedSchema"];
+  } satisfies ElicitRequestFormParams["requestedSchema"];
   const message = `${label}\n${boundedString(JSON.stringify(request), MAX_OUTPUT_TEXT_BYTES)}`;
   const elicitationParams = negotiatedVersion === "2025-06-18" ? { message, requestedSchema } : { mode: "form" as const, message, requestedSchema };
   const requestOptions = { signal, timeout: ELICITATION_TIMEOUT_MS, maxTotalTimeout: ELICITATION_TIMEOUT_MS };
@@ -655,7 +665,6 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     throw abortError();
   }
   const publicResult = publicSniffIntakeResult(result);
-  if (publicResult.lease) activeLeases.add(leaseKey(publicResult.lease.capability, publicResult.lease.manifestId));
   return toolSuccess({ ok: true, ...publicResult }, JSON.stringify(publicResult));
 }
 
@@ -723,29 +732,16 @@ async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResp
 async function report(args: JsonObject, signal: AbortSignal): Promise<ToolResponse> {
   const capability = requiredString(args.capability, "capability");
   const manifestId = requiredString(args.manifestId, "manifestId");
-  let delegatedToCore = false;
-  try {
-    if (args.mode !== undefined && args.mode !== "render" && args.mode !== "save") throw new SniffMcpError("invalid_input", "Report mode is invalid");
-    if (!isObject(args.report)) throw new SniffMcpError("invalid_input", "Report must be an object");
-    inspectInput(args.report);
-    const mode = args.mode as SniffReportMode | undefined;
-    const runtime = mode === "save" ? { authorizeSave: async (request: SaveAuthorizationRequest) => elicitDigest(request, signal, "Authorize saving this exact canonical Sniff report (directory, manifest, artifacts, and digest).") } : undefined;
-    delegatedToCore = true;
-    const result = await runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
-    assertNotAborted(signal);
-    return toolSuccess({ ok: true, reportId: result.publicArtifacts.reportId, readCapability: result.publicArtifacts.readCapability, summary: result.publicArtifacts.summary, artifacts: result.publicArtifacts.descriptors, descriptorCount: result.publicArtifacts.descriptorCount, descriptorsTruncated: result.publicArtifacts.descriptorsTruncated, receipt: result.publicArtifacts.receipt, savedPaths: result.publicArtifacts.descriptors.flatMap((descriptor) => descriptor.savedPath ? [descriptor.savedPath] : []) }, result.publicArtifacts.summary);
-  } finally {
-    // Core finalizes after every delegated report attempt. This fallback is
-    // only for validation failures before entering the core use case.
-    if (!delegatedToCore) {
-      try {
-        await finalizeRunLease(capability, manifestId);
-      } catch {
-        // Expiry, cancellation, or an already-finalized lease is terminal.
-      }
-    }
-    activeLeases.delete(leaseKey(capability, manifestId));
-}
+  // Validation failures before delegation keep the lease so the caller can retry
+  // with a corrected report; the core finalizes after every delegated attempt.
+  if (args.mode !== undefined && args.mode !== "render" && args.mode !== "save") throw new SniffMcpError("invalid_input", "Report mode is invalid");
+  if (!isObject(args.report)) throw new SniffMcpError("invalid_input", "Report must be an object");
+  inspectInput(args.report);
+  const mode = args.mode as SniffReportMode | undefined;
+  const runtime = mode === "save" ? { authorizeSave: async (request: SaveAuthorizationRequest) => elicitDigest(request, signal, "Authorize saving this exact canonical Sniff report (directory, manifest, artifacts, and digest).") } : undefined;
+  const result = await runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
+  assertNotAborted(signal);
+  return toolSuccess({ ok: true, reportId: result.publicArtifacts.reportId, readCapability: result.publicArtifacts.readCapability, summary: result.publicArtifacts.summary, artifacts: result.publicArtifacts.descriptors, descriptorCount: result.publicArtifacts.descriptorCount, descriptorsTruncated: result.publicArtifacts.descriptorsTruncated, receipt: result.publicArtifacts.receipt, savedPaths: result.publicArtifacts.descriptors.flatMap((descriptor) => descriptor.savedPath ? [descriptor.savedPath] : []) }, result.publicArtifacts.summary);
 }
 function reportArtifact(args: JsonObject): ToolResponse {
   const readCapability = requiredString(args.readCapability, "readCapability");
@@ -785,7 +781,6 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
       const capability = requiredString(args.capability, "capability");
       const manifestId = requiredString(args.manifestId, "manifestId");
       await cancelRunLease(capability, manifestId);
-      activeLeases.delete(leaseKey(capability, manifestId));
       return toolSuccess({ ok: true, capability, manifestId, released: true }, "Sniff run cancelled and materialization released.");
     }
     case "sniff_install_tools": return install(args, signal);
@@ -814,11 +809,8 @@ let cleanupDone: Promise<void> | undefined;
 /** Releases every lease once; the returned promise settles after spawned analyzers exited and their trees were removed. */
 function cleanup(reason: string): Promise<void> {
   if (cleanupDone) return cleanupDone;
-  shuttingDown = true;
   semaphore.close(reason);
-  cleanupDone = releaseAllRunLeases(reason).finally(() => {
-    activeLeases.clear();
-  });
+  cleanupDone = releaseAllRunLeases(reason);
   return cleanupDone;
 }
 export async function serve(): Promise<void> {

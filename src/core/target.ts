@@ -319,7 +319,6 @@ export function parseGitStatusPorcelain(output: string): TargetChange[] {
     if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) {
       changes.push({ path, status: "unknown", basePath: path, headPath: path });
     } else if (x === "A" && y === "D") {
-      continue;
     } else if (x === "R" && origin !== undefined) {
       if (y === "D") changes.push({ path: origin, status: "deleted", basePath: origin });
       else changes.push({ path, status: "renamed", basePath: origin, headPath: path });
