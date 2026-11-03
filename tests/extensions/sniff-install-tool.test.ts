@@ -610,6 +610,29 @@ describe("runSniffInstall", () => {
 		expect(existsSync(marker)).toBe(false);
 	});
 
+	test("an abort during probe, diagnose, or install reports aborted and forwards the signal to every probe", async () => {
+		for (const mode of ["probe", "diagnose", "install"] as const) {
+			const controller = new AbortController();
+			const signals: Array<AbortSignal | undefined> = [];
+			const runtime = fakeRuntime({
+				run: async (argv, _cwd, _env, timeoutMs, signal) => {
+					signals.push(signal);
+					if (signals.length === 1) {
+						controller.abort();
+						return commandResult(argv, timeoutMs);
+					}
+					return signal?.aborted ? commandResult(argv, timeoutMs, { exitCode: null, error: "operation aborted" }) : commandResult(argv, timeoutMs);
+				},
+			});
+			const result = await runSniffInstall({ mode, bundles: ["core", "dup"], runtime, signal: controller.signal });
+			expect(result.ok).toBe(false);
+			expect(result.report).toContain("operation aborted");
+			expect(signals.length).toBeGreaterThan(0);
+			expect(signals.every((signal) => signal === controller.signal)).toBe(true);
+			// No further tool is inspected once the abort is observed between tools.
+			expect(result.tools.length).toBeLessThanOrEqual(TOOLS.core.length);
+		}
+	});
 	test("already-aborted install cancels before spawning a manager", async () => {
 		const controller = new AbortController();
 		controller.abort();

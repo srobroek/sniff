@@ -621,7 +621,7 @@ async function installUnmanagedTool(
 		return result;
 	}
 	const installEnvironment = environmentForTool(bundle, rec, environment, env, runtime);
-	const initial = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime);
+	const initial = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime, undefined, signal);
 	if (initial.status === "usable") {
 		lines.push(`  = ${rec.name} already installed (${initial.resolvedPath})`);
 		return initial;
@@ -639,7 +639,7 @@ async function installUnmanagedTool(
 		try {
 			const provisioned = await runtime.provisionOpenGrep({ cacheDir: env.SNIFF_OPENGREP_CACHE_DIR, signal });
 			lines.push(`  + OpenGrep ${provisioned.reused ? "reused verified cache" : "downloaded and cached"} (${provisioned.path})`);
-			const verifiedResult = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+			const verifiedResult = await inspectTool(bundle, rec, true, probeCwd, env, runtime, undefined, signal);
 			if (verifiedResult.status === "usable") return verifiedResult;
 			return failedInstallResult(verifiedResult, "installation-failed", undefined, verifiedResult.remediation || "OpenGrep cache verification failed");
 		} catch (error) {
@@ -768,7 +768,7 @@ async function installMiseBundleUnlocked(
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
 	const initial: SniffToolResult[] = [];
 	for (const rec of records) {
-		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime));
+		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime, undefined, signal));
 	}
   if (!dryRun && initial.every((result) => result.status === "usable") && existsSync(toolkitConfigPath(bundle, env, runtime))) return { results: initial };
 	const directory = toolkitDirectory(bundle, env, runtime);
@@ -1221,17 +1221,25 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	const installCwd = runtime.neutralCwd ?? tmpdir();
 	const lines: string[] = [];
 	const tools: SniffToolResult[] = [];
+	// A tool inspected after an abort fails fast as unrunnable; the run as a whole reports the abort instead.
+	const aborted = (): boolean => opts.signal?.aborted === true;
+	const abortedResult = (): SniffInstallResult => ({ ok: false, report: [...lines, "", "operation aborted"].join("\n"), tools });
 	if (mode === "probe") {
 		lines.push("sniff tool probe (all tools optional; missing ones are skipped, not fatal)");
 		for (const bundle of BUNDLES) {
+			if (aborted()) return abortedResult();
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			const bundleResults: SniffToolResult[] = [];
 			for (const rec of TOOLS[bundle]) {
+				if (aborted()) {
+					tools.push(...bundleResults);
+					return abortedResult();
+				}
 				const toolkitScoped = usesToolkitEnvironment(rec);
 				bundleResults.push(environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, false, environment.error)
-					: await inspectTool(bundle, rec, false, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime));
+					: await inspectTool(bundle, rec, false, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime, undefined, opts.signal));
 			}
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
@@ -1239,6 +1247,7 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			for (const result of bundleResults) counts.set(result.status, (counts.get(result.status) ?? 0) + 1);
 			lines.push(`  (${[...counts].map(([status, count]) => `${count} ${status}`).join(", ")})`);
 		}
+		if (aborted()) return abortedResult();
 		lines.push("", "Install a bundle with: sniff_install_tools mode=install bundles=[<bundle>]");
 		return { ok: true, report: lines.join("\n"), tools };
 	}
@@ -1258,23 +1267,27 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	if (mode === "diagnose") {
 		lines.push("sniff bundle diagnostics (inventory only; does not authorize analyzer execution)");
 		for (const bundle of selected) {
+			if (aborted()) return abortedResult();
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			for (const rec of TOOLS[bundle]) {
+				if (aborted()) return abortedResult();
 				const toolkitScoped = usesToolkitEnvironment(rec);
 				const result = environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, true, environment.error)
-					: await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime);
+					: await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime, undefined, opts.signal);
 				tools.push(result);
 				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}
 		}
+		if (aborted()) return abortedResult();
 		const failures = tools.filter((result) => result.status !== "usable");
 		lines.push("", `diagnose: ${tools.length - failures.length} usable, ${failures.length} unavailable catalog entry/entries; use sniff_run_analyzer for authoritative per-run preflight`);
 		return { ok: failures.length === 0, report: lines.join("\n"), tools };
 	}
 	if (opts.dryRun) lines.push("(dry run — no changes will be made)");
 	for (const bundle of selected) {
+		if (aborted()) return abortedResult();
 		lines.push("", `[${bundle}]`);
 		const records = TOOLS[bundle];
 		const unmanagedByTool = new Map<string, SniffToolResult>();
@@ -1318,9 +1331,12 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 		}
 		const managedByTool = new Map(managedResults.map((result) => [result.tool, result]));
 		for (const rec of records) {
-			tools.push(managedByTool.get(rec.name) ?? unmanagedByTool.get(rec.name) ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
+			const settled = managedByTool.get(rec.name) ?? unmanagedByTool.get(rec.name);
+			if (!settled && aborted()) return abortedResult();
+			tools.push(settled ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
 		}
 	}
+	if (aborted()) return abortedResult();
 	const failures = tools.filter((result) => result.status !== "usable");
 	if (opts.dryRun) {
 		lines.push("", "Dry run complete; no tool state changed.");
