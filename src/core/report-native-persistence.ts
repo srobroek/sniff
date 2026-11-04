@@ -1,6 +1,6 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, constants as fsConstants, readdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, constants as fsConstants, fsyncSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { parse, resolve, sep } from "node:path";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
@@ -161,6 +161,13 @@ function loadNativeSymbols(): NativeSymbols {
   throw new Error(`Sniff report persistence native API is unavailable: ${String(lastError)}`);
 }
 
+let syncDescriptor: (fd: number) => void = fsyncSync;
+
+/** Test seam: observe or fail the fsync of each saved file and directory; `undefined` restores fsync(2). */
+export function setReportFsyncForTests(sync: ((fd: number) => void) | undefined): void {
+  syncDescriptor = sync ?? fsyncSync;
+}
+
 function errno(symbols: NativeSymbols): number {
   return read.i32(symbols.errno() as Parameters<typeof read.i32>[0]);
 }
@@ -270,6 +277,7 @@ function writeEntry(directoryFd: number, relativePath: string, content: string, 
       if (written <= 0) throw new Error(`Sniff report write failed for ${relativePath}`);
       offset += written;
     }
+    syncDescriptor(fd);
   } catch (error) {
     try {
       removeEntry(directoryFd, relativePath, symbols, constants);
@@ -348,9 +356,14 @@ export function saveReportEntriesAt(
       writeEntry(entryDirectoryFd, name, content, symbols, constants);
       written.push(relativePath);
     }
+    // Every entry name must be durable before the tree becomes visible under its final name, and
+    // the rename itself only once the parent directory is synced.
+    syncDescriptor(filesFd);
+    syncDescriptor(stagingFd);
     const publishedResult = symbols.publishNoReplace(parentFd, stagingName, parentFd, reportId, constants.publishNoReplaceFlag);
     if (publishedResult < 0) throw operationError("publish", reportId, errno(symbols), constants);
     published = true;
+    syncDescriptor(parentFd);
     closeFd(filesFd);
     filesFd = undefined;
     closeFd(stagingFd);
