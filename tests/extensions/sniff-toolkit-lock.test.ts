@@ -1,22 +1,25 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import * as fs from "node:fs";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runSniffInstall, type SniffInstallRuntime, TOOLKIT_LOCK_STALE_MS, withToolkitLock } from "../../src/core/install.ts";
-import * as processControl from "../../src/core/process-control.ts";
+import { runSniffInstall, type SniffInstallRuntime, withToolkitLock } from "../../src/core/install.ts";
+
+// The multi-process tests wait on separate Bun processes; every wait is still bounded by a ready file.
+setDefaultTimeout(30_000);
 
 const temporary: string[] = [];
 afterEach(() => {
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
-type LockOwner = { pid: number; token: string; startedAt: number };
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  temporary.push(dir);
+  return dir;
+}
 
-function lockFixture(): { runtime: SniffInstallRuntime; directory: string; lockPath: string; ownerPath: string } {
-  const cache = mkdtempSync(join(tmpdir(), "sniff-toolkit-lock-"));
-  temporary.push(cache);
-  const runtime: SniffInstallRuntime = {
+function lockRuntime(cache: string): SniffInstallRuntime {
+  return {
     toolkitCacheRoot: cache,
     resolveCommand: () => null,
     readLauncher: () => "",
@@ -29,37 +32,50 @@ function lockFixture(): { runtime: SniffInstallRuntime; directory: string; lockP
     },
     freshEnvironment: async (_cwd, env) => ({ env, source: "process" }),
   };
-  const directory = join(cache, "core");
-  const lockPath = join(directory, ".lock");
-  return { runtime, directory, lockPath, ownerPath: join(lockPath, "owner.json") };
 }
 
-function holdLock(lockPath: string, owner: LockOwner): void {
-  mkdirSync(lockPath, { recursive: true });
-  writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner));
+async function until(condition: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${label}`);
+    await Bun.sleep(5);
+  }
 }
 
-function readOwner(ownerPath: string): LockOwner {
-  return JSON.parse(readFileSync(ownerPath, "utf8")) as LockOwner;
-}
-
-/** A PID with no live process behind it, found by probing downwards from the top of the PID space. */
-function deadPid(): number {
-  let pid = 4_194_303;
-  while (pid > 1 && processControl.processAlive(pid)) pid -= 1;
-  return pid;
-}
-
-/** A lock whose owner is long gone: older than the staleness bound and owned by a dead PID. */
-function staleOwner(): LockOwner {
-  return { pid: deadPid(), token: "stale-owner", startedAt: Date.now() - TOOLKIT_LOCK_STALE_MS * 2 };
-}
+/**
+ * A separate Bun process that takes the toolkit lock, proves it is alone inside by creating the
+ * shared `inside` directory exclusively, reports `entered-<name>`, and leaves once `release-<name>`
+ * appears. Every step is a ready file, so the test never sleeps for timing.
+ */
+const LOCK_HOLDER = `
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+const [install, cache, sync, name] = process.argv.slice(2);
+const { runCommand, withToolkitLock } = await import(install);
+const mark = (file, text = "") => { writeFileSync(join(sync, file + ".tmp"), text); renameSync(join(sync, file + ".tmp"), join(sync, file)); };
+const runtime = { toolkitCacheRoot: cache };
+mark("waiting-" + name);
+await withToolkitLock("core", process.env, runtime, async () => {
+  let alone = true;
+  try { mkdirSync(join(sync, "inside")); } catch { alone = false; mark("violation-" + name); }
+  mark("entered-" + name);
+  if (name === "spawner") {
+    // An installer child that outlives this process must not keep the lock alive.
+    const wait = 'while [ ! -e "$1" ]; do sleep 0.01; done';
+    void runCommand(["sh", "-c", 'echo $$ > "$2.tmp" && mv "$2.tmp" "$2"; ' + wait, "sniff-test", join(sync, "release-child"), join(sync, "child")], sync, process.env, 60_000);
+  }
+  while (!existsSync(join(sync, "release-" + name))) await Bun.sleep(5);
+  if (alone) rmSync(join(sync, "inside"), { recursive: true, force: true });
+  mark("left-" + name);
+}, { waitMs: 60_000 });
+`;
 
 describe("toolkit install lock", () => {
-  test("an abort during the wait returns promptly with operation aborted and leaves no lock of its own", async () => {
-    const { runtime, directory, lockPath, ownerPath } = lockFixture();
-    const owner = { pid: process.pid, token: "live-owner", startedAt: Date.now() };
-    holdLock(lockPath, owner);
+  test("an abort during the wait returns promptly with operation aborted and leaves no lock behind", async () => {
+    const cache = tempDir("sniff-toolkit-lock-");
+    const runtime = lockRuntime(cache);
+    const held = Promise.withResolvers<void>();
+    const holding = withToolkitLock("core", process.env, runtime, () => held.promise);
     const controller = new AbortController();
     let entered = false;
     const startedAt = Date.now();
@@ -70,106 +86,130 @@ describe("toolkit install lock", () => {
     await expect(waiting).rejects.toThrow("operation aborted");
     expect(Date.now() - startedAt).toBeLessThan(2_000);
     expect(entered).toBe(false);
-    // The live owner's lock is untouched and the waiter left nothing beside it.
-    expect(readOwner(ownerPath)).toEqual(owner);
-    expect(readdirSync(directory)).toEqual([".lock"]);
+    held.resolve();
+    await holding;
 
-    // An already aborted caller never takes a free lock either.
-    rmSync(lockPath, { recursive: true, force: true });
+    // An already aborted caller never takes a free lock, and the aborted waiter left nothing held.
     await expect(withToolkitLock("core", process.env, runtime, async () => {
       entered = true;
     }, { signal: AbortSignal.abort() })).rejects.toThrow("operation aborted");
     expect(entered).toBe(false);
-    expect(readdirSync(directory)).toEqual([]);
+    await withToolkitLock("core", process.env, runtime, async () => {
+      entered = true;
+    }, { waitMs: 0 });
+    expect(entered).toBe(true);
   });
 
-  test("two concurrent stale takeovers produce exactly one owner", async () => {
-    const { runtime, lockPath } = lockFixture();
-    const stale = staleOwner();
-    holdLock(lockPath, stale);
-    const inside = new Set<string>();
-    let overlapped = false;
-    const releaseFirst = Promise.withResolvers<void>();
-    const critical = (name: string, hold: Promise<void>) => async () => {
-      if (inside.size > 0) overlapped = true;
-      inside.add(name);
-      await hold;
-      inside.delete(name);
-    };
-    let second: Promise<void> | undefined;
-    let interleaved = false;
-    // Waiter A reads the stale owner; before it acts, waiter B takes the lock over and acquires it.
-    const realAlive = processControl.processAlive;
-    const alive = spyOn(processControl, "processAlive").mockImplementation((pid: number) => {
-      if (pid === stale.pid && !interleaved) {
-        interleaved = true;
-        second = withToolkitLock("core", process.env, runtime, critical("B", releaseFirst.promise), { waitMs: 30_000 });
-      }
-      return realAlive(pid);
-    });
+  test("callers in one process never share the critical section", async () => {
+    const runtime = lockRuntime(tempDir("sniff-toolkit-lock-"));
+    let inside = 0;
+    let most = 0;
+    const order: number[] = [];
+    await Promise.all([0, 1, 2, 3].map((index) => withToolkitLock("core", process.env, runtime, async () => {
+      inside += 1;
+      most = Math.max(most, inside);
+      order.push(index);
+      await Bun.sleep(1);
+      inside -= 1;
+    }, { waitMs: 30_000 })));
+    expect(most).toBe(1);
+    expect(order.toSorted()).toEqual([0, 1, 2, 3]);
+  });
+
+  test("a live owner in another process keeps its lock until it exits, and its death frees it", async () => {
+    const cache = tempDir("sniff-toolkit-lock-");
+    const sync = tempDir("sniff-toolkit-lock-sync-");
+    const script = join(sync, "holder.ts");
+    writeFileSync(script, LOCK_HOLDER);
+    const install = join(import.meta.dir, "..", "..", "src", "core", "install.ts");
+    const holder = Bun.spawn([process.execPath, script, install, cache, sync, "owner"], { stdout: "ignore", stderr: "inherit" });
     try {
-      const first = withToolkitLock("core", process.env, runtime, critical("A", Promise.resolve()), { waitMs: 30_000 });
-      await Promise.resolve();
-      expect(second).toBeDefined();
-      expect([...inside]).toEqual(["B"]);
-      expect(readOwner(join(lockPath, "owner.json")).pid).toBe(process.pid);
-      releaseFirst.resolve();
-      await Promise.all([first, second]);
-      expect(overlapped).toBe(false);
-      expect(existsSync(lockPath)).toBe(false);
+      await until(() => existsSync(join(sync, "entered-owner")), "the owner to take the lock");
+      const runtime = lockRuntime(cache);
+      let entered = false;
+      await expect(withToolkitLock("core", process.env, runtime, async () => {
+        entered = true;
+      }, { waitMs: 300 })).rejects.toThrow("Sniff toolkit bundle core is locked by another process");
+      expect(entered).toBe(false);
+      // The owner dies holding the lock; the kernel releases it, with no staleness heuristic.
+      holder.kill("SIGKILL");
+      await holder.exited;
+      await withToolkitLock("core", process.env, runtime, async () => {
+        entered = true;
+      }, { waitMs: 5_000 });
+      expect(entered).toBe(true);
     } finally {
-      alive.mockRestore();
-      releaseFirst.resolve();
+      if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL");
+      await holder.exited;
     }
   });
 
-  test("a takeover that races a fresh acquisition puts the live lock back", async () => {
-    const { runtime, directory, lockPath, ownerPath } = lockFixture();
-    holdLock(lockPath, staleOwner());
-    const inside = new Set<string>();
-    let overlapped = false;
-    const releaseB = Promise.withResolvers<void>();
-    const critical = (name: string, hold: Promise<void>) => async () => {
-      if (inside.size > 0) overlapped = true;
-      inside.add(name);
-      await hold;
-      inside.delete(name);
-    };
-    let second: Promise<void> | undefined;
-    let interleaved = false;
-    let liveToken: string | undefined;
-    const realRename = fs.renameSync;
-    // Waiter A has re-checked the stale owner; just before its rename, waiter B takes the lock over.
-    const rename = spyOn(fs, "renameSync").mockImplementation((from: fs.PathLike, to: fs.PathLike) => {
-      if (from === lockPath && !interleaved) {
-        interleaved = true;
-        second = withToolkitLock("core", process.env, runtime, critical("B", releaseB.promise), { waitMs: 30_000 });
-        liveToken = readOwner(ownerPath).token;
-      }
-      return realRename(from, to);
-    });
+  test("a holder that dies frees the lock even while its installer child keeps running", async () => {
+    const cache = tempDir("sniff-toolkit-lock-");
+    const sync = tempDir("sniff-toolkit-lock-sync-");
+    const script = join(sync, "holder.ts");
+    writeFileSync(script, LOCK_HOLDER);
+    const install = join(import.meta.dir, "..", "..", "src", "core", "install.ts");
+    const holder = Bun.spawn([process.execPath, script, install, cache, sync, "spawner"], { stdout: "ignore", stderr: "inherit" });
     try {
-      const first = withToolkitLock("core", process.env, runtime, critical("A", Promise.resolve()), { waitMs: 30_000 });
-      await Promise.resolve();
-      expect([...inside]).toEqual(["B"]);
-      // A moved B's live lock aside, saw it was not the stale one, and restored it.
-      expect(readOwner(ownerPath).token).toBe(liveToken ?? "");
-      expect(readdirSync(directory)).toEqual([".lock"]);
-      releaseB.resolve();
-      await Promise.all([first, second]);
-      expect(overlapped).toBe(false);
-      expect(readdirSync(directory)).toEqual([]);
+      await until(() => existsSync(join(sync, "entered-spawner")) && existsSync(join(sync, "child")), "the holder and its child to start");
+      holder.kill("SIGKILL");
+      await holder.exited;
+      let entered = false;
+      await withToolkitLock("core", process.env, lockRuntime(cache), async () => {
+        entered = true;
+      }, { waitMs: 5_000 });
+      expect(entered).toBe(true);
     } finally {
-      rename.mockRestore();
-      releaseB.resolve();
+      // The orphaned child exits on its own once released; no remembered PID is ever signalled.
+      writeFileSync(join(sync, "release-child"), "");
+      if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL");
+      await holder.exited;
+    }
+  });
+
+  test("three installer processes never hold the lock together, even when the owner dies inside it", async () => {
+    const cache = tempDir("sniff-toolkit-lock-");
+    const sync = tempDir("sniff-toolkit-lock-sync-");
+    const script = join(sync, "holder.ts");
+    writeFileSync(script, LOCK_HOLDER);
+    const install = join(import.meta.dir, "..", "..", "src", "core", "install.ts");
+    const marker = (file: string) => existsSync(join(sync, file));
+    const holders = new Map<string, ReturnType<typeof Bun.spawn>>();
+    const start = (name: string) => holders.set(name, Bun.spawn([process.execPath, script, install, cache, sync, name], { stdout: "ignore", stderr: "inherit" }));
+    try {
+      start("A");
+      await until(() => marker("entered-A"), "A to enter");
+      start("B");
+      start("C");
+      await until(() => marker("waiting-B") && marker("waiting-C"), "B and C to wait");
+      // A dies inside the critical section, the case a stale-lock takeover used to handle.
+      holders.get("A")?.kill("SIGKILL");
+      await holders.get("A")?.exited;
+      rmSync(join(sync, "inside"), { recursive: true, force: true });
+      await until(() => marker("entered-B") || marker("entered-C"), "B or C to enter");
+      const [first, second] = marker("entered-B") ? ["B", "C"] : ["C", "B"];
+      expect(marker(`entered-${second}`)).toBe(false);
+      writeFileSync(join(sync, `release-${first}`), "");
+      await until(() => marker(`left-${first}`), `${first} to leave`);
+      await until(() => marker(`entered-${second}`), `${second} to enter`);
+      writeFileSync(join(sync, `release-${second}`), "");
+      expect(await holders.get(first)?.exited).toBe(0);
+      expect(await holders.get(second)?.exited).toBe(0);
+      expect(readdirSync(sync).filter((file) => file.startsWith("violation-"))).toEqual([]);
+    } finally {
+      for (const holder of holders.values()) {
+        if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL");
+        await holder.exited;
+      }
     }
   });
 
   test("a cancelled install stops waiting for a toolkit lock held by another installer", async () => {
-    const { runtime: base, lockPath, ownerPath } = lockFixture();
-    const dupLock = join(lockPath, "..", "..", "dup", ".lock");
-    const owner = { pid: process.pid, token: "live-installer", startedAt: Date.now() };
-    holdLock(dupLock, owner);
+    const cache = tempDir("sniff-toolkit-lock-");
+    const base = lockRuntime(cache);
+    const held = Promise.withResolvers<void>();
+    const holding = withToolkitLock("dup", process.env, base, () => held.promise);
     const commands: string[][] = [];
     const runtime: SniffInstallRuntime = {
       ...base,
@@ -183,27 +223,23 @@ describe("toolkit install lock", () => {
     const startedAt = Date.now();
     const installing = runSniffInstall({ mode: "install", bundles: ["dup"], runtime, signal: controller.signal });
     setTimeout(() => controller.abort(), 20);
-    await expect(installing).rejects.toThrow("operation aborted");
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
-    expect(commands.filter((argv) => argv.includes("install"))).toEqual([]);
-    expect(readOwner(join(dupLock, "owner.json"))).toEqual(owner);
-    expect(existsSync(ownerPath)).toBe(false);
+    try {
+      await expect(installing).rejects.toThrow("operation aborted");
+      expect(Date.now() - startedAt).toBeLessThan(2_000);
+      expect(commands.filter((argv) => argv.includes("install"))).toEqual([]);
+    } finally {
+      held.resolve();
+      await holding;
+    }
   });
 
-  test("a live owner is never removed, however old its lock", async () => {
-    const { runtime, directory, lockPath, ownerPath } = lockFixture();
-    const owner = { pid: process.pid, token: "live-owner", startedAt: Date.now() - TOOLKIT_LOCK_STALE_MS * 4 };
-    holdLock(lockPath, owner);
-    let entered = false;
-    const attempt = () => withToolkitLock("core", process.env, runtime, async () => {
-      entered = true;
-    }, { waitMs: 300 });
-    await Promise.all([
-      expect(attempt()).rejects.toThrow("Sniff toolkit bundle core is locked by another process"),
-      expect(attempt()).rejects.toThrow("Sniff toolkit bundle core is locked by another process"),
-    ]);
-    expect(entered).toBe(false);
-    expect(readOwner(ownerPath)).toEqual(owner);
-    expect(readdirSync(directory)).toEqual([".lock"]);
+  test("never removes the lock file, so a waiter can never lock an unlinked inode", async () => {
+    const cache = tempDir("sniff-toolkit-lock-");
+    const runtime = lockRuntime(cache);
+    await withToolkitLock("core", process.env, runtime, async () => undefined);
+    const before = readdirSync(join(cache, "core"));
+    await withToolkitLock("core", process.env, runtime, async () => undefined);
+    expect(readdirSync(join(cache, "core"))).toEqual(before);
+    expect(before.length).toBe(1);
   });
 });
