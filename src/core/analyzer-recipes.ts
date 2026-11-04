@@ -1,12 +1,19 @@
 import rawRecipes from "./analyzer-recipes.json";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS, type ToolRec } from "./catalog.ts";
+import { OBJECTIVE_GROUPS, type ObjectiveGroup } from "./objectives.ts";
 
 export type AnalyzerOutput = "sarif" | "lizard-csv" | "gitleaks-json" | "opengrep-json";
+
+export type SniffAnalyzerTier = "project-native" | "lightweight-static" | "deep-static";
 
 export type SniffAnalyzerRecipe = {
 	readonly id: string;
 	readonly tool: string;
-	readonly tier: "project-native" | "lightweight-static" | "deep-static";
+	readonly tier: SniffAnalyzerTier;
+	/** Whether the tier's default selection includes this recipe. */
+	readonly defaultEnabled: boolean;
+	/** The objective groups this recipe serves; a recipe runs only when one of them is selected. */
+	readonly objectives: readonly ObjectiveGroup[];
 	readonly args: readonly string[];
 	readonly scope: "scoped-files" | "bounded-history" | "repository-wide";
 	readonly fileExtensions?: readonly string[];
@@ -40,6 +47,9 @@ function loadRecipe(key: string, value: unknown): SniffAnalyzerRecipe {
 	if (!Array.isArray(recipe.acceptedExitCodes)) throw new Error(`Analyzer recipe ${id} is missing acceptedExitCodes`);
 	if (typeof recipe.output !== "string" || !outputs.has(recipe.output as AnalyzerOutput)) throw new Error(`Analyzer recipe ${id} has unknown output ${String(recipe.output)}`);
 	if (!Array.isArray(recipe.args) || typeof recipe.tier !== "string" || typeof recipe.scope !== "string") throw new Error(`Analyzer recipe ${id} is malformed`);
+	if (!Array.isArray(recipe.objectives) || recipe.objectives.length === 0 || recipe.objectives.some((group) => !OBJECTIVE_GROUPS.includes(group as ObjectiveGroup))) {
+		throw new Error(`Analyzer recipe ${id} must declare known objective groups`);
+	}
 	const args = recipe.args.map((arg) => {
 		if (typeof arg !== "string") throw new Error(`Analyzer recipe ${id} has a non-string argument`);
 		return arg === "@opengrep-rule-file" ? `${import.meta.dir}/sniff-opengrep-hardcoded-values.yml` : arg;
@@ -49,7 +59,9 @@ function loadRecipe(key: string, value: unknown): SniffAnalyzerRecipe {
 		...recipe,
 		id,
 		tool: recipe.tool,
-		tier: recipe.tier as SniffAnalyzerRecipe["tier"],
+		tier: recipe.tier as SniffAnalyzerTier,
+		defaultEnabled: recipe.defaultEnabled === true,
+		objectives: recipe.objectives as readonly ObjectiveGroup[],
 		args,
 		scope: recipe.scope as SniffAnalyzerRecipe["scope"],
 		fileExtensions: Array.isArray(fileExtensions) ? fileExtensions.filter((item): item is string => typeof item === "string") : undefined,

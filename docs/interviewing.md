@@ -18,6 +18,8 @@ The core models five frontier axes:
 
 Analyzer family and tier follow from the confirmed target, objectives, trust route, and availability.
 
+Objectives narrow the analyzers first. Each analyzer recipe declares the objective groups it serves in `src/core/analyzer-recipes.json`. A recipe that serves none of the selected groups is recorded as `skipped` with that reason, before trust, scope, and availability are considered. Selecting all six groups, which is the default, keeps every recipe. For example, `structure-and-maintainability` alone selects `lizard:complexity` and `opengrep:hardcoded-values`, and `bounded-security-smells` alone selects `gitleaks:tracked-history` and `opengrep:hardcoded-values`.
+
 The five choices form the adaptive frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next question. Analyzer selection follows the confirmed choices.
 
 ## Request patterns

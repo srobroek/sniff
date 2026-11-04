@@ -1086,7 +1086,7 @@ describe("adaptive runtime boundaries", () => {
       target: { kind: "history", rootOrRepository: local.root, window: { kind: "last-commits", count: 1 } },
       intent: "history",
       scopeMode: "full",
-      objectives: ["correctness-and-resilience"],
+      objectives: ["correctness-and-resilience", "bounded-security-smells"],
       budget: { maxMinutes: 5 },
     } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     const historyManifest = history.manifest;

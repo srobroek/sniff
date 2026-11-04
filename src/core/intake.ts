@@ -268,13 +268,14 @@ function buildManifest(input: ManifestInput, authorization?: IntakeAuthorization
     trust,
     ...(input.route?.provider ? { provider: input.route.provider } : {}),
   } as RunManifest["route"];
-  const analyzers = selectSecurityAnalyzers(input.security, { trust, target: input.target, scopeMode });
+  const objectives = [...selectObjectiveGroups(input.objectives).selected];
+  const analyzers = selectSecurityAnalyzers(input.security, { trust, target: input.target, scopeMode, objectives });
   const content: Omit<RunManifest, "manifestId"> = {
     schemaVersion: "1.0.0",
     resolvedTarget: canonicalTarget(input.target),
     intent: input.intent,
     scopeMode,
-    objectives: [...selectObjectiveGroups(input.objectives).selected],
+    objectives,
     exclusions: canonicalStrings([...(input.exclusions ?? []), ...securityExclusions()]),
     analyzers: cloneSorted(analyzers),
     budget: structuredClone(input.budget ?? {}),
