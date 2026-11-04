@@ -73,7 +73,7 @@ codex plugin add sniff@sniff
 opencode plugin add 'github:srobroek/sniff#main::path:dist/opencode'
 ```
 
-OpenCode loads Sniff as a native V2 plugin with the seven tools, the skill, and the `bloodhound` and `refactor-challenger` subagents. It needs no MCP server. Approvals appear as OpenCode permission prompts. See [OpenCode](docs/opencode.md) for configuration, approvals, and local development.
+OpenCode loads Sniff as a native V2 plugin with the seven tools, the skill, a `/sniff` command, and the `bloodhound` and `refactor-challenger` subagents. It needs no MCP server. Approvals appear as OpenCode permission prompts. See [OpenCode](docs/opencode.md) for configuration, approvals, and local development.
 
 
 ## Use Sniff

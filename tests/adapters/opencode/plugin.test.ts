@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
-import { anchorTarget, CONFIRM_ACTIONS, confirmSniffApproval, SNIFF_PLUGIN_ID, sniffOpenCodePlugin } from "../../../adapters/opencode/plugin.ts";
+import { anchorTarget, CONFIRM_ACTIONS, confirmSniffApproval, SNIFF_COMMAND, SNIFF_PLUGIN_ID, sniffOpenCodePlugin } from "../../../adapters/opencode/plugin.ts";
 import { intakeConfirmationText } from "../../../src/core/confirmation-text.ts";
 import { runLeaseStateForTests } from "../../../src/core/run-registry.ts";
 import { sniffToolInputSchemas } from "../../../src/core/tool-schemas.ts";
@@ -97,7 +97,41 @@ describe("registration", () => {
     }
     await cleanup();
     expect(host.tools.size).toBe(0);
-    expect(host.disposed).toEqual(["agent", "skill", "permission", "tool"]);
+    expect(host.commands.size).toBe(0);
+    expect(host.disposed).toEqual(["agent", "command", "skill", "permission", "tool"]);
+  });
+
+  test("/sniff sends the arguments with the sniff skill attached", async () => {
+    const { host, cleanup } = await load(project());
+    const command = host.commands.get(SNIFF_COMMAND);
+    if (!command) throw new Error("/sniff was not registered");
+    expect(command.description?.length ?? 0).toBeLessThanOrEqual(120);
+
+    await command.execute({ sessionID: "ses_cmd", prompt: { text: "src/auth for maintainability", files: [{ uri: "file:///x" }] }, delivery: "steer" });
+    expect(host.prompts).toEqual([{ sessionID: "ses_cmd", delivery: "steer", text: "src/auth for maintainability", files: [{ uri: "file:///x" }], skills: [{ id: "sniff" }] }]);
+
+    await command.execute({ sessionID: "ses_cmd", prompt: { text: "  ", skills: [{ id: "sniff" }, { id: "other" }] }, delivery: "queue" });
+    expect(host.prompts[1]?.text).toContain("Sniff code-smell audit");
+    expect(host.prompts[1]?.skills).toEqual([{ id: "other" }, { id: "sniff" }]);
+    expect(host.prompts[1]?.delivery).toBe("queue");
+
+    // A substituted default text has no spans, so kept attachments lose their mention offsets.
+    const span = { start: 0, end: 2, text: "  " };
+    await command.execute({
+      sessionID: "ses_cmd",
+      prompt: { text: "  ", files: [{ uri: "file:///a", mention: span }], agents: [{ name: "explore", mention: span }], skills: [{ id: "other", mention: span }] },
+      delivery: "steer",
+    });
+    expect(host.prompts[2]).toMatchObject({ files: [{ uri: "file:///a" }], agents: [{ name: "explore" }], skills: [{ id: "other" }, { id: "sniff" }] });
+    expect(JSON.stringify(host.prompts[2])).not.toContain("mention");
+
+    // The user's own text keeps its mentions.
+    await command.execute({ sessionID: "ses_cmd", prompt: { text: "@a.ts", files: [{ uri: "file:///a", mention: { start: 0, end: 5, text: "@a.ts" } }] }, delivery: "steer" });
+    expect(host.prompts[3]?.files).toEqual([{ uri: "file:///a", mention: { start: 0, end: 5, text: "@a.ts" } }]);
+
+    await cleanup();
+    await expect(command.execute({ sessionID: "ses_cmd", prompt: { text: "x" }, delivery: "steer" })).rejects.toThrow("unloaded");
+    expect(host.prompts).toHaveLength(4);
   });
 
   test("registers the shipped skill without replacing a user's own skill", async () => {
