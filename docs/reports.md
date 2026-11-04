@@ -33,7 +33,7 @@ Before Sniff creates a destination directory, save mode needs trusted confirmati
 - every relative artifact path and SHA-256 digest
 - the manifest identity
 
-A successful save atomically installs this layout under the authorized parent:
+A successful save atomically installs this layout under the authorized parent. Sniff fsyncs every file and the staging directories before the publishing rename, and the parent directory after it:
 
 ```text
 <report-id>/
