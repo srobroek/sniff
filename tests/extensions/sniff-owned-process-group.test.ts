@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,19 +6,25 @@ import { runCommand } from "../../src/core/install.ts";
 import { processAlive, type SpawnedProcess, terminateAndAwait } from "../../src/core/process-control.ts";
 
 const temps: string[] = [];
-/** Foreign PIDs this file started; each was validated before it was registered. */
-const strays = new Set<number>();
-afterAll(() => {
-  for (const pid of strays) {
-    if (!processAlive(pid)) continue;
-    try {
-      process.kill(pid, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-  }
-  for (const dir of temps) rmSync(dir, { recursive: true, force: true });
+/** Runs that may still be in flight; each is ended only through its own owned group. */
+const active = new Set<SpawnedProcess>();
+/**
+ * Cleanup never signals a remembered PID: a run still in flight is ended through its owned group,
+ * which signals only while its sentinel proves the group ID is still ours, and every helper process
+ * waits on a hold file in its temp directory, so removing the directory lets it exit on its own.
+ */
+afterEach(() => {
+  for (const spawned of active) spawned.group?.end();
+  active.clear();
+  for (const dir of temps.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+function track(onSpawn?: (spawned: SpawnedProcess) => void): (spawned: SpawnedProcess) => void {
+  return (spawned) => {
+    active.add(spawned);
+    onSpawn?.(spawned);
+  };
+}
 
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "sniff-owned-group-"));
@@ -26,7 +32,7 @@ function tempDir(): string {
   return dir;
 }
 
-/** A PID safe to signal from a test: a positive integer that is neither init nor this runner. */
+/** A PID reported by a child: a positive integer that is neither init nor this runner. */
 function foreignPid(text: string): number {
   const trimmed = text.trim();
   const pid = Number(trimmed);
@@ -45,9 +51,7 @@ async function until(condition: () => boolean, label: string, timeoutMs = 5_000)
 /** Waits for a ready file written atomically by a child and returns the PID it holds. */
 async function readyPid(path: string): Promise<number> {
   await until(() => existsSync(path), `ready file ${path}`);
-  const pid = foreignPid(readFileSync(path, "utf8"));
-  strays.add(pid);
-  return pid;
+  return foreignPid(readFileSync(path, "utf8"));
 }
 
 function processGroupOf(pid: number): number | null {
@@ -60,26 +64,31 @@ function processGroupOf(pid: number): number | null {
 function sentinelOf(spawned: SpawnedProcess | undefined): number {
   const pid = spawned?.group?.sentinelPid;
   if (pid === undefined) throw new Error("the spawned command has no owned process group");
-  const sentinel = foreignPid(String(pid));
-  strays.add(sentinel);
-  return sentinel;
+  return foreignPid(String(pid));
 }
 
-/** `sh` that writes its own PID to a ready file, then waits for a release file. */
-function waitingCommand(dir: string): { argv: string[]; ready: string; release: string } {
+/** A hold file: helper processes run while it exists and exit on their own once it is removed. */
+function holdFile(dir: string): string {
+  const hold = join(dir, "hold");
+  writeFileSync(hold, "");
+  return hold;
+}
+
+/** `sh` that writes its own PID to a ready file, then runs until its hold file is removed. */
+function waitingCommand(dir: string): { argv: string[]; ready: string; release: () => void } {
   const ready = join(dir, "ready");
-  const release = join(dir, "release");
-  const script = 'echo $$ > "$1.tmp" && mv "$1.tmp" "$1"; while [ ! -e "$2" ]; do sleep 0.01; done';
-  return { argv: ["sh", "-c", script, "sniff-test", ready, release], ready, release };
+  const hold = holdFile(dir);
+  const script = 'echo $$ > "$1.tmp" && mv "$1.tmp" "$1"; while [ -e "$2" ]; do sleep 0.01; done';
+  return { argv: ["sh", "-c", script, "sniff-test", ready, hold], ready, release: () => rmSync(hold, { force: true }) };
 }
 
 describe("owned process group", () => {
   test("keeps a sentinel in the command's group during a run and removes it afterwards", async () => {
     const { argv, ready, release } = waitingCommand(tempDir());
     let spawned: SpawnedProcess | undefined;
-    const pending = runCommand(argv, tmpdir(), process.env, 20_000, undefined, undefined, (handle) => {
+    const pending = runCommand(argv, tmpdir(), process.env, 20_000, undefined, undefined, track((handle) => {
       spawned = handle;
-    });
+    }));
     const leader = await readyPid(ready);
     expect(leader).toBe(spawned?.pid ?? -1);
     const sentinel = sentinelOf(spawned);
@@ -88,7 +97,7 @@ describe("owned process group", () => {
     // The command leads its own group and the sentinel is a member of it.
     expect(processGroupOf(leader)).toBe(leader);
     expect(processGroupOf(sentinel)).toBe(leader);
-    writeFileSync(release, "");
+    release();
     const result = await pending;
     expect(result.exitCode).toBe(0);
     await until(() => !processAlive(sentinel), "the sentinel to exit");
@@ -98,8 +107,9 @@ describe("owned process group", () => {
   test("signals the group only while the sentinel is alive and SIGKILLs a SIGTERM-ignoring member after the leader is reaped", async () => {
     const dir = tempDir();
     const ready = join(dir, "ready");
+    const hold = holdFile(dir);
     // The leader dies on SIGTERM; its same-group child ignores SIGTERM and must still be SIGKILLed.
-    const script = '(trap "" TERM; sh -c \'echo $PPID\' > "$1.tmp" && mv "$1.tmp" "$1"; while :; do sleep 1; done) </dev/null >/dev/null 2>&1 & wait';
+    const script = '(trap "" TERM; sh -c \'echo $PPID\' > "$1.tmp" && mv "$1.tmp" "$1"; while [ -e "$2" ]; do sleep 0.05; done) </dev/null >/dev/null 2>&1 & wait';
     const controller = new AbortController();
     let spawned: SpawnedProcess | undefined;
     const realKill = process.kill.bind(process);
@@ -118,9 +128,9 @@ describe("owned process group", () => {
       return realKill(pid, signal);
     }) as typeof process.kill);
     try {
-      const pending = runCommand(["sh", "-c", script, "sniff-test", ready], tmpdir(), process.env, 20_000, controller.signal, undefined, (handle) => {
+      const pending = runCommand(["sh", "-c", script, "sniff-test", ready, hold], tmpdir(), process.env, 20_000, controller.signal, undefined, track((handle) => {
         spawned = handle;
-      });
+      }));
       const child = await readyPid(ready);
       sentinel = sentinelOf(spawned);
       expect(processGroupOf(child)).toBe(spawned?.pid ?? -1);
@@ -141,10 +151,11 @@ describe("owned process group", () => {
   });
 
   test("a successful command leaves no same-group descendant behind", async () => {
-    const result = await runCommand(["sh", "-c", "sleep 30 </dev/null >/dev/null 2>&1 & echo $!"], tmpdir(), process.env, 20_000);
+    const hold = holdFile(tempDir());
+    const script = '(while [ -e "$1" ]; do sleep 0.05; done) </dev/null >/dev/null 2>&1 & echo $!';
+    const result = await runCommand(["sh", "-c", script, "sniff-test", hold], tmpdir(), process.env, 20_000, undefined, undefined, track());
     expect(result.exitCode).toBe(0);
     const descendant = foreignPid(result.stdout);
-    strays.add(descendant);
     await until(() => !processAlive(descendant), "the background descendant to be killed");
   });
 
@@ -207,9 +218,9 @@ describe("owned process group", () => {
   test("terminateAndAwait signals an owned group only while the sentinel is alive and never an unowned PID", async () => {
     const { argv, ready } = waitingCommand(tempDir());
     let spawned: SpawnedProcess | undefined;
-    const pending = runCommand(argv, tmpdir(), process.env, 20_000, undefined, undefined, (handle) => {
+    const pending = runCommand(argv, tmpdir(), process.env, 20_000, undefined, undefined, track((handle) => {
       spawned = handle;
-    });
+    }));
     await readyPid(ready);
     const sentinel = sentinelOf(spawned);
     if (!spawned) throw new Error("no spawned handle");
@@ -249,7 +260,7 @@ describe("owned process group", () => {
   test("a caller environment with shell startup knobs neither disables the supervisor nor reaches it", async () => {
     const dir = tempDir();
     const ready = join(dir, "ready");
-    const release = join(dir, "release");
+    const hold = holdFile(dir);
     const printer = join(dir, "startup.sh");
     writeFileSync(printer, "echo STARTUP-FILE-RAN\necho STARTUP-FILE-RAN >&2\n");
     const env: Record<string, string> = {
@@ -271,17 +282,17 @@ describe("owned process group", () => {
       "dash-name": "kept",
     };
     // Perl reads no shell variable, so it reports the environment the command really received.
-    const dump = 'open(my $fh, ">", "$ARGV[0].tmp") or die; print $fh $$; close($fh); rename("$ARGV[0].tmp", $ARGV[0]) or die; select(undef, undef, undef, 0.01) until -e $ARGV[1]; print map { "$_\\0$ENV{$_}\\0" } sort keys %ENV;';
+    const dump = 'open(my $fh, ">", "$ARGV[0].tmp") or die; print $fh $$; close($fh); rename("$ARGV[0].tmp", $ARGV[0]) or die; select(undef, undef, undef, 0.01) while -e $ARGV[1]; print map { "$_\\0$ENV{$_}\\0" } sort keys %ENV;';
     let spawned: SpawnedProcess | undefined;
-    const pending = runCommand(["perl", "-e", dump, ready, release], dir, env, 20_000, undefined, undefined, (handle) => {
+    const pending = runCommand(["perl", "-e", dump, ready, hold], dir, env, 20_000, undefined, undefined, track((handle) => {
       spawned = handle;
-    });
+    }));
     await until(() => existsSync(ready), "the command to start");
     // The supervisor ran: its sentinel is alive and owns the group.
     const sentinel = sentinelOf(spawned);
     expect(processAlive(sentinel)).toBe(true);
     expect(spawned?.group?.owned()).toBe(true);
-    writeFileSync(release, "");
+    rmSync(hold);
     const result = await pending;
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
@@ -304,13 +315,14 @@ describe("owned process group", () => {
     const dir = tempDir();
     const ready = join(dir, "ready");
     const leaderReady = join(dir, "leader");
+    const hold = holdFile(dir);
     const script = join(dir, "host.ts");
     const install = join(import.meta.dir, "..", "..", "src", "core", "install.ts");
     writeFileSync(script, [
       "import { renameSync, writeFileSync } from \"node:fs\";",
       `import { runCommand } from ${JSON.stringify(install)};`,
-      "const [ready, leaderReady] = process.argv.slice(2) as [string, string];",
-      "await runCommand([\"sh\", \"-c\", 'echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; exec sleep 30', \"sniff-test\", leaderReady], process.cwd(), process.env, 60_000, undefined, undefined, (spawned) => {",
+      "const [ready, leaderReady, hold] = process.argv.slice(2) as [string, string, string];",
+      "await runCommand([\"sh\", \"-c\", 'echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; while [ -e \"$2\" ]; do sleep 0.01; done', \"sniff-test\", leaderReady, hold], process.cwd(), process.env, 60_000, undefined, undefined, (spawned) => {",
       "  const publish = () => {",
       "    const sentinel = spawned.group?.sentinelPid;",
       "    if (sentinel === undefined) return void setTimeout(publish, 5);",
@@ -320,18 +332,19 @@ describe("owned process group", () => {
       "  publish();",
       "});",
     ].join("\n"));
-    const host = Bun.spawn([process.execPath, script, ready, leaderReady], { cwd: dir, stdout: "ignore", stderr: "inherit" });
+    const host = Bun.spawn([process.execPath, script, ready, leaderReady, hold], { cwd: dir, stdout: "ignore", stderr: "inherit" });
     try {
       const sentinel = await readyPid(ready);
-      const leader = await readyPid(leaderReady);
+      await readyPid(leaderReady);
       expect(processAlive(sentinel)).toBe(true);
       host.kill("SIGKILL");
       await host.exited;
       await until(() => !processAlive(sentinel), "the orphaned sentinel to exit");
-      // The orphaned command itself is outside this guarantee; end it so no process outlives the test.
-      if (processAlive(leader)) process.kill(leader, "SIGKILL");
     } finally {
+      // The orphaned command is outside this guarantee; it exits on its own once its hold is gone.
+      rmSync(hold, { force: true });
       if (host.exitCode === null && host.signalCode === null) host.kill("SIGKILL");
+      await host.exited;
     }
   });
 });

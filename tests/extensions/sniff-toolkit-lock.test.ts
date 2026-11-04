@@ -60,9 +60,10 @@ await withToolkitLock("core", process.env, runtime, async () => {
   try { mkdirSync(join(sync, "inside")); } catch { alone = false; mark("violation-" + name); }
   mark("entered-" + name);
   if (name === "spawner") {
-    // An installer child that outlives this process must not keep the lock alive.
-    const wait = 'while [ ! -e "$1" ]; do sleep 0.01; done';
-    void runCommand(["sh", "-c", 'echo $$ > "$2.tmp" && mv "$2.tmp" "$2"; ' + wait, "sniff-test", join(sync, "release-child"), join(sync, "child")], sync, process.env, 60_000);
+    // An installer child that outlives this process must not keep the lock alive. It runs while
+    // its hold file exists, so removing the sync directory ends it without signalling a PID.
+    const wait = 'while [ -e "$1" ]; do sleep 0.01; done';
+    void runCommand(["sh", "-c", 'echo $$ > "$2.tmp" && mv "$2.tmp" "$2"; ' + wait, "sniff-test", join(sync, "hold-child"), join(sync, "child")], sync, process.env, 60_000);
   }
   while (!existsSync(join(sync, "release-" + name))) await Bun.sleep(5);
   if (alone) rmSync(join(sync, "inside"), { recursive: true, force: true });
@@ -149,6 +150,8 @@ describe("toolkit install lock", () => {
     const sync = tempDir("sniff-toolkit-lock-sync-");
     const script = join(sync, "holder.ts");
     writeFileSync(script, LOCK_HOLDER);
+    const holdChild = join(sync, "hold-child");
+    writeFileSync(holdChild, "");
     const install = join(import.meta.dir, "..", "..", "src", "core", "install.ts");
     const holder = Bun.spawn([process.execPath, script, install, cache, sync, "spawner"], { stdout: "ignore", stderr: "inherit" });
     try {
@@ -161,8 +164,8 @@ describe("toolkit install lock", () => {
       }, { waitMs: 5_000 });
       expect(entered).toBe(true);
     } finally {
-      // The orphaned child exits on its own once released; no remembered PID is ever signalled.
-      writeFileSync(join(sync, "release-child"), "");
+      // The orphaned child exits on its own once its hold is gone; no remembered PID is signalled.
+      rmSync(holdChild, { force: true });
       if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL");
       await holder.exited;
     }
