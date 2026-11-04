@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { AnalyzerObservation } from "./analyzer-output.ts";
 import { canonicalJson, compareCodeUnits as compareText } from "./canonical-json.ts";
-import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, type SniffRunOwner } from "./run-owner.ts";
+import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, ownerSees, type SniffRunOwner } from "./run-owner.ts";
 
 export const ANALYZER_ARTIFACT_SCHEMA_VERSION = "1.0.0" as const;
 export const ANALYZER_ARTIFACT_CHUNK_BYTES = 64 * 1024;
@@ -213,13 +213,13 @@ function isContinuationByte(value: number): boolean {
 }
 /**
  * Reads one page through `owner`. Another owner's capability fails exactly like an unknown one;
- * omitting the owner is the trusted unscoped host view.
+ * omitting the owner reads as the process owner.
  */
 export function readAnalyzerArtifact(options: AnalyzerArtifactReadOptions, now = Date.now(), owner?: SniffRunOwner): AnalyzerArtifactReadResult {
   assertUsableOwner(owner);
   purgeExpired(now);
   const entry = analyzers.get(options.capability);
-  if (!entry || (owner !== undefined && entry.owner !== owner)) throw new Error("Unknown Sniff analyzer artifact capability");
+  if (!entry || !ownerSees(entry.owner, owner)) throw new Error("Unknown Sniff analyzer artifact capability");
   if (entry.analyzerResultId !== options.analyzerResultId) throw new Error("Sniff analyzer artifact capability does not match analyzer result ID");
   const relativePath = options.relativePath ?? entry.sourcePaths.get(options.sourcePath ?? "");
   if (!relativePath) throw new Error(`Unknown Sniff analyzer source path: ${options.sourcePath}`);

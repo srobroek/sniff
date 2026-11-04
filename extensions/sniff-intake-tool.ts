@@ -34,7 +34,7 @@ function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean, owner
 	};
 }
 
-/** Registers intake and cancel; `owner` scopes the runs. Omitted, leases go to the process owner and cancel uses the unscoped view. */
+/** Registers intake and cancel; `owner` scopes the runs, and omitted they use the process owner. */
 export default function sniffIntakeTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
 	pi.registerTool<TSchema, { readonly ok: boolean; readonly result?: SniffIntakePublicResult; readonly error?: string }>({
 		name: "sniff_intake",

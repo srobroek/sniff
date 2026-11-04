@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import sniffPlugin from "../../extensions/sniff-plugin.ts";
-import { readRunManifest } from "../../src/core/run-registry.ts";
+import { readRunManifest, runLeaseStateForTests } from "../../src/core/run-registry.ts";
 
 type ToolOutput = { readonly details: { readonly ok: boolean; readonly error?: string; readonly result?: { readonly lease?: { capability: string; manifestId: string } } } };
 type RegisteredTool = { readonly name: string; readonly execute: (id: string, params: unknown, signal: unknown, update: unknown, ctx: ExtensionContext) => Promise<ToolOutput> };
@@ -54,10 +54,11 @@ describe("OMP extension loads are separate run owners", () => {
 
     const crossLoad = await second.run("sniff_cancel", lease, ctx);
     expect(crossLoad.details).toEqual({ ok: false, error: "Unknown Sniff run capability" });
-    expect(readRunManifest(lease.capability, lease.manifestId).manifestId).toBe(lease.manifestId);
+    expect(runLeaseStateForTests(lease.capability)?.state).toBe("live");
+    expect(() => readRunManifest(lease.capability, lease.manifestId)).toThrow("Unknown Sniff run capability");
 
     await first.shutdown();
-    expect(() => readRunManifest(lease.capability, lease.manifestId)).toThrow("already cancelled (session shutdown)");
+    expect(runLeaseStateForTests(lease.capability)).toMatchObject({ state: "cancelled", reason: "session shutdown" });
     await second.shutdown();
   });
 });

@@ -57,7 +57,7 @@ function runtimeForContext(ctx: ExtensionContext): SniffReportRuntime {
     },
   };
 }
-/** Registers report and artifact reading; `owner` scopes the runs, and omitted they use the unscoped view. */
+/** Registers report and artifact reading; `owner` scopes the runs, and omitted they use the process owner. */
 export default function sniffReportTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_report",

@@ -3,7 +3,7 @@ import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { sniffOpenCodePlugin } from "../../../adapters/opencode/plugin.ts";
-import { readRunManifest } from "../../../src/core/run-registry.ts";
+import { readRunManifest, runLeaseStateForTests } from "../../../src/core/run-registry.ts";
 import { type FakeHost, fakeHost, toolContext } from "./fake-host.ts";
 
 setDefaultTimeout(30_000);
@@ -61,8 +61,9 @@ describe("OpenCode instances are separate run owners", () => {
       await expect(tool(second.host, "sniff_cancel").execute(run, toolContext())).rejects.toThrow("Unknown Sniff run capability");
       const report = { generatedAt: "2026-09-11T00:00:00.000Z", target: { ...reportTarget, languages: ["TypeScript"] }, headline: "Owner fixture.", findings: [], coverage: [], suppressionCount: 0, systemicPatterns: [] };
       await expect(tool(second.host, "sniff_report").execute({ ...run, report }, toolContext())).rejects.toThrow("Unknown Sniff run capability");
-      // The rejected calls left the issuing instance's lease live and usable.
-      expect(readRunManifest(run.capability, run.manifestId).manifestId).toBe(run.manifestId);
+      // The rejected calls left the issuing instance's lease live, and an ownerless lookup cannot see it.
+      expect(runLeaseStateForTests(run.capability)?.state).toBe("live");
+      expect(() => readRunManifest(run.capability, run.manifestId)).toThrow("Unknown Sniff run capability");
 
       const rendered = await tool(first.host, "sniff_report").execute({ ...run, report }, toolContext());
       const metadata = JSON.parse(String(rendered.content).split("\n")[0] ?? "{}") as { reportId: string; readCapability: string };

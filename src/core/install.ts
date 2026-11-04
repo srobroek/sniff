@@ -1027,7 +1027,7 @@ export type SniffAnalyzerRunOptions = {
 	capability: string;
 	manifestId: string;
 	analyzer: string;
-	/** The owner that issued the capability; omitted, the capability resolves in the unscoped host view. */
+	/** The owner that issued the capability; omitted, the process owner. */
 	owner?: SniffRunOwner;
 	runtime?: SniffInstallRuntime;
 	signal?: AbortSignal;

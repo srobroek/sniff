@@ -25,6 +25,7 @@ import {
   registerActiveProcess,
   releaseAllRunLeases,
   releaseRunLease,
+  runLeaseStateForTests,
   unregisterActiveProcess,
   validateReportCoverage,
   validateReportManifest,
@@ -324,10 +325,34 @@ describe("owner disposal", () => {
     expect(errorOf(() => lease(mine))).toBe("Sniff run owner was disposed");
     expect(errorOf(() => registerReportArtifacts(artifacts, undefined, mine))).toBe("Sniff run owner was disposed");
     expect(errorOf(() => readReportArtifact({ capability: readCapability, reportId: artifacts.report.reportId, relativePath: "index.json" }, undefined, mine))).toBe("Sniff run owner was disposed");
-    // Even the trusted unscoped view finds nothing the disposed owner held.
+    // Nothing the disposed owner held survives, and an ownerless call never saw it in the first place.
     expect(errorOf(() => readReportArtifact({ capability: readCapability, reportId: artifacts.report.reportId, relativePath: "index.json" }))).toBe("Unknown Sniff report artifact capability");
     expect(errorOf(() => readAnalyzerArtifact({ capability: analyzerCapability, analyzerResultId: analyzer.analyzerResultId, relativePath: "index.json" }))).toBe("Unknown Sniff analyzer artifact capability");
-    expect(errorOf(() => readRunManifest(run.capability, run.manifestId))).toContain("already cancelled");
+    expect(errorOf(() => readRunManifest(run.capability, run.manifestId))).toBe("Unknown Sniff run capability");
+    expect(runLeaseStateForTests(run.capability)).toEqual({ state: "cancelled", reason: "run owner disposed", ownerId: mine.id });
+  });
+
+  test("an ownerless call sees only the process owner's runs and artifacts", async () => {
+    const plugin = owner("plugin");
+    const owned = lease(plugin);
+    expect(errorOf(() => readRunManifest(owned.capability, owned.manifestId))).toBe("Unknown Sniff run capability");
+    expect(errorOf(() => cancelRunLease(owned.capability, owned.manifestId))).toBe("Unknown Sniff run capability");
+    expect(runLeaseStateForTests(owned.capability)).toEqual({ state: "live", ownerId: plugin.id });
+    const report = reportArtifacts("plugin-owned report");
+    const reportCapability = registerReportArtifacts(report, undefined, plugin);
+    expect(errorOf(() => readReportArtifact({ capability: reportCapability, reportId: report.report.reportId, relativePath: "index.json" }))).toBe("Unknown Sniff report artifact capability");
+    const analyzer = createAnalyzerArtifacts("lizard:complexity", []);
+    const analyzerCapability = registerAnalyzerArtifacts(analyzer, undefined, plugin);
+    expect(errorOf(() => readAnalyzerArtifact({ capability: analyzerCapability, analyzerResultId: analyzer.analyzerResultId, relativePath: "index.json" }))).toBe("Unknown Sniff analyzer artifact capability");
+
+    // An ownerless issuance belongs to the process owner, which ownerless calls see and others do not.
+    const root = targetRoot();
+    const manifest = createRunManifest({ target: validateResolvedTarget({ kind: "files", label: "a.ts", root, files: ["a.ts"], materialization: "in-place" }), intent: "audit", scopeMode: "full" });
+    const processRun = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined });
+    expect(readRunManifest(processRun.capability, processRun.manifestId).manifestId).toBe(processRun.manifestId);
+    expect(errorOf(() => readRunManifest(processRun.capability, processRun.manifestId, plugin))).toBe("Unknown Sniff run capability");
+    await cancelRunLease(processRun.capability, processRun.manifestId);
+    expect(errorOf(() => readRunManifest(processRun.capability, processRun.manifestId))).toContain("already cancelled");
   });
 
   test("an object that is not an issued owner is refused", () => {
@@ -372,6 +397,6 @@ describe("owner disposal", () => {
     expect(second.disposed).toBe(true);
     expect(failing.releases()).toBe(1);
     expect(healthy.releases()).toBe(1);
-    expect(errorOf(() => readRunManifest(healthy.capability, healthy.manifestId))).toContain("already cancelled (SIGTERM: shutdown)");
+    expect(runLeaseStateForTests(healthy.capability)).toEqual({ state: "cancelled", reason: "SIGTERM: shutdown", ownerId: second.id });
   });
 });

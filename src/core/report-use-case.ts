@@ -40,7 +40,7 @@ export type SniffReportRuntime = {
 };
 export interface SniffReportToolOptions {
   capability: string;
-  /** The owner that issued the capability; omitted, the capability resolves in the unscoped host view. */
+  /** The owner that issued the capability; omitted, the process owner. */
   owner?: SniffRunOwner;
   manifestId: string;
   mode?: SniffReportMode;

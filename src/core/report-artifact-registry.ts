@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { canonicalJson } from "./canonical-json.ts";
 import type { ReportArtifactDescriptor, ReportArtifacts } from "./report.ts";
-import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, type SniffRunOwner } from "./run-owner.ts";
+import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, ownerSees, type SniffRunOwner } from "./run-owner.ts";
 
 export const REPORT_ARTIFACT_CHUNK_BYTES = 64 * 1024;
 /** Per-owner entry and byte budgets: one owner's registrations never evict another's. */
@@ -123,13 +123,13 @@ function isContinuationByte(value: number): boolean {
 
 /**
  * Reads one page through `owner`. Another owner's capability fails exactly like an unknown one;
- * omitting the owner is the trusted unscoped host view.
+ * omitting the owner reads as the process owner.
  */
 export function readReportArtifact(options: ReportArtifactReadOptions, now = Date.now(), owner?: SniffRunOwner): ReportArtifactReadResult {
   assertUsableOwner(owner);
   purgeExpired(now);
   const entry = reports.get(options.capability);
-  if (!entry || (owner !== undefined && entry.owner !== owner)) throw new Error("Unknown Sniff report artifact capability");
+  if (!entry || !ownerSees(entry.owner, owner)) throw new Error("Unknown Sniff report artifact capability");
   if (entry.reportId !== options.reportId) throw new Error("Sniff report artifact capability does not match report ID");
   const descriptor = entry.descriptors.get(options.relativePath);
   const buffer = entry.contents.get(options.relativePath);

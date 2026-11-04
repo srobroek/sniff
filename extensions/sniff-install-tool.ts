@@ -59,7 +59,7 @@ async function confirmedInstall(params: SniffInstallParams, signal: AbortSignal 
   return runSniffInstall({ ...options, mode: "install" });
 }
 
-/** Registers install, analyzer, and artifact reading; `owner` scopes the runs, and omitted they use the unscoped view. */
+/** Registers install, analyzer, and artifact reading; `owner` scopes the runs, and omitted they use the process owner. */
 export default function sniffInstallTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
   pi.registerTool({
     name: "sniff_install_tools",

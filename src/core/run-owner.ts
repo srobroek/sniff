@@ -34,6 +34,8 @@ type OwnerScope = {
 
 const scopes = new WeakMap<SniffRunOwner, OwnerScope>();
 const liveOwners = new Set<SniffRunOwner>();
+/** Every process owner ever created; a disposed one is replaced, and its terminal records stay its successors'. */
+const processOwners = new WeakSet<SniffRunOwner>();
 let processOwner: SniffRunOwner | undefined;
 
 const DISPOSED_REASON = "run owner disposed";
@@ -78,8 +80,20 @@ export function createSniffRunOwner(options: { readonly label?: string } = {}): 
  * After it is disposed (for example by process shutdown) the next call creates a fresh one.
  */
 export function defaultSniffRunOwner(): SniffRunOwner {
-  processOwner ??= createSniffRunOwner({ label: "process" });
+  if (!processOwner) {
+    processOwner = createSniffRunOwner({ label: "process" });
+    processOwners.add(processOwner);
+  }
   return processOwner;
+}
+
+/**
+ * Whether state registered under `recordOwner` is visible to a call made under `caller`. A call
+ * that names no owner acts as the process owner: it sees only process-owned state, never another
+ * owner's, so an adapter that forgets its owner fails closed.
+ */
+export function ownerSees(recordOwner: SniffRunOwner, caller: SniffRunOwner | undefined): boolean {
+  return caller === undefined ? processOwners.has(recordOwner) : recordOwner === caller;
 }
 
 function liveScope(owner: SniffRunOwner): OwnerScope {
@@ -89,7 +103,7 @@ function liveScope(owner: SniffRunOwner): OwnerScope {
   return scope;
 }
 
-/** Throws unless `owner` is an issued, undisposed owner; `undefined` is the trusted unscoped view. */
+/** Throws unless `owner` is an issued, undisposed owner; `undefined` stands for the process owner. */
 export function assertUsableOwner(owner: SniffRunOwner | undefined): void {
   if (owner !== undefined) liveScope(owner);
 }

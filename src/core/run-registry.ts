@@ -6,7 +6,7 @@ import { recipeTargetSeparator, SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe
 import { stableJson } from "./canonical-json.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
-import { assertUsableOwner, disposeAllSniffRunOwners, issuingOwner, MAX_LIVE_LEASES_PER_OWNER, type OwnerResource, ownerResource, type SniffRunOwner } from "./run-owner.ts";
+import { assertUsableOwner, disposeAllSniffRunOwners, issuingOwner, MAX_LIVE_LEASES_PER_OWNER, type OwnerResource, ownerResource, ownerSees, type SniffRunOwner } from "./run-owner.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
 
 const LEASE_TTL_MS = 60 * 60 * 1_000;
@@ -66,8 +66,9 @@ export type AnalyzerRunAuthorization = {
 };
 
 /**
- * Every live lease by capability, for the unscoped host view; each record names its owner, and an
- * owner-scoped lookup sees only its own. Terminal records keep replay evidence the same way.
+ * Every live lease by capability. Each record names its owner and a lookup sees only its own
+ * owner's records (ownerless calls act as the process owner). Terminal records keep replay
+ * evidence the same way.
  */
 const activeLeases = new Map<string, LeaseRecord>();
 const terminalLeases = new Map<string, TerminalRecord>();
@@ -99,11 +100,6 @@ function ownerLeaseState(owner: SniffRunOwner): OwnerLeaseState {
       },
     };
   });
-}
-
-/** Whether a record owned by `recordOwner` is visible to a call under `owner`; `undefined` is the trusted unscoped view. */
-function visibleTo(recordOwner: SniffRunOwner, owner: SniffRunOwner | undefined): boolean {
-  return owner === undefined || recordOwner === owner;
 }
 
 function rememberTerminal(capability: string, owner: SniffRunOwner, state: TerminalState, reason?: string): void {
@@ -169,9 +165,9 @@ function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: strin
 function activeLease(capability: string, manifestId: string, owner: SniffRunOwner | undefined): LeaseRecord {
   assertUsableOwner(owner);
   const record = activeLeases.get(capability);
-  if (!record || !visibleTo(record.owner, owner)) {
+  if (!record || !ownerSees(record.owner, owner)) {
     const terminal = terminalLeases.get(capability);
-    throw new Error(terminal && visibleTo(terminal.owner, owner) ? `Sniff run capability was already ${terminal.state}${terminal.reason ? ` (${terminal.reason})` : ""}` : "Unknown Sniff run capability");
+    throw new Error(terminal && ownerSees(terminal.owner, owner) ? `Sniff run capability was already ${terminal.state}${terminal.reason ? ` (${terminal.reason})` : ""}` : "Unknown Sniff run capability");
   }
   if (record.manifestId !== manifestId) throw new Error("Sniff run capability does not match the manifest ID");
   if (record.now() >= record.expiresAt) {
@@ -321,7 +317,7 @@ export function authorizeAnalyzerRun(capability: string, manifestId: string, ana
 /** The live record for a capability when it belongs to `owner` and the manifest; never throws. */
 function ownedRecord(capability: string, manifestId: string, owner: SniffRunOwner | undefined): LeaseRecord | undefined {
   const record = activeLeases.get(capability);
-  return record !== undefined && record.manifestId === manifestId && visibleTo(record.owner, owner) ? record : undefined;
+  return record !== undefined && record.manifestId === manifestId && ownerSees(record.owner, owner) ? record : undefined;
 }
 
 /**
@@ -448,4 +444,16 @@ export function finalizeRunLease(capability: string, manifestId: string, owner?:
  */
 export function releaseAllRunLeases(reason: string): Promise<void> {
   return disposeAllSniffRunOwners(boundedReason(reason));
+}
+
+/**
+ * Test-only: the state of any lease, whichever owner issued it, so a test can observe a lease
+ * whose owner it cannot reach (one held inside an adapter). It exposes no manifest and grants no
+ * capability; production code must use the owner-scoped lookups.
+ */
+export function runLeaseStateForTests(capability: string): { readonly state: "live" | TerminalState; readonly reason?: string; readonly ownerId: string } | undefined {
+  const record = activeLeases.get(capability);
+  if (record) return { state: "live", ownerId: record.owner.id };
+  const terminal = terminalLeases.get(capability);
+  return terminal ? { state: terminal.state, ...(terminal.reason ? { reason: terminal.reason } : {}), ownerId: terminal.owner.id } : undefined;
 }
