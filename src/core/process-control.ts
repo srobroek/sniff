@@ -1,6 +1,6 @@
 /** Process-group ownership and termination shared by the install runtime and the run registry. */
-import { accessSync, closeSync, constants, readSync, statSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { accessSync, closeSync, constants, readSync, realpathSync, statSync } from "node:fs";
+import { basename, isAbsolute, resolve } from "node:path";
 
 export type SpawnedProcess = {
   readonly pid: number;
@@ -35,17 +35,60 @@ const SHELL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SHELL_EXPORTED = ["PWD", "OLDPWD", "SHLVL", "_"];
 
 /**
- * Supervisor run as `/bin/sh -c SUPERVISOR sniff-supervisor <NAME=value...> <argv...>`. Before the
- * real command runs it forks a sentinel into the same process group, through an intermediate
- * subshell so the command never inherits an unknown child. The sentinel ignores SIGTERM/SIGHUP/
- * SIGINT, has stdio on /dev/null so it never holds a capture pipe, and keeps only the control
- * socket on fd 3: it reports its PID there and blocks reading it, so it exits on its own once Sniff
- * closes the socket or dies. The leader then exec's `env`, with fd 3 closed, which drops what the
- * shell exported on its own, restores the caller's shell variables and exec's the command. The
- * command thus keeps the leader PID, its argv, and exactly the caller's environment.
+ * Forks the sentinel into the leader's process group, through an intermediate subshell so the
+ * command never inherits an unknown child. The sentinel ignores SIGTERM/SIGHUP/SIGINT, has stdio on
+ * /dev/null so it never holds a capture pipe, and keeps only the control socket on fd 3: it reports
+ * its PID there and blocks reading it, so it exits on its own once Sniff closes the socket or dies.
+ * The supervisors use no shell variable of their own, so they never clobber an exported one.
  */
-const SUPERVISOR = `( { trap '' TERM HUP INT; read -r _ <&3; } </dev/null >/dev/null 2>&1 & echo "$!" >&3 ); exec /usr/bin/env ${SHELL_EXPORTED.map((name) => `-u ${name}`).join(" ")} -- "$@" 3>&-`;
+const SENTINEL = `( { trap '' TERM HUP INT; read -r _ <&3; } </dev/null >/dev/null 2>&1 & echo "$!" >&3 )`;
+
+/**
+ * Supervisor for any POSIX sh, run as `sh -c VIA_ENV sniff-supervisor <NAME=value...> <argv...>`.
+ * After the sentinel, the leader exec's `env` with fd 3 closed; `env` drops what the shell exported
+ * on its own, restores the caller's shell variables and exec's the command.
+ */
+const VIA_ENV = `${SENTINEL}; exec /usr/bin/env ${SHELL_EXPORTED.map((name) => `-u ${name}`).join(" ")} -- "$@" 3>&-`;
+
+/**
+ * Supervisor for dash, which needs no `env` hop: of the variables it maintains, dash exports only
+ * PWD on its own, which it may unset, and it exports any identifier verbatim except OPTIND, which it
+ * validates as a number. The leader unsets PWD, exports each leading `NAME=value` operand and
+ * exec's the rest with fd 3 closed. A command name never contains `=`, so the first operand without
+ * one starts argv.
+ */
+const IN_DASH = `${SENTINEL}; unset PWD; while [ "$#" -gt 0 ]; do case $1 in *=*) export "$1"; shift ;; *) break ;; esac; done; exec "$@" 3>&-`;
 const SUPERVISOR_NAME = "sniff-supervisor";
+
+type SupervisorShell = { readonly path: string; readonly dash: boolean };
+
+let supervisorShellChoice: SupervisorShell | undefined;
+
+function isDash(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return basename(realpathSync(path)) === "dash";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The shell that runs the supervisor, chosen once per process. dash is preferred: it starts much
+ * faster than bash, which is `/bin/sh` on macOS and on some Linux distributions, and it restores the
+ * caller's environment without an `env` exec. Without dash, `/bin/sh` runs the portable supervisor.
+ */
+function supervisorShell(): SupervisorShell {
+  if (supervisorShellChoice) return supervisorShellChoice;
+  const dash = ["/bin/dash", "/bin/sh"].find(isDash);
+  supervisorShellChoice = dash ? { path: dash, dash: true } : { path: "/bin/sh", dash: false };
+  return supervisorShellChoice;
+}
+
+/** Test seam: forces the portable `/bin/sh` supervisor, or restores automatic selection. */
+export function setSupervisorShellForTests(choice?: "portable"): void {
+  supervisorShellChoice = choice === "portable" ? { path: "/bin/sh", dash: false } : undefined;
+}
 
 /**
  * The process group of a spawned leader, pinned by a Sniff-owned sentinel member. The kernel never
@@ -186,26 +229,37 @@ function assertSpawnable(executable: string | undefined, cwd: string, env: Spawn
  * assignments `env` restores before the command runs: shell variables, and names a shell might not
  * pass through. Together they are exactly the caller's environment.
  */
-function splitEnvironment(env: SpawnEnvironment): { readonly shell: Record<string, string>; readonly restored: string[] } {
+function splitEnvironment(env: SpawnEnvironment): { readonly shell: Record<string, string>; readonly restored: string[]; readonly dashRestorable: boolean } {
   const shell: Record<string, string> = {};
   const restored: string[] = [];
+  let dashRestorable = true;
   for (const [name, value] of Object.entries(env)) {
     if (value === undefined || name.length === 0) continue;
-    if (SHELL_IDENTIFIER.test(name) && !SHELL_VARIABLE.test(name)) shell[name] = value;
-    else restored.push(`${name}=${value}`);
+    const identifier = SHELL_IDENTIFIER.test(name);
+    if (identifier && !SHELL_VARIABLE.test(name)) {
+      shell[name] = value;
+      continue;
+    }
+    restored.push(`${name}=${value}`);
+    // dash drops names that are not identifiers on import and cannot export them, and rejects a
+    // non-numeric OPTIND; such an environment takes the `env` route.
+    if (!identifier || name === "OPTIND") dashRestorable = false;
   }
-  return { shell, restored };
+  return { shell, restored, dashRestorable };
 }
 
 /**
  * Spawns `argv` as the leader of a new session and process group, with a sentinel that keeps the
  * group ID owned until `group.release()`. The leader is the command itself after the supervisor
- * shell and `env` exec it, so its PID, argv, environment, exit code and signal match a direct spawn.
+ * shell (and, without dash, `env`) exec it, so its PID, argv, environment, exit code and signal
+ * match a direct spawn.
  */
 export function spawnInOwnedGroup(argv: readonly string[], options: { readonly cwd: string; readonly env: SpawnEnvironment }) {
   assertSpawnable(argv[0], options.cwd, options.env);
-  const { shell, restored } = splitEnvironment(options.env);
-  const proc = Bun.spawn(["/bin/sh", "-c", SUPERVISOR, SUPERVISOR_NAME, ...restored, ...argv], {
+  const { shell, restored, dashRestorable } = splitEnvironment(options.env);
+  const supervisor = supervisorShell();
+  const script = supervisor.dash && dashRestorable ? IN_DASH : VIA_ENV;
+  const proc = Bun.spawn([supervisor.path, "-c", script, SUPERVISOR_NAME, ...restored, ...argv], {
     cwd: options.cwd,
     env: shell,
     stdio: ["ignore", "pipe", "pipe", "socket-fd"],

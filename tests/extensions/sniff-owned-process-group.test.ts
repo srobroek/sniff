@@ -1,9 +1,9 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../../src/core/install.ts";
-import { processAlive, type SpawnedProcess, terminateAndAwait } from "../../src/core/process-control.ts";
+import { processAlive, type SpawnedProcess, setSupervisorShellForTests, terminateAndAwait } from "../../src/core/process-control.ts";
 
 const temps: string[] = [];
 /** Runs that may still be in flight; each is ended only through its own owned group. */
@@ -82,7 +82,11 @@ function waitingCommand(dir: string): { argv: string[]; ready: string; release: 
   return { argv: ["sh", "-c", script, "sniff-test", ready, hold], ready, release: () => rmSync(hold, { force: true }) };
 }
 
-describe("owned process group", () => {
+/** Every guarantee holds with dash, chosen automatically where present, and with the portable `/bin/sh` supervisor. */
+for (const shell of ["auto", "portable"] as const) describe(`owned process group (${shell} supervisor shell)`, () => {
+  beforeAll(() => setSupervisorShellForTests(shell === "portable" ? "portable" : undefined));
+  afterAll(() => setSupervisorShellForTests());
+
   test("keeps a sentinel in the command's group during a run and removes it afterwards", async () => {
     const { argv, ready, release } = waitingCommand(tempDir());
     let spawned: SpawnedProcess | undefined;
@@ -257,7 +261,8 @@ describe("owned process group", () => {
     await until(() => !processAlive(sentinel), "the sentinel to exit");
   });
 
-  test("a caller environment with shell startup knobs neither disables the supervisor nor reaches it", async () => {
+  /** Runs a command under `extra` knobs and checks the supervisor ran and the command saw exactly the caller's environment. */
+  async function expectIsolatedEnvironment(extra: (dir: string, printer: string) => Record<string, string>): Promise<void> {
     const dir = tempDir();
     const ready = join(dir, "ready");
     const hold = holdFile(dir);
@@ -265,21 +270,7 @@ describe("owned process group", () => {
     writeFileSync(printer, "echo STARTUP-FILE-RAN\necho STARTUP-FILE-RAN >&2\n");
     const env: Record<string, string> = {
       ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
-      SHELLOPTS: "noexec:xtrace",
-      BASHOPTS: "nullglob",
-      BASH_ENV: printer,
-      ENV: printer,
-      IFS: "x",
-      CDPATH: join(dir, "nowhere"),
-      POSIXLY_CORRECT: "1",
-      OPTIND: "not-a-number",
-      PS4: "TRACE ",
-      "BASH_FUNC_read%%": "() { return 0; }",
-      PWD: "/caller/pwd",
-      OLDPWD: "/caller/oldpwd",
-      SHLVL: "7",
-      _: "/caller/underscore",
-      "dash-name": "kept",
+      ...extra(dir, printer),
     };
     // Perl reads no shell variable, so it reports the environment the command really received.
     const dump = 'open(my $fh, ">", "$ARGV[0].tmp") or die; print $fh $$; close($fh); rename("$ARGV[0].tmp", $ARGV[0]) or die; select(undef, undef, undef, 0.01) while -e $ARGV[1]; print map { "$_\\0$ENV{$_}\\0" } sort keys %ENV;';
@@ -301,6 +292,37 @@ describe("owned process group", () => {
     const received: Record<string, string> = {};
     for (let index = 0; index + 1 < fields.length; index += 2) received[fields[index] ?? ""] = fields[index + 1] ?? "";
     expect(received).toEqual(env);
+  }
+
+  test("shell startup knobs in the caller's environment neither disable the supervisor nor reach it", async () => {
+    await expectIsolatedEnvironment((dir, printer) => ({
+      SHELLOPTS: "noexec:xtrace",
+      BASHOPTS: "nullglob",
+      BASH_ENV: printer,
+      ENV: printer,
+      IFS: "x",
+      CDPATH: join(dir, "nowhere"),
+      POSIXLY_CORRECT: "1",
+      PS4: "TRACE ",
+      TMOUT: "1",
+      PWD: "/caller/pwd",
+      OLDPWD: "/caller/oldpwd",
+      SHLVL: "7",
+      _: "/caller/underscore",
+      LINENO: "not-a-line",
+      PPID: "not-a-pid",
+    }));
+  });
+
+  test("names dash cannot import or export still reach the command exactly", async () => {
+    await expectIsolatedEnvironment((_dir, printer) => ({
+      SHELLOPTS: "noexec",
+      BASH_ENV: printer,
+      OPTIND: "not-a-number",
+      "BASH_FUNC_read%%": "() { return 0; }",
+      "dash-name": "kept",
+      PWD: "/caller/pwd",
+    }));
   });
 
   test("the command receives exactly the caller's environment, not the supervisor shell's", async () => {
@@ -346,5 +368,34 @@ describe("owned process group", () => {
       if (host.exitCode === null && host.signalCode === null) host.kill("SIGKILL");
       await host.exited;
     }
+  });
+});
+
+describe("supervisor shell selection", () => {
+  afterEach(() => setSupervisorShellForTests());
+
+  /** The shell and script the next command's supervisor was spawned with. */
+  async function supervisorOf(env: Record<string, string | undefined>): Promise<{ shell: string; viaEnv: boolean }> {
+    const spawn = spyOn(Bun, "spawn");
+    try {
+      const result = await runCommand(["true"], tmpdir(), env, 20_000, undefined, undefined, track());
+      expect(result.exitCode).toBe(0);
+      const argv = spawn.mock.calls[0]?.[0] as string[] | undefined;
+      return { shell: argv?.[0] ?? "", viaEnv: (argv?.[2] ?? "").includes("/usr/bin/env") };
+    } finally {
+      spawn.mockRestore();
+    }
+  }
+
+  test("prefers dash, which restores the environment itself, and falls back to /bin/sh with env", async () => {
+    setSupervisorShellForTests();
+    const dash = existsSync("/bin/dash");
+    const automatic = await supervisorOf(process.env);
+    if (dash) expect(automatic).toEqual({ shell: "/bin/dash", viaEnv: false });
+    // OPTIND and names that are not identifiers are beyond dash's export, so they take the env route.
+    expect((await supervisorOf({ ...process.env, OPTIND: "1" })).viaEnv).toBe(true);
+    expect((await supervisorOf({ ...process.env, "dash-name": "kept" })).viaEnv).toBe(true);
+    setSupervisorShellForTests("portable");
+    expect(await supervisorOf(process.env)).toEqual({ shell: "/bin/sh", viaEnv: true });
   });
 });
