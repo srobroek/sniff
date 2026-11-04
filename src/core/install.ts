@@ -37,7 +37,7 @@ import {
   registerActiveProcess,
   unregisterActiveProcess,
 } from "./run-registry.ts";
-import type { HistoryWindow } from "./target.ts";
+import { type CapturedHistoryWindow, EMPTY_TREE, type HistoryWindow, isCapturedWindow } from "./target.ts";
 
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
@@ -1105,18 +1105,34 @@ function validExitContract(codes: readonly number[]): boolean {
 	return codes.length > 0 && codes.includes(0) && new Set(codes).size === codes.length && codes.every((code) => Number.isInteger(code) && code >= 0 && code <= 255);
 }
 
+/** Largest confirmed commit set passed to git as explicit revisions; bigger sets would risk the argv limit. */
+const GITLEAKS_EXPLICIT_COMMIT_LIMIT = 1_000;
+
 /**
- * Bounds a Gitleaks history scan to a revision range. Only a window that names refs or releases can
- * bound the walk; a context-aware default carries no refs and stays unbounded on purpose.
+ * Bounds a Gitleaks history scan by its window. A captured selection scans exactly its confirmed commits
+ * (`--no-walk=unsorted <commits>`); a set too large for argv falls back to the revision range and says so.
+ * A range base that is absent or the empty tree is not a revision, so the walk starts from the head alone.
+ * A context-aware default carries no refs and stays unbounded on purpose.
  */
-function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | undefined): { readonly args: string[]; readonly bounded: boolean } {
-  const logOpts = window === undefined ? ""
-    : window.kind === "refs" ? `${window.base}..${window.head}`
+function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | CapturedHistoryWindow | undefined): { readonly args: string[]; readonly bounded: boolean; readonly approximate?: boolean } {
+  const range = (base: string | undefined, head: string) => (base && base !== EMPTY_TREE ? `${base}..${head}` : head);
+  let logOpts = "";
+  let approximate = false;
+  if (window && isCapturedWindow(window)) {
+    if (window.commits.length === 0) logOpts = `--max-count=0 ${window.head}`;
+    else if (window.commits.length <= GITLEAKS_EXPLICIT_COMMIT_LIMIT) logOpts = `--no-walk=unsorted ${window.commits.join(" ")}`;
+    else {
+      logOpts = window.base === EMPTY_TREE ? `--max-count=${window.commits.length} ${window.head}` : range(window.base, window.head);
+      approximate = true;
+    }
+  } else if (window) {
+    logOpts = window.kind === "refs" ? range(window.base, window.head)
       : window.kind === "since-date" ? `--since=${window.date}${window.head ? ` ${window.head}` : ""}`
         : window.kind === "last-commits" ? `-${window.count}${window.head ? ` ${window.head}` : ""}`
-          : window.kind === "since-release" ? `${window.release}..${window.head ?? "HEAD"}`
-            : window.kind === "previous-release" ? `${window.release ?? "HEAD~1"}..${window.head ?? "HEAD"}` : "";
-  return logOpts ? { args: [...args, "--log-opts", logOpts], bounded: true } : { args: [...args], bounded: false };
+          : window.kind === "since-release" ? range(window.release, window.head ?? "HEAD")
+            : window.kind === "previous-release" ? range(window.release ?? "HEAD~1", window.head ?? "HEAD") : "";
+  }
+  return logOpts ? { args: [...args, "--log-opts", logOpts], bounded: true, ...(approximate ? { approximate } : {}) } : { args: [...args], bounded: false };
 }
 
 /** Maximum UTF-8 bytes of analyzer stderr quoted in a failed run's report. */
@@ -1261,7 +1277,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
   const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
   const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
   const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
-  const historyNote = history && !history.bounded ? " (unbounded history scan)" : "";
+  const historyNote = history && !history.bounded ? " (unbounded history scan)" : history?.approximate ? " (approximate history range: confirmed commit set too large to list)" : "";
   const timeoutReason = authorization.remainingBudgetMs < ANALYZER_TIMEOUT_MS
     ? `analyzer exhausted the run's remaining ${Math.max(1, Math.round(authorization.remainingBudgetMs / 1_000))}s budget (manifest maxMinutes or lease lifetime)`
     : `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock`;

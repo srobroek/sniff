@@ -981,6 +981,38 @@ describe("adaptive runtime boundaries", () => {
     await cancelRunLease(unbounded.lease.capability, unbounded.lease.manifestId);
   });
 
+  test("gitleaks scans exactly the confirmed commits of a history window, including a window that reaches the root commit", async () => {
+    for (const [total, count, expected] of [[2, 10, 2], [3, 2, 2], [3, 1, 1]] as const) {
+      const local = repository();
+      for (let index = 0; index < total; index += 1) {
+        writeFileSync(join(local.root, `f${index}.ts`), `${index}\n`);
+        local.git("add", "-A");
+        local.git("commit", "-qm", `c${index}`);
+      }
+      const result = await runSniffIntakeTool({ input: {
+        target: { kind: "history", rootOrRepository: local.root, window: { kind: "last-commits", count } },
+        intent: "history",
+        scopeMode: "full",
+        objectives: ["correctness-and-resilience"],
+        budget: { maxMinutes: 5 },
+      } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+      if (!result.manifest || !result.lease) throw new Error("history intake produced no lease");
+      const calls: AnalyzerCall[] = [];
+      const run = await runSniffAnalyzer({ capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
+      const argv = calls.at(-1)?.argv ?? [];
+      const logOpts = argv[argv.indexOf("--log-opts") + 1] ?? "";
+      expect(logOpts).not.toContain("4b825dc");
+      expect(run.report).not.toContain("approximate");
+      // The revisions gitleaks would walk, evaluated by git in the checkout the scan runs on.
+      const walked = Bun.spawnSync(["git", "log", "--format=%H", ...logOpts.split(" ")], { cwd: calls.at(-1)?.cwd ?? result.manifest.resolvedTarget.root });
+      expect(walked.exitCode).toBe(0);
+      const scanned = walked.stdout.toString().split("\n").filter(Boolean);
+      expect(scanned).toHaveLength(expected);
+      expect(scanned.sort()).toEqual([...(result.manifest.resolvedTarget.history?.commits ?? [])].sort());
+      await cancelRunLease(result.lease.capability, result.lease.manifestId);
+    }
+  }, 60_000);
+
   test("refuses to steal a toolkit lock from a live owner", async () => {
     const cache = mkdtempSync(join(tmpdir(), "sniff-lock-cache-"));
     temporary.push(cache);
@@ -1105,7 +1137,7 @@ describe("adaptive runtime boundaries", () => {
     const gitleaksArgv = gitleaksCalls.at(-1)?.argv ?? [];
     const captured = historyManifest.resolvedTarget.history?.capturedWindow;
     if (captured?.kind !== "refs") throw new Error(`expected captured refs window, got ${JSON.stringify(captured)}`);
-    expect(gitleaksArgv[gitleaksArgv.indexOf("--log-opts") + 1]).toBe(`${captured.base}..${captured.head}`);
+    expect(gitleaksArgv[gitleaksArgv.indexOf("--log-opts") + 1]).toBe(`--no-walk=unsorted ${captured.head}`);
     expect((await completeReport(history)).artifacts.report.target.kind).toBe("history");
 
     const gitlabRepository = "https://gitlab.com/acme/repo";
