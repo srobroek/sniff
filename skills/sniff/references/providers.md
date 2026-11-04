@@ -9,6 +9,11 @@ Transport validation and credential rules live in `targeting.md`. This file cove
 - Any other host, including self-hosted GitLab, uses plain `git`. It supports repository and history targets, but not PR, MR, or release targets.
 - Accepted URL forms are `https`, `ssh`, `git`, and `git@host:path`. Authenticate through the provider's credential store, never through the URL.
 
+## Pull and merge requests
+
+- `gh`/`glab` supply only the base and head SHAs and metadata. Changed paths come from `git diff` in a checkout holding both commits; heads are fetched by SHA, or via `refs/pull/<n>/head` / `refs/merge-requests/<iid>/head`.
+- A target gap (diff unavailable, or git and provider counts disagree) is reported in the plan and report.
+
 ## Releases
 
 - A release target resolves the exact requested tag and peels annotated tags to their commit.

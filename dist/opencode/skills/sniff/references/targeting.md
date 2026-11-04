@@ -25,7 +25,7 @@
 | Branch | changed paths from base or default branch | temporary checkout |
 | Exact ref | ref tree | temporary checkout |
 | Repository | one immutable remote ref | temporary checkout |
-| PR or MR | provider changed paths and base/head SHAs | temporary checkout |
+| PR or MR | provider base/head SHAs; changed paths derived from `git diff` | temporary checkout |
 | Release or tag | snapshot and optional previous-tag delta | temporary checkout |
 | History | commit window and changed paths | temporary checkout |
 
@@ -46,7 +46,7 @@ The core request kind is exact and closed: `whole-repo`, `working-tree`, `files`
 
 - Before analysis, resolve each ref. Resolve branch names to commit SHAs, and peel annotated tags in repository and history targets.
 - Compare and fetch commit SHAs, not tag-object SHAs.
-- Use `git clone`, `fetch`, and `checkout --detach` through argv arrays; do not build a shell command string.
+- Use `git init`, `fetch --depth=1 origin <sha>`, and `checkout --detach` through argv arrays; do not build a shell command string. Fall back to a wider fetch only when the server refuses an unadvertised SHA.
 - Reject URL userinfo, embedded credentials, query and fragment values, unsupported schemes, and whitespace.
 - Reject a repository value, ref, tag, or date that starts with a dash.
 - Reject invalid counts, PR numbers, and MR IIDs.
@@ -58,7 +58,8 @@ The core request kind is exact and closed: `whole-repo`, `working-tree`, `files`
 - `git` supports local and remote refs, history, and temporary checkout. A non-Git tree supports only `files` and `directory` targets.
 - `gh` adds GitHub PR and release targets; `glab` adds GitLab MR and release targets.
 - Capture each remote ref as a full commit SHA before materialization, and fetch enough ancestry and tags for every requested window.
-- Run history commands only against captured SHAs or fetched release tags. Date and count windows use the captured head; release windows use the captured release and head commits. The default compares the captured head with its parent.
+- Run history commands only against captured SHAs or fetched release tags. Date and count windows use the captured head; release windows use the captured release and head commits. The default compares the captured head with its parent; a root commit compares against the empty tree. A resolved window keeps its exact commit set through materialization.
+- PR and MR change sets come from git between the captured base and head (never the provider file list, which is capped or absent). When git cannot produce them or disagrees with the provider count, the target carries a gap; surface it in the plan and report.
 
 ## File reduction
 
@@ -116,6 +117,6 @@ Every other dimension, including lint, type checks, duplication, dead code, and 
 
 ## Examples
 
-- `sniff PR #128` resolves to `{"kind":"pr","repository":"<url>","number":"128"}`; `gh` captures the changed paths and base/head SHAs. Run `lizard:complexity` and `opengrep:hardcoded-values`; each receives only its compatible TypeScript and Protobuf files. Skip `gitleaks:tracked-history`, which is repository-wide. Record ESLint and `buf breaking --against ".git#ref=<base>,subdir=<proto-dir>"` as gaps with those commands.
+- `sniff PR #128` resolves to `{"kind":"pr","repository":"<url>","number":"128"}`; `gh` captures the base/head SHAs and git derives the changed paths. Run `lizard:complexity` and `opengrep:hardcoded-values`; each receives only its compatible TypeScript and Protobuf files. Skip `gitleaks:tracked-history`, which is repository-wide. Record ESLint and `buf breaking --against ".git#ref=<base>,subdir=<proto-dir>"` as gaps with those commands.
 - `sniff the parser module` resolves to `{"kind":"module","root":"<repo-root>","path":"src/parser"}` in place. The scoped-files recipes receive only files under `src/parser/`.
 - `sniff since main` resolves to `{"kind":"branch","root":"<repo-root>","branch":"HEAD","base":"main"}`, isolating the changed paths from `git diff --name-only main...HEAD`. Compare contracts with `main` only as recorded follow-ups.

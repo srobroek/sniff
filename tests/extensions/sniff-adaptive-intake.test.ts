@@ -69,8 +69,10 @@ function remoteCheckoutRunner(repository: string, head: string, base = sha("b"))
     const command = argv.join(" ");
     if (command === "git --version") return { code: 0, stdout: "git version 2", stderr: "" };
     if (command === `git ls-remote -- ${repository} HEAD`) return { code: 0, stdout: `${head}\tHEAD\n`, stderr: "" };
-    if (argv.includes("clone")) directory = argv.at(-1) ?? "";
+    if (argv.includes("init")) directory = argv.at(-1) ?? "";
     if (argv.includes("checkout") && directory) writeFileSync(join(directory, "a.ts"), "export {};\n");
+    if (command.startsWith("git rev-list --parents")) return { code: 0, stdout: `${argv.at(-1)} ${base}\n`, stderr: "" };
+    if (command.startsWith("git merge-base")) return { code: 0, stdout: `${base}\n`, stderr: "" };
     if (command.endsWith("rev-parse --verify HEAD^{commit}")) return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command === "git rev-parse --verify HEAD^{commit}") return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command.includes("rev-parse --verify") && command.includes("v1^{commit}")) return { code: 0, stdout: `${base}\n`, stderr: "" };
@@ -229,7 +231,7 @@ describe("target containment and cleanup", () => {
     const head = sha("a");
     let checkout = "";
     const runner: ArgvRunner = (argv) => {
-      if (argv.includes("clone")) checkout = argv.at(-1) ?? "";
+      if (argv.includes("init")) checkout = argv.at(-1) ?? "";
       if (argv.includes("rev-parse")) return { code: 0, stdout: `${head}\n`, stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
@@ -411,6 +413,8 @@ describe("history semantics", () => {
     const runner: ArgvRunner = (argv, options) => {
       calls.push({ argv: [...argv], cwd: options?.cwd });
       const command = argv.join(" ");
+      if (command.startsWith("git rev-list --parents")) return { code: 0, stdout: `${argv.at(-1)} ${base}\n`, stderr: "" };
+      if (command.startsWith("git merge-base")) return { code: 0, stdout: `${base}\n`, stderr: "" };
       if (command.includes("rev-parse") && (command.includes("base") || command.includes("v1") || command.includes(`${head}^`))) return { code: 0, stdout: `${base}\n`, stderr: "" };
       if (command.includes("rev-parse")) return { code: 0, stdout: `${head}\n`, stderr: "" };
       if (command.includes("describe") && command.includes("v2^")) return { code: 0, stdout: "v1\n", stderr: "" };
@@ -496,9 +500,11 @@ describe("complete target hardening matrix", () => {
     const checkouts: string[] = [];
     const runner: ArgvRunner = (argv) => {
       const command = argv.join(" ");
-      if (argv.includes("clone")) checkouts.push(argv.at(-1) ?? "");
+      if (argv.includes("init")) checkouts.push(argv.at(-1) ?? "");
       if (argv.includes("checkout")) writeFileSync(join(argv[2] ?? "", "a.ts"), "snapshot\n");
       if (command.includes("symbolic-ref")) return { code: 0, stdout: "main\n", stderr: "" };
+      if (command.startsWith("git rev-list --parents")) return { code: 0, stdout: `${argv.at(-1)} ${base}\n`, stderr: "" };
+      if (command.startsWith("git merge-base")) return { code: 0, stdout: `${base}\n`, stderr: "" };
       if (command.includes("rev-parse") && (command.includes("base") || command.includes("main") || command.includes(`${head}^^{commit}`))) return { code: 0, stdout: `${base}\n`, stderr: "" };
       if (command.includes("rev-parse")) return { code: 0, stdout: `${head}\n`, stderr: "" };
       if (command.startsWith("git log")) return { code: 0, stdout: `${head}\n`, stderr: "" };

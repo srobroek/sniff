@@ -6,31 +6,31 @@ const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
 const ok = (stdout: string) => ({ code: 0, stdout, stderr: "" });
 
-describe("GitHub PR files", () => {
-  test("parse uppercase changeType and do not invent a base path for additions", async () => {
+describe("PR and MR resolution", () => {
+  test("GitHub PR keeps only immutable endpoints and metadata; it never trusts the capped file list", async () => {
+    const calls: string[][] = [];
+    const runner: ArgvRunner = (argv) => {
+      calls.push([...argv]);
+      if (argv[1] === "--version") return ok("x");
+      return ok(JSON.stringify({ headRefOid: SHA_A, baseRefOid: SHA_B, changedFiles: 250, files: [{ path: "capped.ts", changeType: "ADDED" }] }));
+    };
+    const target = await resolveProviderTarget({ kind: "pr", repository: "https://github.com/o/r", number: 7 }, runner);
+    expect(target).toMatchObject({ kind: "pr", headRef: SHA_A, baseRef: SHA_B, immutableRef: SHA_A, providerRefs: ["refs/pull/7/head"], providerChangedFiles: 250, files: [] });
+    expect(target.changes).toBeUndefined();
+    const view = calls.find((argv) => argv[0] === "gh" && argv[1] === "pr");
+    expect(view?.[view.indexOf("--json") + 1]).not.toContain("files");
+    expect(view?.[view.indexOf("--json") + 1]).toContain("changedFiles");
+  });
+
+  test("GitLab MR records its merge-request ref and a numeric change count only", async () => {
     const runner: ArgvRunner = (argv) => {
       if (argv[1] === "--version") return ok("x");
-      const files = [
-        { path: "add.ts", changeType: "ADDED" },
-        { path: "mod.ts", changeType: "MODIFIED" },
-        { path: "del.ts", changeType: "DELETED" },
-        { path: "ren.ts", changeType: "RENAMED" },
-        { path: "cp.ts", changeType: "COPIED" },
-        { path: "chg.ts", changeType: "CHANGED" },
-        { path: "legacy.ts", status: "removed" },
-      ];
-      return ok(JSON.stringify({ headRefOid: SHA_A, baseRefOid: SHA_B, files }));
+      return ok(JSON.stringify({ diff_refs: { head_sha: SHA_A, base_sha: SHA_B }, changes_count: "12" }));
     };
-    const target = await resolveProviderTarget({ kind: "pr", repository: "https://github.com/o/r", number: 1 }, runner);
-    const by = Object.fromEntries((target.changes ?? []).map((change) => [change.path, change]));
-    expect(by["add.ts"]).toEqual({ path: "add.ts", status: "added", headPath: "add.ts" });
-    expect(by["cp.ts"]?.status).toBe("added");
-    expect(by["mod.ts"]?.status).toBe("modified");
-    expect(by["chg.ts"]?.status).toBe("modified");
-    expect(by["del.ts"]).toEqual({ path: "del.ts", status: "deleted", basePath: "del.ts" });
-    expect(by["ren.ts"]?.status).toBe("renamed");
-    expect(by["legacy.ts"]?.status).toBe("deleted");
-    expect(target.files).not.toContain("del.ts");
+    const target = await resolveProviderTarget({ kind: "mr", repository: "https://gitlab.com/o/r", iid: 3 }, runner);
+    expect(target).toMatchObject({ kind: "mr", providerRefs: ["refs/merge-requests/3/head"], providerChangedFiles: 12, files: [] });
+    const overflow: ArgvRunner = (argv) => argv[1] === "--version" ? ok("x") : ok(JSON.stringify({ diff_refs: { head_sha: SHA_A, base_sha: SHA_B }, changes_count: "1000+" }));
+    expect((await resolveProviderTarget({ kind: "mr", repository: "https://gitlab.com/o/r", iid: 3 }, overflow)).providerChangedFiles).toBeUndefined();
   });
 });
 
