@@ -259,7 +259,8 @@ function assertSpawnable(executable: string | undefined, cwd: string, env: Spawn
  * pass through. Together they are exactly the caller's environment.
  */
 function splitEnvironment(env: SpawnEnvironment): { readonly shell: Record<string, string>; readonly restored: string[]; readonly dashRestorable: boolean } {
-  const shell: Record<string, string> = {};
+  // Null-prototype: an own `__proto__` key is a valid variable and must be stored, not run a setter.
+  const shell: Record<string, string> = Object.create(null);
   const restored: string[] = [];
   let dashRestorable = true;
   for (const [name, value] of Object.entries(env)) {

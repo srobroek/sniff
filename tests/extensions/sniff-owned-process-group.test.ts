@@ -292,11 +292,17 @@ for (const shell of ["auto", "portable"] as const) describe(`owned process group
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).not.toContain("STARTUP-FILE-RAN");
+    // Pairs, not an object: a key such as `__proto__` must be compared, not swallowed by a setter.
     const fields = result.stdout.split("\0");
-    const received: Record<string, string> = {};
-    for (let index = 0; index + 1 < fields.length; index += 2) received[fields[index] ?? ""] = fields[index + 1] ?? "";
-    expect(received).toEqual(env);
+    const received: [string, string][] = [];
+    for (let index = 0; index + 1 < fields.length; index += 2) received.push([fields[index] ?? "", fields[index + 1] ?? ""]);
+    const byName = (left: [string, string], right: [string, string]) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0);
+    expect(received.sort(byName)).toEqual(Object.entries(env).sort(byName));
   }
+
+  test("environment keys named like Object.prototype members reach the command exactly", async () => {
+    await expectIsolatedEnvironment(() => ({ ["__proto__"]: "proto-value", constructor: "constructor-value", toString: "to-string-value", hasOwnProperty: "own-value" }));
+  });
 
   test("shell startup knobs in the caller's environment neither disable the supervisor nor reach it", async () => {
     await expectIsolatedEnvironment((dir, printer) => ({
