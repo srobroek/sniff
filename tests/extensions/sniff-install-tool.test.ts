@@ -518,7 +518,7 @@ describe("bounded command execution", () => {
 		let childPid = 0;
 		const realKill = process.kill.bind(process);
 		const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
-			// Signal 0 is the liveness probe that decides whether SIGKILL is still needed.
+			// Only real signals count; signal 0 would be a liveness probe, not a termination.
 			if (Math.abs(pid) === childPid && signal !== 0) signals.push(signal);
 			return realKill(pid, signal);
 		}) as typeof process.kill);
@@ -530,8 +530,8 @@ describe("bounded command execution", () => {
 			const result = await pending;
 			expect(result.timedOut).toBe(true);
 			await Bun.sleep(TERMINATION_GRACE_MS * 3);
-			// Under load SIGTERM can land before the trap is installed; the group then exits and the
-			// escalation correctly skips SIGKILL. Either way the abort adds no second escalation.
+			// Under load SIGTERM can land before the trap is installed; the group then exits early, and the
+			// escalation's SIGKILL, if any, only reaches the still-owned group. The abort adds no second escalation.
 			expect(signals[0]).toBe("SIGTERM");
 			expect(signals.filter((signal) => signal === "SIGTERM")).toHaveLength(1);
 			expect(signals.filter((signal) => signal === "SIGKILL").length).toBeLessThanOrEqual(1);

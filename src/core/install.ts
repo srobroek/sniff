@@ -27,8 +27,9 @@ import {
   TOOLS,
   type ToolRec,
 } from "./catalog.ts";
+import { ExclusiveFileLock } from "./file-lock.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
-import { processAlive, type SpawnedProcess, type StreamIncompleteness, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
+import { processAlive, type SpawnedProcess, type StreamIncompleteness, spawnInOwnedGroup, TERMINATION_GRACE_MS, terminateAndAwait, terminateProcess } from "./process-control.ts";
 import type { SniffRunOwner } from "./run-owner.ts";
 import {
   type AnalyzerRunAuthorization,
@@ -178,8 +179,15 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
-	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
-	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
+	const { proc, group } = spawnInOwnedGroup(argv, { cwd, env });
+	const handle: SpawnedProcess = { pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal), group };
+	try {
+		onSpawn?.(handle);
+	} catch (error) {
+		// A rejected adoption leaves this call nobody to report to; still end the group before releasing it.
+		void terminateAndAwait(handle).finally(() => group.end());
+		throw error;
+	}
 	let timedOut = false;
 	let aborted = false;
 	let reaped = false;
@@ -187,36 +195,22 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	let drainTimer: ReturnType<typeof setTimeout> | undefined;
 	let escalation: Promise<void> | undefined;
 	const drain = Promise.withResolvers<void>();
-	const groupAlive = (): boolean => {
-		try {
-			process.kill(-proc.pid, 0);
-			return true;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM";
-		}
-	};
 	/**
 	 * Terminates the child's whole process group once: SIGTERM, then SIGKILL after the grace period.
 	 * Escalation is tracked apart from the leader's exit, so a same-group descendant that ignores
-	 * SIGTERM is still killed after the leader died. The group ID cannot be reused while any member
-	 * lives; a group found empty is never signalled. A descendant that called setsid left the group
-	 * and is out of reach by design; its held pipe is recorded as an abandoned capture instead.
-	 * Residual risk: between the last member exiting and a probe, the kernel could hand the numeric
-	 * ID to a new group, which requires the PID space to wrap within the grace window. An owned
-	 * supervisor that holds the group open would close this; the earlier unprobed signalling had the
-	 * same window, only longer.
+	 * SIGTERM is still killed after the leader died. Every group signal goes through the owned group,
+	 * whose sentinel member keeps the group ID from being reused, so it never reaches a foreign group;
+	 * once the group is no longer owned only the leader's own handle is signalled. A descendant that
+	 * called setsid left the group and is out of reach by design; its held pipe is recorded as an
+	 * abandoned capture instead.
 	 */
 	const terminateGroup = (): Promise<void> => {
 		if (escalation) return escalation;
-		if (reaped && !groupAlive()) {
-			escalation = Promise.resolve();
-			return escalation;
-		}
 		const escalated = Promise.withResolvers<void>();
 		escalation = escalated.promise;
-		terminateProcess(proc, "SIGTERM");
+		terminateProcess(handle, "SIGTERM");
 		forceKill = setTimeout(() => {
-			if (!reaped || groupAlive()) terminateProcess(proc, "SIGKILL");
+			terminateProcess(handle, "SIGKILL");
 			escalated.resolve();
 		}, TERMINATION_GRACE_MS);
 		return escalation;
@@ -242,35 +236,42 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 		drainTimer = setTimeout(drain.resolve, OUTPUT_DRAIN_MS);
 		return code;
 	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
-		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
-		exited,
-	]);
-	clearTimeout(timeout);
-	clearTimeout(drainTimer);
-	drain.resolve();
-	// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
-	if (stdout.abandoned || stderr.abandoned) void terminateGroup();
-	// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
-	if (escalation) await escalation;
-	clearTimeout(forceKill);
-	signal?.removeEventListener("abort", onAbort);
-	return {
-		argv,
-		exitCode,
-		stdout: stdout.text,
-		stderr: stderr.text,
-		stdoutTruncated: stdout.truncated,
-		stderrTruncated: stderr.truncated,
-		...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
-		...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
-		outputLimitBytes,
-		timedOut,
-		error: aborted ? "operation aborted" : undefined,
-		signalCode: proc.signalCode ?? undefined,
-		timeoutMs,
-	};
+	try {
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+			readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+			exited,
+		]);
+		clearTimeout(timeout);
+		clearTimeout(drainTimer);
+		drain.resolve();
+		// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
+		if (stdout.abandoned || stderr.abandoned) void terminateGroup();
+		// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
+		if (escalation) await escalation;
+		return {
+			argv,
+			exitCode,
+			stdout: stdout.text,
+			stderr: stderr.text,
+			stdoutTruncated: stdout.truncated,
+			stderrTruncated: stderr.truncated,
+			...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
+			...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
+			outputLimitBytes,
+			timedOut,
+			error: aborted ? "operation aborted" : undefined,
+			signalCode: proc.signalCode ?? undefined,
+			timeoutMs,
+		};
+	} finally {
+		clearTimeout(timeout);
+		clearTimeout(drainTimer);
+		clearTimeout(forceKill);
+		signal?.removeEventListener("abort", onAbort);
+		// Analyzers must not leave processes behind: whatever still shares the group, sentinel included, ends here.
+		group.end();
+	}
 }
 /** Install-log notes for a command whose captured output is bounded or incomplete. */
 function outputCaptureNotes(result: CommandResult): string[] {
@@ -906,65 +907,127 @@ async function installMiseBundleUnlocked(
 	return { results: verified };
 }
 
-/** A lock is only stealable once it outlives an install plus its probing and its owner is gone. */
-export const TOOLKIT_LOCK_STALE_MS = 20 * 60_000;
+/** How long an installer waits for another installer of the same toolkit before giving up. */
+export const TOOLKIT_LOCK_WAIT_MS = 20 * 60_000;
 const TOOLKIT_LOCK_POLL_MS = 250;
 
-type ToolkitLockOwner = { readonly pid: number; readonly token: string; readonly startedAt: number };
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  const delay = Promise.withResolvers<void>();
+  const onAbort = () => delay.resolve();
+  const timer = setTimeout(delay.resolve, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return delay.promise.finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  });
+}
 
-function readToolkitLockOwner(ownerPath: string): ToolkitLockOwner | null {
+/**
+ * Migration guard for installers that still run Sniff v0.3.2, which serialize on a `.lock`
+ * directory and know nothing of `.install.lock`. While a new installer holds the flock it also holds
+ * that directory, with v0.3.2's exact protocol and owner record, so an old installer waits for it
+ * and a new one waits for a live old one. New installers already serialize on the flock, so they
+ * never race each other here; the old protocol's own check-then-remove takeover race between two
+ * v0.3.2 installers is unchanged.
+ *
+ * Follow-up: remove this guard, and `.lock` handling with it, once v0.3.2 is no longer in use.
+ */
+const LEGACY_TOOLKIT_LOCK_STALE_MS = 20 * 60_000;
+
+/** v0.3.2's owner record; `protocol` marks one a new installer wrote, which old readers ignore. */
+type LegacyToolkitLockOwner = { readonly pid: number; readonly token: string; readonly startedAt: number; readonly protocol?: "flock" };
+
+function readLegacyToolkitLockOwner(ownerPath: string): LegacyToolkitLockOwner | null {
   try {
-    const parsed = JSON.parse(Buffer.from(readFileSync(ownerPath)).toString("utf8")) as Partial<ToolkitLockOwner>;
+    const parsed = JSON.parse(Buffer.from(readFileSync(ownerPath)).toString("utf8")) as Partial<LegacyToolkitLockOwner>;
     if (typeof parsed.pid !== "number" || typeof parsed.token !== "string" || typeof parsed.startedAt !== "number") return null;
-    return { pid: parsed.pid, token: parsed.token, startedAt: parsed.startedAt };
+    return { pid: parsed.pid, token: parsed.token, startedAt: parsed.startedAt, ...(parsed.protocol === "flock" ? { protocol: "flock" as const } : {}) };
   } catch {
     return null;
   }
 }
 
-export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number } = {}): Promise<T> {
-  const directory = toolkitDirectory(bundle, env, runtime);
-  mkdirSync(directory, { recursive: true });
+/**
+ * Takes the legacy `.lock` directory as v0.3.2 does: mkdir, then the owner record; a held one is
+ * stolen only when older than the bound with its owner process gone, else waited for, abortably and
+ * until `deadline`. A record a new installer wrote is stale outright: writing it needed the flock
+ * the caller now holds, and new installers release this directory before the flock, so its writer
+ * died. Returns the release, which removes the directory only while it still holds this owner.
+ */
+async function acquireLegacyToolkitLock(directory: string, bundle: BundleName, deadline: number, signal?: AbortSignal): Promise<() => void> {
   const lockPath = join(directory, ".lock");
   const ownerPath = join(lockPath, "owner.json");
-  const owner: ToolkitLockOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), startedAt: Date.now() };
-  const deadline = Date.now() + (options.waitMs ?? TOOLKIT_LOCK_STALE_MS);
+  const owner: LegacyToolkitLockOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), startedAt: Date.now(), protocol: "flock" };
   for (;;) {
+    if (signal?.aborted) throw new Error("operation aborted");
     try {
       mkdirSync(lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      // Only a lock whose owner process is gone may be stolen; a slow live owner keeps its lock.
-      const held = readToolkitLockOwner(ownerPath);
+      const held = readLegacyToolkitLockOwner(ownerPath);
       const heldSince = held?.startedAt ?? (existsSync(lockPath) ? statSync(lockPath).mtimeMs : null);
-      const abandoned = heldSince !== null && Date.now() - heldSince > TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid));
+      const abandoned = held?.protocol === "flock"
+        || (heldSince !== null && Date.now() - heldSince > LEGACY_TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid)));
       if (abandoned) {
         rmSync(lockPath, { recursive: true, force: true });
         continue;
       }
       if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
-      const poll = Promise.withResolvers<void>();
-      setTimeout(poll.resolve, TOOLKIT_LOCK_POLL_MS);
-      await poll.promise;
+      await abortableDelay(TOOLKIT_LOCK_POLL_MS, signal);
       continue;
     }
     try {
       writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
       break;
     } catch (error) {
-      // An ownerless lock directory would block every later installer, so never leave one behind.
+      // An ownerless lock directory would block every later old installer, so never leave one behind.
       rmSync(lockPath, { recursive: true, force: true });
       throw error;
     }
   }
+  return () => {
+    if (readLegacyToolkitLockOwner(ownerPath)?.token === owner.token) rmSync(lockPath, { recursive: true, force: true });
+  };
+}
+
+/**
+ * Serializes installers of one toolkit, across processes and within this one, with an exclusive
+ * OS advisory lock on the toolkit's lock file. Acquisition is a single atomic kernel operation and
+ * the kernel releases the lock when its holder exits or dies, so there is no owner record, no
+ * staleness heuristic and no takeover that could displace a live owner. Waiting polls the lock and
+ * stops on `signal`. During the v0.3.2 migration the holder also takes the legacy directory lock,
+ * and releases the two in reverse order.
+ */
+export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number; readonly signal?: AbortSignal } = {}): Promise<T> {
+  const directory = toolkitDirectory(bundle, env, runtime);
+  mkdirSync(directory, { recursive: true });
+  const lockPath = join(directory, ".install.lock");
+  const deadline = Date.now() + (options.waitMs ?? TOOLKIT_LOCK_WAIT_MS);
+  let lock: ExclusiveFileLock | null;
+  for (;;) {
+    if (options.signal?.aborted) throw new Error("operation aborted");
+    lock = ExclusiveFileLock.tryAcquire(lockPath);
+    if (lock) break;
+    if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
+    await abortableDelay(TOOLKIT_LOCK_POLL_MS, options.signal);
+  }
+  let releaseLegacy: () => void;
+  try {
+    releaseLegacy = await acquireLegacyToolkitLock(directory, bundle, deadline, options.signal);
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
   try {
     return await fn();
   } finally {
-    // Never delete a lock a later owner acquired after this one was stolen as stale.
-    if (readToolkitLockOwner(ownerPath)?.token === owner.token) rmSync(lockPath, { recursive: true, force: true });
+    try {
+      releaseLegacy();
+    } finally {
+      lock.release();
+    }
   }
 }
-
 
 async function installMiseBundle(
   bundle: BundleName,
@@ -978,7 +1041,7 @@ async function installMiseBundle(
   prepareVerification?: () => Promise<void>,
 ): Promise<MiseBundleInstallResult> {
   if (dryRun) return installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification);
-  return withToolkitLock(bundle, env, runtime, () => installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification));
+  return withToolkitLock(bundle, env, runtime, () => installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification), { signal });
 }
 
 function probeLabel(result: SniffToolResult): string {

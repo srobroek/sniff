@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import sniffIntakeExtension from "../../extensions/sniff-intake-tool.ts";
-import { ANALYZER_TIMEOUT_MS, runSniffAnalyzer, runSniffInstall, type SniffInstallRuntime, TOOLKIT_LOCK_STALE_MS, withToolkitLock } from "../../src/core/install.ts";
+import { ANALYZER_TIMEOUT_MS, runSniffAnalyzer, runSniffInstall, type SniffInstallRuntime, withToolkitLock } from "../../src/core/install.ts";
 import { createRunManifest, type RunManifest } from "../../src/core/intake.ts";
 import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePublicResult, type SniffIntakeToolResult } from "../../src/core/intake-use-case.ts";
-import { processAlive } from "../../src/core/process-control.ts";
 import type { ReportInput } from "../../src/core/report.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
 import { createSniffRunOwner, type SniffRunOwner } from "../../src/core/run-owner.ts";
@@ -716,15 +715,16 @@ describe("adaptive runtime boundaries", () => {
       resolveCommand: base.resolveCommand,
       run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
         if (argv.includes("--csv")) {
-          onSpawn?.({ pid: 54321, exited: exit.promise });
+          onSpawn?.({ pid: 54321, exited: exit.promise, kill: () => order.push("kill") });
           spawned.resolve();
           await exit.promise;
         }
         return { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
+    // The fake child has no owned process group, so it is ended only through its own handle.
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
-      if (pid === -54321 || pid === 54321) order.push("kill");
+      if (pid === -54321 || pid === 54321) order.push("unowned-pid-signal");
       return true;
     }) as typeof process.kill);
     try {
@@ -762,16 +762,17 @@ describe("adaptive runtime boundaries", () => {
       run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
         if (argv.includes("--csv")) {
           now = startedAt + 51;
-          onSpawn?.({ pid: 4242, exited: exit.promise });
+          onSpawn?.({ pid: 4242, exited: exit.promise, kill: () => {
+            order.push("kill");
+            expect(existsSync(leaseFixture.root)).toBe(true);
+          } });
         }
         return { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
+    // The fake child has no owned process group, so it is ended only through its own handle.
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
-      if (pid === -4242 || pid === 4242) {
-        order.push("kill");
-        expect(existsSync(leaseFixture.root)).toBe(true);
-      }
+      if (pid === -4242 || pid === 4242) order.push("unowned-pid-signal");
       return true;
     }) as typeof process.kill);
     try {
@@ -793,16 +794,22 @@ describe("adaptive runtime boundaries", () => {
   test("terminates a child registered against a foreign manifest and keeps the lease intact", async () => {
     const leaseFixture = localLease();
     const exited = Promise.withResolvers<number>();
-    const killed: number[] = [];
+    const killed: string[] = [];
+    const pidSignals: number[] = [];
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
-      killed.push(pid);
-      exited.resolve(0);
+      pidSignals.push(pid);
       return true;
     }) as typeof process.kill);
     try {
-      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", { pid: 777, exited: exited.promise }, runOwner)).toThrow("does not match the manifest ID");
+      const child = { pid: 777, exited: exited.promise, kill: (signal: "SIGTERM" | "SIGKILL") => {
+        killed.push(signal);
+        exited.resolve(0);
+      } };
+      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", child, runOwner)).toThrow("does not match the manifest ID");
       await exited.promise;
-      expect(killed).toContain(-777);
+      expect(killed).toContain("SIGTERM");
+      // Without an owned process group the bare PID is never signalled; it may already be reused.
+      expect(pidSignals).toEqual([]);
       expect(existsSync(leaseFixture.root)).toBe(true);
       await cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId, runOwner);
     } finally {
@@ -1058,7 +1065,7 @@ describe("adaptive runtime boundaries", () => {
     await cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
   }, 30_000);
 
-  test("refuses to steal a toolkit lock from a live owner", async () => {
+  test("refuses to take a toolkit lock while a live owner holds it", async () => {
     const cache = mkdtempSync(join(tmpdir(), "sniff-lock-cache-"));
     temporary.push(cache);
     const host = mkdtempSync(join(tmpdir(), "sniff-lock-host-"));
@@ -1072,28 +1079,21 @@ describe("adaptive runtime boundaries", () => {
       run: async (argv, _cwd, _env, timeoutMs) => ({ argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }),
       freshEnvironment: async (_cwd, env) => ({ env, source: "mise" }),
     };
-    const lockPath = join(cache, "core", ".lock");
-    const ownerPath = join(lockPath, "owner.json");
-    mkdirSync(lockPath, { recursive: true });
-    // A lock far older than the staleness bound whose owner process is still alive.
-    const owner = { pid: process.pid, token: "live-owner", startedAt: Date.now() - TOOLKIT_LOCK_STALE_MS * 4 };
-    writeFileSync(ownerPath, JSON.stringify(owner));
+    const owner = Promise.withResolvers<void>();
+    const owning = withToolkitLock("core", process.env, runtime, () => owner.promise);
     let entered = false;
     await expect(withToolkitLock("core", process.env, runtime, async () => {
       entered = true;
     }, { waitMs: 300 })).rejects.toThrow("Sniff toolkit bundle core is locked by another process");
     expect(entered).toBe(false);
-    expect(JSON.parse(readFileSync(ownerPath, "utf8"))).toEqual(owner);
 
-    // The same lock becomes stealable once no live process owns it.
-    let deadPid = 4_194_303;
-    while (deadPid > 1 && processAlive(deadPid)) deadPid -= 1;
-    writeFileSync(ownerPath, JSON.stringify({ ...owner, pid: deadPid }));
+    // The same lock is free once its owner finished.
+    owner.resolve();
+    await owning;
     await withToolkitLock("core", process.env, runtime, async () => {
       entered = true;
     }, { waitMs: 300 });
     expect(entered).toBe(true);
-    expect(existsSync(lockPath)).toBe(false);
   });
 
   test("passively expires an abandoned lease exactly once", () => {
