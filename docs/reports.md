@@ -33,7 +33,7 @@ Before Sniff creates a destination directory, save mode needs trusted confirmati
 - every relative artifact path and SHA-256 digest
 - the manifest identity
 
-A successful save atomically installs this layout under the authorized parent. Sniff fsyncs every file and the staging directories before the publishing rename, and the parent directory after it:
+A successful save atomically installs this layout under the authorized parent. Sniff fsyncs every file and the staging directories before the publishing rename, and the parent directory after it. If only that last sync fails, the report is already in place: Sniff ends the run and returns the saved paths with a `durabilityWarning` instead of an error:
 
 ```text
 <report-id>/

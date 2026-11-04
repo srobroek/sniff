@@ -52,6 +52,8 @@ export interface SniffReportToolResult {
   artifacts: ReportArtifacts;
   publicArtifacts: PublicReportArtifacts;
   savedPaths: string[];
+  /** Set only when the report was saved but its parent directory could not be synced. */
+  durabilityWarning?: string;
 }
 
 
@@ -151,10 +153,14 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       // A cancel or expiry while approval was pending ended the run; nothing may be written for it.
       assertRunReport(options.capability, options.manifestId, claim, owner);
       if (!approval || approval.acceptedDigest !== request.digest) throw new Error("Sniff report save authorization was denied or mismatched");
-      const savedPaths = saveReportArtifactsAt(artifacts, planned.opened);
+      // Once published the report exists, even when it is not yet durable: the run ends and the
+      // saved location is returned with the warning, since a retry would only collide with it.
+      const { savedPaths, durabilityWarning } = saveReportArtifactsAt(artifacts, planned.opened);
       finalizeLease = true;
       const readCapability = registerReportArtifacts(artifacts, undefined, owner);
-      return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, savedPaths, readCapability), savedPaths };
+      const publicArtifacts = projectReportArtifacts(artifacts, savedPaths, readCapability);
+      if (durabilityWarning === undefined) return { artifacts, publicArtifacts, savedPaths };
+      return { artifacts, publicArtifacts: { ...publicArtifacts, durabilityWarning }, savedPaths, durabilityWarning };
     } finally {
       planned.opened.close();
     }

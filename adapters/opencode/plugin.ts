@@ -324,7 +324,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           },
         });
         const savedPaths = result.publicArtifacts.descriptors.flatMap((descriptor) => (descriptor.savedPath ? [descriptor.savedPath] : []));
-        return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths } };
+        return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths, ...(result.durabilityWarning ? { durabilityWarning: result.durabilityWarning } : {}) } };
       };
 
       const reportArtifact = async (input: unknown, context: ToolContext): Promise<ToolResult> => {

@@ -176,7 +176,8 @@ function boundedPage<Page extends PageCursor>(result: Page, encode: (page: Page)
 }
 
 function reportMetadata(publicArtifacts: PublicReportArtifacts, descriptors: PublicReportArtifacts["descriptors"]): string {
-  return JSON.stringify({ reportId: publicArtifacts.reportId, readCapability: publicArtifacts.readCapability, descriptors });
+  const { durabilityWarning } = publicArtifacts;
+  return JSON.stringify({ reportId: publicArtifacts.reportId, readCapability: publicArtifacts.readCapability, descriptors, ...(durabilityWarning ? { durabilityWarning } : {}) });
 }
 
 /** Report metadata line plus the summary, keeping as many descriptors as fit before shortening the summary. */

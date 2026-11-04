@@ -5,6 +5,16 @@ import { parse, resolve, sep } from "node:path";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
 
+/**
+ * A published save. `durabilityWarning` is set when the report is in place under its final name
+ * but the parent directory sync after the rename failed, so the save may not survive a crash. The
+ * report exists either way: callers must treat it as saved, never as retryable.
+ */
+export interface ReportSaveResult {
+  readonly savedPaths: string[];
+  readonly durabilityWarning?: string;
+}
+
 export interface OpenedReportDirectory {
   readonly path: string;
   readonly missingComponents: readonly string[];
@@ -308,7 +318,7 @@ export function saveReportEntriesAt(
   directory: OpenedReportDirectory,
   reportId: string,
   entries: readonly ReportSaveEntry[],
-): string[] {
+): ReportSaveResult {
   validateEntries(entries);
   const constants = platformConstants();
   const symbols = loadNativeSymbols();
@@ -363,12 +373,20 @@ export function saveReportEntriesAt(
     const publishedResult = symbols.publishNoReplace(parentFd, stagingName, parentFd, reportId, constants.publishNoReplaceFlag);
     if (publishedResult < 0) throw operationError("publish", reportId, errno(symbols), constants);
     published = true;
-    syncDescriptor(parentFd);
+    const savedPaths = entries.map(([relativePath]) => `${directory.path}/${reportId}/${relativePath}`);
+    let durabilityWarning: string | undefined;
+    try {
+      syncDescriptor(parentFd);
+    } catch (error) {
+      // The rename already happened: the report is visible and a retry would collide with it.
+      const reason = error instanceof Error ? error.message : String(error);
+      durabilityWarning = `The Sniff report was saved to ${directory.path}/${reportId}, but syncing its parent directory failed (${reason}), so the save may not survive a crash or power loss.`;
+    }
     closeFd(filesFd);
     filesFd = undefined;
     closeFd(stagingFd);
     stagingFd = undefined;
-    return entries.map(([relativePath]) => `${directory.path}/${reportId}/${relativePath}`);
+    return durabilityWarning === undefined ? { savedPaths } : { savedPaths, durabilityWarning };
   } catch (error) {
     if (!published) {
       if (filesFd !== undefined) {

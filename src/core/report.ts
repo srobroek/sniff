@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, resolve, sep } from "node:path";
 import { canonicalJson, compareCodeUnits as compareText, stableJson } from "./canonical-json.ts";
-import { type OpenedReportDirectory, openReportDirectory, saveReportEntriesAt } from "./report-native-persistence.ts";
+import { type OpenedReportDirectory, openReportDirectory, type ReportSaveResult, saveReportEntriesAt } from "./report-native-persistence.ts";
 import { assertReportInput, assertSniffReportSchema } from "./report-schema.ts";
 
 export const SNIFF_REPORT_SCHEMA_VERSION = "1.0.0" as const;
@@ -155,6 +155,8 @@ export interface PublicReportArtifacts {
   descriptorCount: number;
   descriptorsTruncated: boolean;
   receipt: Pick<ValidationReceipt, "schemaVersion" | "reportId" | "findingCount" | "artifactCount">;
+  /** Set only when a save published the report but could not make it durable. */
+  durabilityWarning?: string;
 }
 
 function sha256(value: string): string {
@@ -580,13 +582,13 @@ function assertArtifactIntegrity(artifacts: ReportArtifacts): ReportArtifacts {
   return canonical;
 }
 
-export function saveReportArtifactsAt(artifacts: ReportArtifacts, directory: OpenedReportDirectory): string[] {
+export function saveReportArtifactsAt(artifacts: ReportArtifacts, directory: OpenedReportDirectory): ReportSaveResult {
   const canonical = builtArtifacts.has(artifacts) ? artifacts : assertArtifactIntegrity(artifacts);
   const entries = saveEntries(canonical);
   return saveReportEntriesAt(directory, canonical.report.reportId, entries);
 }
 
-export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
+export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): ReportSaveResult {
   const opened = openReportDirectory(canonicalizeTrustedTemporaryPrefix(directory));
   try {
     return saveReportArtifactsAt(artifacts, opened);

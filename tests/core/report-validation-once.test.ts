@@ -101,7 +101,7 @@ describe("report validation runs once per built report", () => {
       const saved = saveReportArtifacts(artifacts, directory);
       expect(spy).toHaveBeenCalledTimes(1);
       expect(readdirSync(join(directory, artifacts.report.reportId)).sort()).toEqual(["coverage.json", "files", "index.json", "manifest.json", "receipt.json", "report.json", "summary.md"]);
-      expect(readFileSync(saved[0] ?? "", "utf8")).toBe(artifacts.indexJson);
+      expect(readFileSync(saved.savedPaths[0] ?? "", "utf8")).toBe(artifacts.indexJson);
     } finally {
       spy.mockRestore();
     }

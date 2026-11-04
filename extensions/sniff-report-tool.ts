@@ -80,6 +80,7 @@ export default function sniffReportTool(pi: ExtensionAPI, owner?: SniffRunOwner)
             descriptorCount: result.publicArtifacts.descriptorCount,
             descriptorsTruncated: result.publicArtifacts.descriptorsTruncated,
             receipt: result.publicArtifacts.receipt,
+            ...(result.durabilityWarning ? { durabilityWarning: result.durabilityWarning } : {}),
           },
         };
       } catch (error) {
