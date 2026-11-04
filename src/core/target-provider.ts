@@ -12,6 +12,7 @@ import {
   resolveTarget as resolveLocalTarget,
   resolveTargetLease as resolveLocalTargetLease,
   runArgv,
+  splitNul,
   type TargetChange,
   type TargetRequest,
   TargetResolutionError,
@@ -179,8 +180,8 @@ async function resolveGitHubPullRequest(request: Extract<TargetRequest, { kind: 
     const object = objectValue(entry, "GitHub PR file");
     const path = stringValue(object.path);
     if (!path) return [];
-    const rawStatus = stringValue(object.status);
-    const status = rawStatus === "added" ? "added" : rawStatus === "removed" ? "deleted" : rawStatus === "renamed" ? "renamed" : rawStatus === "modified" ? "modified" : "unknown";
+    const kind = (stringValue(object.changeType) ?? stringValue(object.status))?.toLowerCase();
+    const status = kind === "added" || kind === "copied" ? "added" : kind === "deleted" || kind === "removed" ? "deleted" : kind === "renamed" ? "renamed" : kind === "modified" || kind === "changed" ? "modified" : "unknown";
     return [{ path, status, ...(status === "added" ? {} : { basePath: path }), ...(status === "deleted" ? {} : { headPath: path }) }];
   }).sort((left, right) => left.path.localeCompare(right.path));
   return { kind: "pr", label: `GitHub PR #${number}`, root: resolve("."), files: changes.flatMap((change) => change.headPath ? [change.headPath] : []), changes, baseRef: base, headRef: head, immutableRef: head, repository: provider.repository, materialization: "temporary-checkout" };
@@ -262,11 +263,17 @@ async function resolveGenericRepository(request: Extract<TargetRequest, { kind: 
   const version = await providerCommand(runner, provider, ["git", "--version"]);
   if (version.code !== 0) throw new TargetResolutionError("missing-cli", "git is not installed", { provider: "git", details: outputText(version) });
   const ref = validateGitOperand(request.ref ?? "HEAD", "Repository ref");
-  const probe = await providerCommand(runner, provider, ["git", "ls-remote", "--", repository, ref, `${ref}^{}`]);
+  if (isImmutableRef(ref)) {
+    // A full commit SHA is already immutable; the checkout fetch verifies it exists.
+    const sha = ref.toLowerCase();
+    return { kind: "repository", label: repository, root: resolve("."), files: [], headRef: sha, immutableRef: sha, repository, materialization: "temporary-checkout" };
+  }
+  const exact = ref === "HEAD" ? ["HEAD"] : ref.startsWith("refs/") ? [ref, `${ref}^{}`] : [`refs/heads/${ref}`, `refs/tags/${ref}`, `refs/tags/${ref}^{}`];
+  const probe = await providerCommand(runner, provider, ["git", "ls-remote", "--", repository, ...exact]);
   const rows = probe.stdout.trim().split(/\r?\n/).filter(Boolean).map((row) => {
     const [object, name] = row.split(/\s+/, 2);
     return { object: parseCommit(object, "Repository ref"), name: name ?? "" };
-  });
+  }).filter(({ name }) => exact.includes(name));
   if (rows.length === 0 || rows.length > 2) throw new TargetResolutionError("ambiguous-release", `Repository ref resolved to ${rows.length} refs`, { provider: "git" });
   const peeled = rows.find(({ name }) => name.endsWith("^{}"));
   if (rows.length === 2 && !peeled) throw new TargetResolutionError("ambiguous-release", "Repository ref resolved to multiple non-commit objects", { provider: "git" });
@@ -426,7 +433,8 @@ export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, 
         head = await localCommit(root, window.head ?? "HEAD", runner);
         commits = await logRange(root, [`--since=${date}`, head], runner);
       }
-      base = await baseBeforeOldest(root, commits, head, runner);
+      // An empty window has no files: base = head rather than the parent of the latest commit.
+      base = commits.length === 0 ? head : await baseBeforeOldest(root, commits, head, runner);
       break;
     case "last-commits":
       if (!Number.isSafeInteger(window.count) || window.count < 1 || window.count > 100_000) throw new TargetResolutionError("invalid-target", "History commit count must be between 1 and 100000");
@@ -487,8 +495,8 @@ export async function materializeProviderTarget(target: ResolvedTarget, runner: 
     };
   }
   if (target.kind === "release" && target.release && target.immutableRef) {
-    const snapshot = await runGit(runner, target.root, ["ls-tree", "-r", "--name-only", target.immutableRef], "Release snapshot lookup failed");
-    const snapshotFiles = [...new Set(snapshot.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))].sort();
+    const snapshot = await runGit(runner, target.root, ["ls-tree", "-r", "--name-only", "-z", target.immutableRef], "Release snapshot lookup failed");
+    const snapshotFiles = [...new Set(splitNul(snapshot.stdout))].sort();
     let deltaFiles = snapshotFiles;
     let changes: TargetChange[] | undefined;
     let baseRef: string | undefined;
@@ -500,8 +508,8 @@ export async function materializeProviderTarget(target: ResolvedTarget, runner: 
     return { ...target, files: snapshotFiles, ...(changes ? { changes } : {}), baseRef, release: { ...target.release, snapshotFiles, deltaFiles } };
   }
   if (target.kind === "repository" && target.immutableRef) {
-    const snapshot = await runGit(runner, target.root, ["ls-tree", "-r", "--name-only", target.immutableRef], "Repository snapshot lookup failed");
-    return { ...target, files: [...new Set(snapshot.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))].sort() };
+    const snapshot = await runGit(runner, target.root, ["ls-tree", "-r", "--name-only", "-z", target.immutableRef], "Repository snapshot lookup failed");
+    return { ...target, files: [...new Set(splitNul(snapshot.stdout))].sort() };
   }
   return target;
 }

@@ -68,8 +68,8 @@ function remoteCheckoutRunner(repository: string, head: string, base = sha("b"))
     calls.push({ argv: [...argv], cwd: options?.cwd });
     const command = argv.join(" ");
     if (command === "git --version") return { code: 0, stdout: "git version 2", stderr: "" };
-    if (command === `git ls-remote -- ${repository} HEAD HEAD^{}`) return { code: 0, stdout: `${head}\tHEAD\n`, stderr: "" };
-    if (argv[1] === "clone") directory = argv[5] ?? "";
+    if (command === `git ls-remote -- ${repository} HEAD`) return { code: 0, stdout: `${head}\tHEAD\n`, stderr: "" };
+    if (argv.includes("clone")) directory = argv.at(-1) ?? "";
     if (argv.includes("checkout") && directory) writeFileSync(join(directory, "a.ts"), "export {};\n");
     if (command.endsWith("rev-parse --verify HEAD^{commit}")) return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command === "git rev-parse --verify HEAD^{commit}") return { code: 0, stdout: `${head}\n`, stderr: "" };
@@ -78,7 +78,7 @@ function remoteCheckoutRunner(repository: string, head: string, base = sha("b"))
     if (command.includes("rev-parse --verify") && command.includes(`${base}^{commit}`)) return { code: 0, stdout: `${base}\n`, stderr: "" };
     if (command.startsWith("git log --format=%H")) return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command.startsWith("git diff --name-status")) return { code: 0, stdout: "M\0a.ts\0", stderr: "" };
-    if (command.startsWith("git ls-tree")) return { code: 0, stdout: "a.ts\n", stderr: "" };
+    if (command.startsWith("git ls-tree")) return { code: 0, stdout: "a.ts\0", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   };
   return { runner, calls, checkout: () => directory };
@@ -228,7 +228,7 @@ describe("target containment and cleanup", () => {
     const head = sha("a");
     let checkout = "";
     const runner: ArgvRunner = (argv) => {
-      if (argv[1] === "clone") checkout = argv[5] ?? "";
+      if (argv.includes("clone")) checkout = argv.at(-1) ?? "";
       if (argv.includes("rev-parse")) return { code: 0, stdout: `${head}\n`, stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
@@ -369,7 +369,7 @@ describe("provider safety and releases", () => {
       if (command === "gh --version") return { code: 0, stdout: "gh version", stderr: "" };
       if (command === "gh release view v2 --repo acme/repo --json tagName,targetCommitish,url") return { code: 0, stdout: JSON.stringify({ tagName: "v2" }), stderr: "" };
       if (command === "gh api repos/acme/repo/git/ref/tags/v2") return { code: 0, stdout: JSON.stringify({ object: { sha: head, type: "commit" } }), stderr: "" };
-      if (command === `git ls-remote -- ${repository} v1 v1^{}`) return { code: 0, stdout: `${base}\trefs/tags/v1\n`, stderr: "" };
+      if (command === `git ls-remote -- ${repository} refs/heads/v1 refs/tags/v1 refs/tags/v1^{}`) return { code: 0, stdout: `${base}\trefs/tags/v1\n`, stderr: "" };
       return fixture.runner(argv, options);
     };
     let materializedRoot = "";
@@ -379,7 +379,7 @@ describe("provider safety and releases", () => {
       expect(resolved.release).toMatchObject({ snapshotFiles: ["a.ts"], deltaFiles: ["a.ts"] });
       expect(resolved.baseRef).toBe(base);
     }, runner);
-    expect(fixture.calls).toContainEqual({ argv: ["git", "ls-tree", "-r", "--name-only", head], cwd: materializedRoot });
+    expect(fixture.calls).toContainEqual({ argv: ["git", "ls-tree", "-r", "--name-only", "-z", head], cwd: materializedRoot });
     expect(fixture.calls).toContainEqual({ argv: ["git", "diff", "--name-status", "--find-renames", "-z", `${base}...${head}`], cwd: materializedRoot });
   });
 
@@ -495,13 +495,14 @@ describe("complete target hardening matrix", () => {
     const checkouts: string[] = [];
     const runner: ArgvRunner = (argv) => {
       const command = argv.join(" ");
-      if (argv[1] === "clone") checkouts.push(argv[5] ?? "");
+      if (argv.includes("clone")) checkouts.push(argv.at(-1) ?? "");
       if (argv.includes("checkout")) writeFileSync(join(argv[2] ?? "", "a.ts"), "snapshot\n");
       if (command.includes("symbolic-ref")) return { code: 0, stdout: "main\n", stderr: "" };
       if (command.includes("rev-parse") && (command.includes("base") || command.includes("main") || command.includes(`${head}^^{commit}`))) return { code: 0, stdout: `${base}\n`, stderr: "" };
       if (command.includes("rev-parse")) return { code: 0, stdout: `${head}\n`, stderr: "" };
       if (command.startsWith("git log")) return { code: 0, stdout: `${head}\n`, stderr: "" };
-      if (command.includes("diff") || command.includes("ls-tree")) return { code: 0, stdout: "a.ts\n", stderr: "" };
+      if (command.includes("ls-tree")) return { code: 0, stdout: "a.ts\0", stderr: "" };
+      if (command.includes("diff")) return { code: 0, stdout: "a.ts\n", stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
     const requests = [

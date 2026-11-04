@@ -3,8 +3,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
+import { ElicitRequestFormParamsSchema } from "@modelcontextprotocol/sdk/types.js";
 import Ajv2020 from "ajv/dist/2020.js";
-import { BoundedStdioTransport, Semaphore, tools } from "../../../adapters/mcp/server.ts";
+import { BoundedStdioTransport, boundedString, Semaphore, tools } from "../../../adapters/mcp/server.ts";
 import { sniffInstallApproval, sniffIntakeApproval, sniffReportApproval, sniffToolInputSchemas } from "../../../src/core/tool-schemas.ts";
 
 const serverPath = new URL("../../../adapters/mcp/server.ts", import.meta.url).pathname;
@@ -20,6 +21,7 @@ type Client = {
   readonly close: () => Promise<number>;
   readonly stderr: () => Promise<string>;
   readonly elicitationParams: Message[];
+  readonly elicitationSchemaErrors: string[];
 };
 
 function object(value: unknown): Message {
@@ -35,6 +37,7 @@ function startClient(action: ElicitationAction = "accept", env: Record<string, s
   if (!input) throw new Error("MCP process stdin was not piped");
   const pending = new Map<number, Pending>();
   const elicitationParams: Message[] = [];
+  const elicitationSchemaErrors: string[] = [];
   const stderrPromise = child.stderr ? new Response(child.stderr).text() : Promise.resolve("");
   let nextId = 1;
   let buffer = "";
@@ -54,6 +57,15 @@ function startClient(action: ElicitationAction = "accept", env: Record<string, s
           if (message.method === "elicitation/create") {
             const params = object(message.params);
             elicitationParams.push(params);
+            const schemaCheck = ElicitRequestFormParamsSchema.safeParse(params);
+            if (!schemaCheck.success) {
+              // A spec-compliant client rejects non-primitive requestedSchema properties.
+              elicitationSchemaErrors.push(schemaCheck.error.message);
+              input.write(`${JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32602, message: "Invalid elicitation params" } })}\n`);
+              input.flush();
+              newline = buffer.indexOf("\n");
+              continue;
+            }
             const messageText = typeof params.message === "string" ? params.message : "";
             const canonical = messageText.includes("\n") ? object(JSON.parse(messageText.slice(messageText.indexOf("\n") + 1))) : {};
             const acceptedDigest = typeof canonical.digest === "string" ? canonical.digest : "";
@@ -96,7 +108,7 @@ function startClient(action: ElicitationAction = "accept", env: Record<string, s
     input.end();
     return await child.exited;
   };
-  return { process: child, request, rawRequest, rawLine, close, stderr: () => stderrPromise, elicitationParams };
+  return { process: child, request, rawRequest, rawLine, close, stderr: () => stderrPromise, elicitationParams, elicitationSchemaErrors };
 }
 
 function repository(): string {
@@ -208,6 +220,49 @@ describe("MCP transport and concurrency units", () => {
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]).toMatchObject({ id: 9, method: "ping" });
     await transport.close();
+  });
+
+  test("discards the rest of an oversized frame instead of dispatching its suffix", async () => {
+    const input = new PassThrough();
+    const outputLines: Message[] = [];
+    const output = new Writable({ write(chunk, _encoding, callback) { outputLines.push(object(JSON.parse(chunk.toString()))); callback(); } });
+    const dispatched: Message[] = [];
+    const transport = new BoundedStdioTransport(input, output, 64);
+    transport.onmessage = (message) => dispatched.push(object(message));
+    await transport.start();
+    const tick = () => new Promise((resolve) => setImmediate(resolve));
+    input.write("x".repeat(80));
+    await tick();
+    input.write("y".repeat(80));
+    await tick();
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 5, method: "ping" })}\n`);
+    await tick();
+    expect(dispatched).toHaveLength(0);
+    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 6, method: "ping" })}\n`);
+    await tick();
+    expect(outputLines).toHaveLength(1);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]).toMatchObject({ id: 6 });
+    await transport.close();
+  });
+
+  test("boundedString cuts on a UTF-8 boundary and stays within the cap including the marker", () => {
+    const value = "é".repeat(100);
+    for (const max of [20, 21, 25, 40]) {
+      const bounded = boundedString(value, max);
+      expect(Buffer.byteLength(bounded)).toBeLessThanOrEqual(max);
+      expect(bounded).not.toContain("\uFFFD");
+      expect(bounded.endsWith("\n[truncated]")).toBe(true);
+    }
+    expect(boundedString("short", 20)).toBe("short");
+  });
+
+  test("a closed semaphore refuses new acquisitions", async () => {
+    const semaphore = new Semaphore();
+    const release = await semaphore.acquire(new AbortController().signal);
+    semaphore.close("shutdown");
+    await expect(semaphore.acquire(new AbortController().signal)).rejects.toMatchObject({ code: "server_closed" });
+    release();
   });
 
   test("bounds queued requests and removes aborted waiters immediately", async () => {
@@ -580,6 +635,29 @@ printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,mai
     rmSync(root, { recursive: true, force: true });
   });
 
+  test("elicitation requests satisfy the SDK form schema with primitive fields only", async () => {
+    const root = repository();
+    const client = startClient();
+    try {
+      await client.request("initialize", { protocolVersion: "2025-11-25", capabilities: { elicitation: { form: {} } }, clientInfo: { name: "schema-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
+      const structured = object(intake.structuredContent);
+      expect(structured.ok).toBe(true);
+      expect(client.elicitationSchemaErrors).toEqual([]);
+      const params = client.elicitationParams[0];
+      const properties = object(object(params?.requestedSchema).properties);
+      expect(Object.keys(properties).sort()).toEqual(["acceptedDigest", "actor", "reason"]);
+      const digest = object(properties.acceptedDigest);
+      expect(digest.type).toBe("string");
+      expect(digest.enum).toEqual([digest.default]);
+      const lease = object(structured.lease);
+      await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } });
+    } finally {
+      await client.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("returns recoverable errors for malformed initialize and tool requests while malformed notifications stay harmless", async () => {
     const client = startClient();
     try {
@@ -849,6 +927,28 @@ sleep 1; exit 0
       expect(await client.stderr()).toBe("");
       rmSync(root, { recursive: true, force: true });
       rmSync(toolsFixture.root, { recursive: true, force: true });
+    }
+  });
+
+  // @ts-expect-error Bun runtime supports timeout options despite installed test typings.
+  test("keeps the lease after adapter-level report validation failures", { timeout: 30_000 }, async () => {
+    const root = repository();
+    const client = startClient("accept");
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "report-adapter-validation-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: intakeInput(root) } })).result);
+      const structured = object(intake.structuredContent);
+      const lease = object(structured.lease);
+      for (const bad of [{ report: null }, { report: reportInputForConfirmation(object(structured.confirmation)), mode: "bogus" }]) {
+        const rejected = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, ...bad } })).result);
+        expect(rejected.isError).toBe(true);
+        expect(object(rejected.structuredContent).error).toMatchObject({ code: "invalid_input" });
+      }
+      const corrected = object((await client.request("tools/call", { name: "sniff_report", arguments: { capability: lease.capability, manifestId: lease.manifestId, report: reportInputForConfirmation(object(structured.confirmation)) } })).result);
+      expect(corrected.isError).toBeUndefined();
+    } finally {
+      await client.close();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 

@@ -10,7 +10,7 @@ export type ArgvResult = {
   readonly stderr: string;
 };
 
-export type ArgvRunner = (argv: readonly string[], options?: { readonly cwd?: string }) => ArgvResult | Promise<ArgvResult>;
+export type ArgvRunner = (argv: readonly string[], options?: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> }) => ArgvResult | Promise<ArgvResult>;
 
 export type TargetKind =
   | "whole-repo"
@@ -107,7 +107,7 @@ function processErrorText(error: unknown): string {
 
 const defaultArgvRunner: ArgvRunner = async (argv, options = {}) => {
   try {
-    const child = Bun.spawn([...argv], { cwd: options.cwd, stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawn([...argv], { cwd: options.cwd, ...(options.env ? { env: { ...process.env, ...options.env } } : {}), stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, code] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
@@ -160,6 +160,11 @@ export function validateRepository(repository: string): string {
 
 function cleanOutput(output: string): string[] {
   return output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+/** Split NUL-delimited git output (`-z`) without trimming names. */
+export function splitNul(output: string): string[] {
+  return output.split("\0").filter((field) => field.length > 0);
 }
 
 function isContained(root: string, candidate: string): boolean {
@@ -225,10 +230,10 @@ function uniqueExistingFiles(root: string, files: readonly string[]): string[] {
   return [...found].sort((left, right) => left.localeCompare(right));
 }
 
-async function execute(runner: ArgvRunner, argv: readonly string[], cwd: string): Promise<ArgvResult> {
+async function execute(runner: ArgvRunner, argv: readonly string[], cwd: string, env?: Readonly<Record<string, string>>): Promise<ArgvResult> {
   let result: ArgvResult;
   try {
-    result = await runner(argv, { cwd });
+    result = await runner(argv, env ? { cwd, env } : { cwd });
   } catch (error) {
     const detail = processErrorText(error);
     const missing = (error as { code?: string }).code === "ENOENT" || /(?:not found|no such file)/i.test(detail);
@@ -261,10 +266,11 @@ export function parseGitNameStatus(output: string): TargetChange[] {
     const fields = output.split("\0").filter(Boolean);
     for (let index = 0; index < fields.length;) {
       const code = fields[index++] ?? "";
-      const status = code.startsWith("A") ? "added" : code.startsWith("D") ? "deleted" : code.startsWith("R") ? "renamed" : code.startsWith("M") ? "modified" : "unknown";
+      const status = code.startsWith("A") || code.startsWith("C") ? "added" : code.startsWith("D") ? "deleted" : code.startsWith("R") ? "renamed" : code.startsWith("M") ? "modified" : "unknown";
       const first = fields[index++] ?? "";
-      const second = status === "renamed" ? fields[index++] : undefined;
-      const basePath = status === "added" ? undefined : first;
+      const copied = code.startsWith("C");
+      const second = status === "renamed" || copied ? fields[index++] : undefined;
+      const basePath = status === "added" || copied ? undefined : first;
       const headPath = status === "deleted" ? undefined : (second ?? first);
       const path = headPath ?? basePath;
       if (path) changes.push({ path, status, ...(basePath ? { basePath } : {}), ...(headPath ? { headPath } : {}) });
@@ -294,20 +300,46 @@ function analyzableChangeFiles(changes: readonly TargetChange[]): string[] {
 }
 
 async function snapshotFiles(runner: ArgvRunner, root: string, ref: string): Promise<string[]> {
-  const tree = await execute(runner, ["git", "ls-tree", "-r", "--name-only", ref], root);
-  return [...new Set(cleanOutput(tree.stdout))].sort((left, right) => left.localeCompare(right));
+  const tree = await execute(runner, ["git", "ls-tree", "-r", "--name-only", "-z", ref], root);
+  return [...new Set(splitNul(tree.stdout))].sort((left, right) => left.localeCompare(right));
+}
+
+/** Parse `git status --porcelain=v1 -z` into changes; renames/copies carry two paths (new, then old). */
+export function parseGitStatusPorcelain(output: string): TargetChange[] {
+  const fields = splitNul(output);
+  const changes: TargetChange[] = [];
+  for (let index = 0; index < fields.length;) {
+    const entry = fields[index++] ?? "";
+    const x = entry[0] ?? " ";
+    const y = entry[1] ?? " ";
+    const path = entry.slice(3);
+    const origin = x === "R" || x === "C" ? fields[index++] : undefined;
+    if (!path) continue;
+    if (x === "!") continue;
+    if (x === "U" || y === "U" || (x === "A" && y === "A") || (x === "D" && y === "D")) {
+      changes.push({ path, status: "unknown", basePath: path, headPath: path });
+    } else if (x === "A" && y === "D") {
+    } else if (x === "R" && origin !== undefined) {
+      if (y === "D") changes.push({ path: origin, status: "deleted", basePath: origin });
+      else changes.push({ path, status: "renamed", basePath: origin, headPath: path });
+    } else if (x === "D" || y === "D") {
+      changes.push({ path, status: "deleted", basePath: path });
+    } else if (x === "A" || x === "C" || x === "?") {
+      changes.push({ path, status: "added", headPath: path });
+    } else {
+      changes.push({ path, status: "modified", basePath: path, headPath: path });
+    }
+  }
+  return changes.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 async function resolveWorkingTree(root: string, runner: ArgvRunner): Promise<ResolvedTarget> {
   const resolvedRoot = ensureRoot(root);
-  const [unstaged, staged, untracked] = await Promise.all([
-    git(runner, resolvedRoot, ["diff", "--name-only"]),
-    git(runner, resolvedRoot, ["diff", "--cached", "--name-only"]),
-    git(runner, resolvedRoot, ["ls-files", "--others", "--exclude-standard"]),
-  ]);
-  const files = uniqueExistingFiles(resolvedRoot, [...cleanOutput(unstaged), ...cleanOutput(staged), ...cleanOutput(untracked)]);
+  const status = await execute(runner, ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], resolvedRoot);
+  const changes = parseGitStatusPorcelain(status.stdout);
+  const files = uniqueExistingFiles(resolvedRoot, changes.flatMap((change) => change.headPath ? [change.headPath] : []));
   const head = await immutableRef(runner, resolvedRoot, "HEAD");
-  return { kind: "working-tree", label: "uncommitted changes", root: resolvedRoot, files, baseRef: head, immutableRef: head, materialization: "in-place" };
+  return { kind: "working-tree", label: "uncommitted changes", root: resolvedRoot, files, changes, baseRef: head, immutableRef: head, materialization: "in-place" };
 }
 
 export async function resolveTarget(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver): Promise<ResolvedTarget> {
@@ -397,6 +429,11 @@ export type TemporaryCheckoutLease = {
   release(): void;
 };
 
+// Untrusted checkouts must not run the user's git hooks or LFS smudge filters.
+// Credential helpers stay available (no GIT_CONFIG_GLOBAL override) for private remotes.
+const UNTRUSTED_GIT_CONFIG = ["-c", "core.hooksPath=/dev/null"] as const;
+const UNTRUSTED_GIT_ENV: Readonly<Record<string, string>> = { GIT_LFS_SKIP_SMUDGE: "1" };
+
 export async function createTemporaryCheckout(
   repository: string,
   ref: string,
@@ -414,14 +451,14 @@ export async function createTemporaryCheckout(
     rmSync(directory, { recursive: true, force: true });
   };
   try {
-    await execute(runner, ["git", "clone", "--no-checkout", "--", source, directory], directory);
+    await execute(runner, ["git", ...UNTRUSTED_GIT_CONFIG, "clone", "--no-checkout", "--", source, directory], directory, UNTRUSTED_GIT_ENV);
     if (!local && fullHistory) {
-      await execute(runner, ["git", "-C", directory, "fetch", "--force", "--tags", "origin"], directory);
-      await execute(runner, ["git", "-C", directory, "fetch", "--force", "origin", ref], directory);
+      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--force", "--tags", "origin"], directory, UNTRUSTED_GIT_ENV);
+      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--force", "origin", ref], directory, UNTRUSTED_GIT_ENV);
     } else if (!local) {
-      await execute(runner, ["git", "-C", directory, "fetch", "--depth=1", "origin", ref], directory);
+      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--depth=1", "origin", ref], directory, UNTRUSTED_GIT_ENV);
     }
-    await execute(runner, ["git", "-C", directory, "checkout", "--detach", ref], directory);
+    await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "checkout", "--detach", ref], directory, UNTRUSTED_GIT_ENV);
     const resolved = await execute(runner, ["git", "-C", directory, "rev-parse", "--verify", "HEAD^{commit}"], directory);
     const immutable = resolved.stdout.trim().toLowerCase();
     if (!isImmutableRef(immutable) || immutable !== ref.toLowerCase()) throw new TargetResolutionError("invalid-ref", "Checkout did not produce the requested immutable commit");
