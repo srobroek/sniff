@@ -12,17 +12,17 @@ import {
 	type IntakeInterview,
 	type RunManifest,
 	type ScopeMode,
+	selectIntakeAnalyzers,
 } from "./intake.ts";
 import { issueRunLease, type RunLeaseReceipt } from "./run-registry.ts";
-import { selectSecurityAnalyzers } from "./security.ts";
 import { type ArgvRunner, runArgv } from "./target.ts";
 import { resolveTargetLease } from "./target-provider.ts";
 
 /** Whether a selected analyzer walks revisions (non scoped-files recipe), so the checkout needs full ancestry. */
-function selectsHistoryWalk(request: NonNullable<IntakeInput["target"]>, security: IntakeInput["security"], scopeMode: ScopeMode): boolean {
+function selectsHistoryWalk(request: NonNullable<IntakeInput["target"]>, security: IntakeInput["security"], objectives: IntakeInput["objectives"], scopeMode: ScopeMode): boolean {
 	const remote = request.kind === "pr" || request.kind === "mr" || request.kind === "release" || request.kind === "repository"
 		|| (request.kind === "history" && !existsSync(resolve(request.rootOrRepository)));
-	return selectSecurityAnalyzers(security, { trust: remote ? "untrusted-remote" : "trusted-local", scopeMode })
+	return selectIntakeAnalyzers({ security, objectives, scopeMode, trust: remote ? "untrusted-remote" : "trusted-local" })
 		.some((analyzer) => analyzer.disposition === "selected" && SNIFF_ANALYZER_RECIPES[analyzer.recipe].scope !== "scoped-files");
 }
 
@@ -229,7 +229,7 @@ export async function runSniffIntakeTool(
 		budget = interview.plan.budget;
 	}
 
-	const targetLease = await resolveTargetLease(targetRequest, runtime.runner ?? runArgv, { walksHistory: selectsHistoryWalk(targetRequest, security, scopeMode) });
+	const targetLease = await resolveTargetLease(targetRequest, runtime.runner ?? runArgv, { walksHistory: selectsHistoryWalk(targetRequest, security, objectives, scopeMode) });
 	try {
 		const target = targetLease.target;
 		const common = {

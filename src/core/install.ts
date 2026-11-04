@@ -1120,7 +1120,9 @@ function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | C
   let approximate = false;
   if (window && isCapturedWindow(window)) {
     if (window.commits.length === 0) logOpts = `--max-count=0 ${window.head}`;
-    else if (window.commits.length <= GITLEAKS_EXPLICIT_COMMIT_LIMIT) logOpts = `--no-walk=unsorted ${window.commits.join(" ")}`;
+    // gitleaks asks git log for patches (-p), but git omits merge patches by default; first-parent diffs keep
+    // secrets brought in by a confirmed merge visible without walking into the merged branch.
+    else if (window.commits.length <= GITLEAKS_EXPLICIT_COMMIT_LIMIT) logOpts = `--diff-merges=first-parent --no-walk=unsorted ${window.commits.join(" ")}`;
     else {
       logOpts = window.base === EMPTY_TREE ? `--max-count=${window.commits.length} ${window.head}` : range(window.base, window.head);
       approximate = true;

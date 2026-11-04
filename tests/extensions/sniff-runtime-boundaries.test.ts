@@ -993,7 +993,7 @@ describe("adaptive runtime boundaries", () => {
         target: { kind: "history", rootOrRepository: local.root, window: { kind: "last-commits", count } },
         intent: "history",
         scopeMode: "full",
-        objectives: ["correctness-and-resilience"],
+        objectives: ["bounded-security-smells"],
         budget: { maxMinutes: 5 },
       } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
       if (!result.manifest || !result.lease) throw new Error("history intake produced no lease");
@@ -1012,6 +1012,40 @@ describe("adaptive runtime boundaries", () => {
       await cancelRunLease(result.lease.capability, result.lease.manifestId);
     }
   }, 60_000);
+
+  test("a confirmed merge commit is scanned with its first-parent patch, so merged-in secrets are visible", async () => {
+    const local = repository();
+    writeFileSync(join(local.root, "base.ts"), "base\n");
+    local.git("add", "-A");
+    local.git("commit", "-qm", "base");
+    local.git("checkout", "-qb", "feature");
+    writeFileSync(join(local.root, "feature.env"), "API_KEY=sk_live_MERGED_IN_SECRET\n");
+    local.git("add", "-A");
+    local.git("commit", "-qm", "feature adds secret");
+    local.git("checkout", "-q", "-");
+    writeFileSync(join(local.root, "main.ts"), "main\n");
+    local.git("add", "-A");
+    local.git("commit", "-qm", "main work");
+    local.git("merge", "--no-ff", "-qm", "merge feature", "feature");
+    const result = await runSniffIntakeTool({ input: {
+      target: { kind: "history", rootOrRepository: local.root, window: { kind: "last-commits", count: 1 } },
+      intent: "history",
+      scopeMode: "full",
+      objectives: ["bounded-security-smells"],
+      budget: { maxMinutes: 5 },
+    } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    if (!result.manifest || !result.lease) throw new Error("history intake produced no lease");
+    const calls: AnalyzerCall[] = [];
+    await runSniffAnalyzer({ capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
+    const argv = calls.at(-1)?.argv ?? [];
+    const logOpts = (argv[argv.indexOf("--log-opts") + 1] ?? "").split(" ");
+    // gitleaks reads `git log -p -U0 <log-opts>`; the merge's patch must carry the merged-in secret.
+    const patch = Bun.spawnSync(["git", "log", "-p", "-U0", ...logOpts], { cwd: calls.at(-1)?.cwd ?? result.manifest.resolvedTarget.root });
+    expect(patch.exitCode).toBe(0);
+    expect(patch.stdout.toString()).toContain("sk_live_MERGED_IN_SECRET");
+    expect(result.manifest.resolvedTarget.history?.commits).toHaveLength(1);
+    await cancelRunLease(result.lease.capability, result.lease.manifestId);
+  }, 30_000);
 
   test("refuses to steal a toolkit lock from a live owner", async () => {
     const cache = mkdtempSync(join(tmpdir(), "sniff-lock-cache-"));
@@ -1137,7 +1171,7 @@ describe("adaptive runtime boundaries", () => {
     const gitleaksArgv = gitleaksCalls.at(-1)?.argv ?? [];
     const captured = historyManifest.resolvedTarget.history?.capturedWindow;
     if (captured?.kind !== "refs") throw new Error(`expected captured refs window, got ${JSON.stringify(captured)}`);
-    expect(gitleaksArgv[gitleaksArgv.indexOf("--log-opts") + 1]).toBe(`--no-walk=unsorted ${captured.head}`);
+    expect(gitleaksArgv[gitleaksArgv.indexOf("--log-opts") + 1]).toBe(`--diff-merges=first-parent --no-walk=unsorted ${captured.head}`);
     expect((await completeReport(history)).artifacts.report.target.kind).toBe("history");
 
     const gitlabRepository = "https://gitlab.com/acme/repo";

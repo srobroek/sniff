@@ -259,6 +259,16 @@ export function canonicalConfirmationRequest(manifest: RunManifest): CanonicalCo
   return freezeDeep({ ...plan, digest });
 }
 
+/**
+ * The one analyzer selection used by manifest construction and by pre-resolution decisions (such as
+ * how much history to fetch), so both see the same canonical objectives and scope. Without a resolved
+ * target, file-type compatibility is not applied, which can only over-select.
+ */
+export function selectIntakeAnalyzers(input: { readonly security?: SecurityRequest; readonly objectives?: readonly string[]; readonly scopeMode: ScopeMode; readonly trust: TargetTrust; readonly target?: ResolvedTarget }): SecurityAnalyzerDisposition[] {
+  const objectives = [...selectObjectiveGroups(input.objectives).selected];
+  return selectSecurityAnalyzers(input.security, { trust: input.trust, target: input.target, scopeMode: input.scopeMode, objectives });
+}
+
 function buildManifest(input: ManifestInput, authorization?: IntakeAuthorization, allowUnconfirmed = false): RunManifest {
   if (input.analyzers) throw new Error("Analyzer dispositions are derived from the trusted catalog and cannot be supplied by callers");
   if (input.authorization) throw new Error("Authorization requires a trusted confirmation boundary");
@@ -273,7 +283,7 @@ function buildManifest(input: ManifestInput, authorization?: IntakeAuthorization
     ...(input.route?.provider ? { provider: input.route.provider } : {}),
   } as RunManifest["route"];
   const objectives = [...selectObjectiveGroups(input.objectives).selected];
-  const analyzers = selectSecurityAnalyzers(input.security, { trust, target: input.target, scopeMode, objectives });
+  const analyzers = selectIntakeAnalyzers({ security: input.security, objectives: input.objectives, scopeMode, trust, target: input.target });
   const content: Omit<RunManifest, "manifestId"> = {
     schemaVersion: "1.0.0",
     resolvedTarget: canonicalTarget(input.target),

@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { intakeConfirmationText } from "../../src/core/confirmation-text.ts";
 import { canonicalConfirmationRequest, createRunManifest } from "../../src/core/intake.ts";
-import { runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
+import { canonicalReportTargetIdentity, runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
+import { OBJECTIVE_GROUPS } from "../../src/core/objectives.ts";
+import { renderCompleteSniffMarkdown } from "../../src/core/report.ts";
+import { runSniffReportTool } from "../../src/core/report-use-case.ts";
 import { cancelRunLease } from "../../src/core/run-registry.ts";
 import {
   type ArgvResult,
@@ -159,7 +162,7 @@ describe("PR change sets come from git", () => {
       const manifest = createRunManifest({ target, intent: "audit", scopeMode: "full", objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } });
       expect(manifest.gaps).toContainEqual(target.gaps?.[0] ?? { field: "missing", reason: "", impact: "low" });
       const text = intakeConfirmationText(canonicalConfirmationRequest(manifest));
-      expect(text).toContain("Target gaps (1):");
+      expect(text).toContain("Gaps: target (high): Change set incomplete");
       expect(text).toContain("provider reports 100");
     }, githubRunner(fixture, { changedFiles: 100 }));
   }, 30_000);
@@ -370,7 +373,7 @@ describe("history-walking analyzers see the ancestry they need", () => {
     r.commit({ "app.ts": "v2\n" }, "remove the secret");
     return r;
   }
-  const intake = (root: string, scopeMode: "full" | "quick") => runSniffIntakeTool({ input: { target: { kind: "whole-repo", root }, intent: "audit", scopeMode, objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
+  const intake = (root: string, scopeMode: "full" | "quick", objectives: string[] = ["bounded-security-smells"]) => runSniffIntakeTool({ input: { target: { kind: "whole-repo", root }, intent: "audit", scopeMode, objectives, budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
 
   test("whole-repo with gitleaks selected keeps a secret removed before HEAD visible in the checkout", async () => {
     const r = secretRepo();
@@ -380,6 +383,28 @@ describe("history-walking analyzers see the ancestry they need", () => {
       const checkout = result.manifest?.resolvedTarget.root ?? "";
       expect(Bun.spawnSync(["git", "-C", checkout, "log", "--all", "--format=%H", "-S", "sk_live_REMOVED_SECRET"]).stdout.toString().trim()).not.toBe("");
       expect(count(checkout, "HEAD")).toBe(3);
+    } finally {
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+    }
+  }, 30_000);
+
+  test("a correctness-only audit skips gitleaks and so keeps the checkout shallow, using the manifest's own selection", async () => {
+    const r = secretRepo();
+    const result = await intake(r.root, "full", ["correctness-and-resilience"]);
+    try {
+      expect(result.manifest?.analyzers.find((analyzer) => analyzer.name === "gitleaks:tracked-history")?.disposition).toBe("skipped");
+      expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(1);
+    } finally {
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+    }
+  }, 30_000);
+
+  test("an all-objectives audit selects gitleaks and fetches full history", async () => {
+    const r = secretRepo();
+    const result = await runSniffIntakeTool({ input: { target: { kind: "whole-repo", root: r.root }, intent: "audit", scopeMode: "full", objectives: [...OBJECTIVE_GROUPS], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
+    try {
+      expect(result.manifest?.analyzers.find((analyzer) => analyzer.name === "gitleaks:tracked-history")?.disposition).toBe("selected");
+      expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(3);
     } finally {
       if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
     }
@@ -499,5 +524,45 @@ describe("captured selections are host-owned", () => {
     await expect(materializeProviderTarget(withCaptured({ ...captured, diffBase: "e".repeat(40) }), runArgv)).rejects.toThrow();
     await expect(materializeProviderTarget(withCaptured({ ...captured, commits: [base] }), runArgv)).rejects.toMatchObject({ code: "invalid-target" });
     await expect(materializeProviderTarget(withCaptured({ ...captured, commits: [head, head] }), runArgv)).rejects.toMatchObject({ code: "invalid-target" });
+  }, 30_000);
+});
+
+describe("target gaps reach the public summary, approval text and report", () => {
+  test("a real PR resolution gap (field target) is projected end to end", async () => {
+    const fixture = pullRequestServer();
+    let approval = "";
+    const result = await runSniffIntakeTool({ input: {
+      target: { kind: "pr", repository: PR_URL, number: 1 },
+      intent: "review-change",
+      scopeMode: "full",
+      objectives: ["correctness-and-resilience"],
+      budget: { maxMinutes: 5 },
+    } }, {
+      runner: githubRunner(fixture, { changedFiles: 100 }),
+      confirmInteractive: async (request) => {
+        approval = intakeConfirmationText(request);
+        return { acceptedDigest: request.digest, actor: "test" };
+      },
+    });
+    if (!result.manifest || !result.lease) throw new Error("PR intake produced no lease");
+    try {
+      const gap = result.manifest.gaps.find(({ field }) => field === "target");
+      expect(gap?.reason).toContain("provider reports 100");
+      // Public intake summary.
+      expect(result.confirmation?.gaps.find(({ field }) => field === "target")).toEqual(gap);
+      // Approval text shown before confirmation.
+      expect(approval).toContain("target (high): Change set incomplete");
+      // Rendered report.
+      const reportTarget = canonicalReportTargetIdentity(result.manifest.resolvedTarget, result.manifest.scopeMode);
+      const { artifacts } = await runSniffReportTool({
+        capability: result.lease.capability,
+        manifestId: result.lease.manifestId,
+        report: { generatedAt: "2026-09-11T00:00:00Z", target: { ...reportTarget, languages: ["TypeScript"] }, headline: "No retained findings.", findings: [], coverage: [], suppressionCount: 0, systemicPatterns: [], extensions: { "sniff.intake": structuredClone(result.manifest) } },
+      });
+      expect(renderCompleteSniffMarkdown(artifacts.report)).toContain("| target | — | — | gap | Change set incomplete: git reports 153 changed files but the provider reports 100");
+    } catch (error) {
+      cancelRunLease(result.lease.capability, result.lease.manifestId);
+      throw error;
+    }
   }, 30_000);
 });
