@@ -41,6 +41,21 @@ const INSTALL_MODES: ReadonlySet<string> = new Set(["probe", "diagnose", "list",
 
 type ToolResult = { readonly content: string; readonly metadata?: Record<string, unknown> };
 
+export const SNIFF_COMMAND = "sniff";
+const SNIFF_COMMAND_DEFAULT = "Run a Sniff code-smell audit of this project. Start the adaptive intake and ask me for whatever the request leaves open.";
+
+type CommandPrompt = { readonly text?: string; readonly skills?: readonly { readonly id: string }[] } & Record<string, unknown>;
+
+/**
+ * The `/sniff` prompt: the user's arguments, or a default request when there are none, with the
+ * `sniff` skill attached so the turn starts from the skill's workflow instead of guessing at tools.
+ */
+export function sniffCommandPrompt(prompt: CommandPrompt, skillId: string): CommandPrompt {
+  const text = typeof prompt.text === "string" && prompt.text.trim() !== "" ? prompt.text : SNIFF_COMMAND_DEFAULT;
+  const skills = [...(prompt.skills ?? []).filter((entry) => entry.id !== skillId), { id: skillId }];
+  return { ...prompt, text, skills };
+}
+
 export type SniffOpenCodeOptions = {
   /** Absolute path of the OpenCode-flavoured `skills/sniff/SKILL.md` shipped beside the bundle. */
   readonly skillPath: string;
@@ -399,6 +414,16 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
         const skill = sniffSkillInfo(options.skillPath);
         registrations.push(await ctx.skill.transform((editor) => {
           if (editor.get(skill.id) === undefined) editor.add(skill);
+        }));
+        registrations.push(await ctx.command.transform((editor) => {
+          editor.add({
+            name: SNIFF_COMMAND,
+            description: "Audit code smells and plan a reviewed refactor: /sniff [target and goal, e.g. src/auth for maintainability]",
+            execute: async ({ sessionID, prompt, delivery }) => {
+              if (disposed) throw new Error(UNLOADED);
+              await ctx.session.prompt({ ...sniffCommandPrompt(prompt, skill.id), sessionID, delivery } as Parameters<typeof ctx.session.prompt>[0]);
+            },
+          });
         }));
         const permissions = sniffAgentPermissions(dirname(options.skillPath));
         registrations.push(await ctx.agent.transform((editor) => {

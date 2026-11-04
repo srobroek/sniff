@@ -21,9 +21,18 @@ export type FakeAssert = {
 
 type Evaluation = { action: string; resources: readonly string[]; metadata?: Record<string, unknown>; effect: string; message?: string; sessionID: string };
 
+export type FakeCommand = {
+  readonly name: string;
+  readonly description?: string;
+  readonly execute: (input: { sessionID: string; prompt: Record<string, unknown>; delivery: string }) => Promise<void>;
+};
+
 export type FakeHost = {
   readonly ctx: Plugin.Context;
   readonly tools: Map<string, FakeTool>;
+  readonly commands: Map<string, FakeCommand>;
+  /** Prompts plugins sent through `session.prompt`. */
+  readonly prompts: Record<string, unknown>[];
   readonly skills: Map<string, Record<string, unknown>>;
   readonly agents: Map<string, Record<string, unknown>>;
   readonly asserts: FakeAssert[];
@@ -43,6 +52,8 @@ export function fakeHost(directory: string, options: Record<string, unknown> = {
   const host: FakeHost = {
     ctx: undefined as unknown as Plugin.Context,
     tools: new Map(),
+    commands: new Map(),
+    prompts: [],
     skills: new Map(Object.entries(seed.skills ?? {})),
     agents: new Map(Object.entries(seed.agents ?? {})),
     asserts: [],
@@ -64,6 +75,19 @@ export function fakeHost(directory: string, options: Record<string, unknown> = {
         const added: string[] = [];
         callback({ add: (tool) => { host.tools.set(tool.name, tool); added.push(tool.name); } });
         return registration("tool", () => { for (const name of added) host.tools.delete(name); });
+      },
+    },
+    command: {
+      transform: async (callback: (editor: { add: (command: FakeCommand) => void }) => void) => {
+        const added: string[] = [];
+        callback({ add: (command) => { host.commands.set(command.name, command); added.push(command.name); } });
+        return registration("command", () => { for (const name of added) host.commands.delete(name); });
+      },
+    },
+    session: {
+      prompt: async (input: Record<string, unknown>) => {
+        host.prompts.push(input);
+        return { id: "msg_prompted" };
       },
     },
     permission: {
