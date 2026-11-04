@@ -20,6 +20,10 @@ export type StreamIncompleteness = "descendant-held-pipe";
 /** Grace period between SIGTERM and SIGKILL for an analyzer process group. */
 export const TERMINATION_GRACE_MS = 100;
 
+/** Upper bound on waiting for a SIGKILLed group to be reaped; a member stuck in the kernel cannot hold cleanup forever. */
+const GROUP_REAP_TIMEOUT_MS = 2_000;
+const GROUP_REAP_POLL_MS = 5;
+
 type GroupSignal = "SIGTERM" | "SIGKILL";
 
 /**
@@ -107,6 +111,7 @@ export class OwnedProcessGroup {
   #control: number | undefined;
   #handshake = "";
   #sentinelPid: number | undefined;
+  #killed = false;
 
   constructor(pgid: number, control: number) {
     this.#pgid = pgid;
@@ -155,8 +160,23 @@ export class OwnedProcessGroup {
     } catch {
       return false;
     }
-    if (signal === "SIGKILL") this.release();
+    if (signal === "SIGKILL") {
+      this.#killed = true;
+      this.release();
+    }
     return true;
+  }
+
+  /**
+   * Resolves once a group this handle SIGKILLed has no member left, zombies included, so cleanup
+   * that follows cannot race a dying member; immediately if it was never SIGKILLed through here.
+   * Only the signal-0 existence probe touches the ID after release. Should the emptied ID be reused
+   * meanwhile, the probe merely waits out the bound; it never delivers a signal.
+   */
+  async reaped(timeoutMs = GROUP_REAP_TIMEOUT_MS): Promise<void> {
+    if (!this.#killed) return;
+    const deadline = Date.now() + timeoutMs;
+    while (groupExists(this.#pgid) && Date.now() < deadline) await Bun.sleep(GROUP_REAP_POLL_MS);
   }
 
   /** Ends every remaining member with SIGKILL while still owned, then releases the group for good. */
@@ -184,6 +204,15 @@ export class OwnedProcessGroup {
     if (line.length < 2) return;
     const pid = Number(line[0]);
     if (/^[1-9]\d*$/.test(line[0] ?? "") && Number.isSafeInteger(pid) && pid > 1 && pid !== this.#pgid && pid !== process.pid) this.#sentinelPid = pid;
+  }
+}
+
+function groupExists(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -289,7 +318,9 @@ export function terminateProcess(proc: Pick<SpawnedProcess, "kill" | "group">, s
 /**
  * Terminates a child and waits for its exit, escalating to SIGKILL after the grace period. While
  * the child's group is still owned after the leader exits, the escalation still runs, so a
- * same-group member that ignores SIGTERM cannot outlive the termination.
+ * same-group member that ignores SIGTERM cannot outlive the termination. Once the group was
+ * SIGKILLed, by this escalation or by the run that owns it, the call returns only after every
+ * member is reaped, so a release that awaits it never races a dying analyzer.
  */
 export async function terminateAndAwait(proc: SpawnedProcess, graceMs = TERMINATION_GRACE_MS): Promise<void> {
   terminateProcess(proc, "SIGTERM");
@@ -303,6 +334,7 @@ export async function terminateAndAwait(proc: SpawnedProcess, graceMs = TERMINAT
   try {
     await proc.exited;
     if (proc.group?.owned()) await escalated;
+    await proc.group?.reaped();
   } catch {
     // An exit that rejects is still an exit; cleanup may proceed.
   } finally {

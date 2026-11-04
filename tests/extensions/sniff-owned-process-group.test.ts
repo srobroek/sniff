@@ -3,7 +3,11 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runCommand } from "../../src/core/install.ts";
+import { createRunManifest } from "../../src/core/intake.ts";
 import { processAlive, type SpawnedProcess, setSupervisorShellForTests, terminateAndAwait } from "../../src/core/process-control.ts";
+import { createSniffRunOwner } from "../../src/core/run-owner.ts";
+import { issueRunLease, registerActiveProcess, unregisterActiveProcess } from "../../src/core/run-registry.ts";
+import { validateResolvedTarget } from "../../src/core/target.ts";
 
 const temps: string[] = [];
 /** Runs that may still be in flight; each is ended only through its own owned group. */
@@ -331,6 +335,39 @@ for (const shell of ["auto", "portable"] as const) describe(`owned process group
     expect(result.exitCode).toBe(0);
     // No PWD, SHLVL or OLDPWD from the shell, which a direct spawn never adds either.
     expect(result.stdout).toBe(`ONLY\0this\0PATH\0${env.PATH}\0`);
+  });
+
+  test("disposing a run owner returns only after the analyzer's whole group, sentinel included, is SIGKILLed and gone", async () => {
+    const dir = tempDir();
+    const root = tempDir();
+    writeFileSync(join(root, "a.ts"), "export const value = 1;\n");
+    const owner = createSniffRunOwner({ label: "owned-group dispose test" });
+    const manifest = createRunManifest({ target: validateResolvedTarget({ kind: "files", label: "a.ts", root, files: ["a.ts"], materialization: "in-place" }), intent: "audit", scopeMode: "full" });
+    const order: string[] = [];
+    const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => order.push("release") }, { owner });
+    const ready = join(dir, "ready");
+    const hold = holdFile(dir);
+    // The leader dies on SIGTERM; its same-group child ignores SIGTERM, so only a SIGKILL ends it.
+    const script = '(trap "" TERM; sh -c \'echo $PPID\' > "$1.tmp" && mv "$1.tmp" "$1"; while [ -e "$2" ]; do sleep 0.05; done) </dev/null >/dev/null 2>&1 & wait';
+    let spawned: SpawnedProcess | undefined;
+    const pending = runCommand(["sh", "-c", script, "sniff-test", ready, hold], root, process.env, 20_000, undefined, undefined, track((handle) => {
+      spawned = handle;
+      registerActiveProcess(lease.capability, lease.manifestId, handle, owner);
+    }));
+    try {
+      const child = await readyPid(ready);
+      const sentinel = sentinelOf(spawned);
+      await owner.dispose("test disposal");
+      order.push("disposed");
+      // No polling: once dispose settles, every member is already gone and the target released after.
+      expect(processAlive(child)).toBe(false);
+      expect(processAlive(sentinel)).toBe(false);
+      expect(order).toEqual(["release", "disposed"]);
+      expect((await pending).signalCode).toBe("SIGTERM");
+    } finally {
+      if (spawned) unregisterActiveProcess(lease.capability, lease.manifestId, spawned.pid, owner);
+      await owner.dispose();
+    }
   });
 
   test("the sentinel exits when the Sniff process is killed", async () => {
