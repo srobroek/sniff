@@ -102,15 +102,31 @@ describe("objectives drive analyzer selection", () => {
       const manifest = createRunManifest({ target: wholeRepo, intent: "audit", scopeMode: "full", objectives: ["structure-and-maintainability", "performance-and-efficiency"] });
       const request = canonicalConfirmationRequest(manifest);
       const summary = publicConfirmationSummary(request);
-      expect(summary.coverageGaps.map(({ field }) => field)).toEqual(["objectives"]);
-      expect(summary.coverageGaps[0]?.reason).toContain("performance-and-efficiency");
+      expect(summary.gaps.map(({ field }) => field)).toEqual(["objectives"]);
+      expect(summary.gaps[0]?.reason).toContain("performance-and-efficiency");
       const skipped = summary.skippedAnalyzers.find(({ name }) => name === "gitleaks:tracked-history");
       expect(skipped?.reason).toContain("selected objectives");
       expect(summary.skippedAnalyzers.map(({ name }) => name)).not.toContain("lizard:complexity");
       expect(summary.skippedAnalyzers.map(({ name }) => name)).toContain("gitleaks:tracked-history");
       const text = intakeConfirmationText(request);
-      expect(text).toContain("Coverage gaps:");
+      expect(text).toContain("Gaps:");
       expect(text).toContain("performance-and-efficiency");
+    });
+
+    test("every manifest gap, whatever its field, reaches the confirmation, summary and approval text", () => {
+      const manifest = createRunManifest({
+        target: wholeRepo,
+        intent: "audit",
+        scopeMode: "full",
+        objectives: ["structure-and-maintainability"],
+        gaps: [{ field: "target", reason: "The target listing was truncated at 5000 files.", impact: "high" }],
+      });
+      const request = canonicalConfirmationRequest(manifest);
+      const summary = publicConfirmationSummary(request);
+      expect(summary.gaps).toEqual([{ field: "target", reason: "The target listing was truncated at 5000 files.", impact: "high" }]);
+      expect(intakeConfirmationText(request)).toContain("target (high): The target listing was truncated at 5000 files.");
+      const without = canonicalConfirmationRequest(createRunManifest({ target: wholeRepo, intent: "audit", scopeMode: "full", objectives: ["structure-and-maintainability"] }));
+      expect(without.digest).not.toBe(request.digest);
     });
 
     test("validateRunManifest rejects a manifest that drops a derived objective gap", () => {

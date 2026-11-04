@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { type ObjectiveCoverageGap, objectiveCoverageGaps } from "./objective-gaps.ts";
+import { objectiveCoverageGaps } from "./objective-gaps.ts";
 import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./objectives.ts";
 import { reportPersistenceSupported } from "./report-native-persistence.ts";
 import { type SecurityAnalyzerDisposition, type SecurityRequest, securityExclusions, selectSecurityAnalyzers, type TargetTrust, validateAnalyzerDispositions } from "./security.ts";
@@ -228,15 +228,15 @@ export type CanonicalConfirmationRequest = {
   readonly objectives: readonly ObjectiveGroup[];
   readonly exclusions: readonly string[];
   readonly analyzers: readonly AnalyzerDisposition[];
-  /** Requested objectives no selected analyzer serves; derived from the plan, shown before approval. */
-  readonly coverageGaps: readonly ObjectiveCoverageGap[];
+  /** Every gap the manifest records (defaults, target, unmet objectives); shown before approval and part of the digest. */
+  readonly gaps: readonly IntakeGap[];
   readonly budget: IntakeBudget;
   readonly trust: TargetTrust;
   readonly materialization: ResolvedTarget["materialization"];
   readonly digest: string;
 };
 
-function confirmationPlan(value: Pick<RunManifest, "resolvedTarget" | "intent" | "scopeMode" | "objectives" | "exclusions" | "analyzers" | "budget" | "route">): Omit<CanonicalConfirmationRequest, "digest" | "files"> & { readonly files: readonly string[] } {
+function confirmationPlan(value: Pick<RunManifest, "resolvedTarget" | "intent" | "scopeMode" | "objectives" | "exclusions" | "analyzers" | "gaps" | "budget" | "route">): Omit<CanonicalConfirmationRequest, "digest" | "files"> & { readonly files: readonly string[] } {
   const target = canonicalTarget(value.resolvedTarget);
   return {
     target,
@@ -246,7 +246,7 @@ function confirmationPlan(value: Pick<RunManifest, "resolvedTarget" | "intent" |
     objectives: cloneSorted(value.objectives),
     exclusions: canonicalStrings(value.exclusions),
     analyzers: cloneSorted(value.analyzers),
-    coverageGaps: cloneSorted(objectiveCoverageGaps(value.objectives, value.analyzers)),
+    gaps: cloneSorted(value.gaps),
     budget: structuredClone(value.budget),
     trust: value.route.trust,
     materialization: value.route.materialization,
@@ -343,7 +343,7 @@ export function validateRunManifest(manifest: RunManifest): void {
   if (manifest.authorization.required !== (manifest.route.mode === "noninteractive") || (manifest.authorization.required && manifest.authorization.acceptedDigest !== request.digest)) throw new Error("Run manifest authorization is inconsistent with its route");
   if (manifest.confirmation.required !== (manifest.route.mode === "interactive") || (manifest.confirmation.required && manifest.confirmation.acceptedDigest !== request.digest)) throw new Error("Run manifest confirmation is inconsistent with its route");
   const recordedGaps = new Set(manifest.gaps.map((gap) => stableJson(gap)));
-  if (request.coverageGaps.some((gap) => !recordedGaps.has(stableJson(gap)))) throw new Error("Run manifest omits an unmet objective coverage gap");
+  if (objectiveCoverageGaps(manifest.objectives, manifest.analyzers).some((gap) => !recordedGaps.has(stableJson(gap)))) throw new Error("Run manifest omits an unmet objective coverage gap");
   validateBudget(manifest.budget);
   validateAnalyzerDispositions(manifest.analyzers, manifest.route.trust);
 }
