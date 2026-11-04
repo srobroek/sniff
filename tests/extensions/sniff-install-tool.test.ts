@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import {
   chmodSync,
@@ -20,7 +20,7 @@ import { ANALYZER_MAX_OBSERVATIONS, mergeAnalyzerResults, parseGitleaksOutput, p
 import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
-import { renderMiseToolkit, runCommand, runSniffInstall } from "../../src/core/install.ts";
+import { readBounded, renderMiseToolkit, runCommand, runSniffInstall } from "../../src/core/install.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../../src/core/opengrep.ts";
 import { processAlive, TERMINATION_GRACE_MS } from "../../src/core/process-control.ts";
 import { SECURITY_ANALYZER_CATALOG } from "../../src/core/security.ts";
@@ -450,6 +450,38 @@ describe("bounded command execution", () => {
 		const deadline = Date.now() + 2_000;
 		while (processAlive(descendant) && Date.now() < deadline) await Bun.sleep(20);
 		expect(processAlive(descendant)).toBe(false);
+	});
+
+	test("installs one cancellation handler per reader however many chunks it reads", async () => {
+		const chunkCount = 2_000;
+		let pulled = 0;
+		const abandon = Promise.withResolvers<void>();
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (pulled < chunkCount) {
+					pulled += 1;
+					controller.enqueue(new Uint8Array(64).fill(0x61));
+					return;
+				}
+				// Every chunk is read, past the byte limit; the stream then stays open like a held pipe.
+				setTimeout(abandon.resolve, 0);
+				return new Promise<void>(() => undefined);
+			},
+		});
+		const race = spyOn(Promise, "race");
+		const subscribe = spyOn(abandon.promise, "then");
+		try {
+			const result = await readBounded(stream, 1_024, abandon.promise);
+			expect(result).toMatchObject({ truncated: true, abandoned: true });
+			expect(result.text).toHaveLength(1_024);
+			expect(pulled).toBe(chunkCount);
+			// One subscription on the abandonment and no per-chunk race subscriptions.
+			expect(subscribe).toHaveBeenCalledTimes(1);
+			expect(race).not.toHaveBeenCalled();
+		} finally {
+			race.mockRestore();
+			subscribe.mockRestore();
+		}
 	});
 
 	test("keeps complete output when the child closes its streams", async () => {

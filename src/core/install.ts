@@ -114,30 +114,29 @@ export type SniffInstallResult = {
 /** How long output may keep draining once the child exited; an escaped descendant can hold a pipe open indefinitely. */
 export const OUTPUT_DRAIN_MS = 250;
 
-const ABANDONED = Symbol("abandoned");
-
 /**
- * Reads one output stream up to the byte limit. Once `abandon` settles, the read stops, the
- * reader is cancelled, and the result is marked truncated because the stream never reached EOF.
+ * Reads one output stream up to the byte limit. Once `abandon` settles before EOF, the reader is
+ * cancelled and the result is marked abandoned: the stream never closed, so the capture may be
+ * incomplete. Exactly one cancellation handler is installed per reader, so pending reactions never
+ * grow with the number of chunks read, retained or discarded.
  */
-async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean; abandoned: boolean }> {
+export async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean; abandoned: boolean }> {
 	if (!stream) return { text: "", truncated: false, abandoned: false };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let retained = 0;
 	let truncated = false;
 	let abandoned = false;
-	const abandonRead = abandon?.then((): typeof ABANDONED => ABANDONED);
+	let finished = false;
+	abandon?.then(() => {
+		if (finished) return;
+		abandoned = true;
+		// Cancelling settles the pending read as done, which ends the loop below.
+		reader.cancel().catch(() => undefined);
+	});
 	try {
 		for (;;) {
-			const pending = reader.read();
-			const next = abandonRead ? await Promise.race([pending, abandonRead]) : await pending;
-			if (next === ABANDONED) {
-				abandoned = true;
-				// The cancelled read settles later; it must never surface as an unhandled rejection.
-				pending.catch(() => undefined);
-				break;
-			}
+			const next = await reader.read();
 			if (next.done) break;
 			const chunk = next.value;
 			if (retained < outputLimitBytes) {
@@ -147,8 +146,11 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 			}
 			if (retained >= outputLimitBytes && chunk.byteLength > 0) truncated = true;
 		}
+	} catch (error) {
+		// A read that a cancellation rejected is the abandonment itself, not a failure.
+		if (!abandoned) throw error;
 	} finally {
-		if (abandoned) reader.cancel().catch(() => undefined);
+		finished = true;
 		try {
 			reader.releaseLock();
 		} catch {
