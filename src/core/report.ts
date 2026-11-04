@@ -336,12 +336,12 @@ function fileArtifactNameMap(report: SniffReport): Map<string, string> {
   return map;
 }
 
-// An objective the manifest records as unmet is requested coverage that did not happen, not "not applicable".
-function objectiveGapRows(report: SniffReport): string[] {
+// A gap the manifest records is requested coverage that did not happen, not "not applicable".
+function manifestGapRows(report: SniffReport): string[] {
   const gaps = (report.extensions["sniff.intake"] as { readonly gaps?: unknown } | undefined)?.gaps;
   if (!Array.isArray(gaps)) return [];
   return gaps.flatMap((gap: { readonly field?: unknown; readonly reason?: unknown }) =>
-    gap?.field === "objectives" && typeof gap.reason === "string" ? [`| objectives | — | — | gap | ${escapeMarkdown(gap.reason)} |`] : [],
+    typeof gap?.field === "string" && typeof gap.reason === "string" ? [`| ${escapeMarkdown(gap.field)} | — | — | gap | ${escapeMarkdown(gap.reason)} |`] : [],
   );
 }
 
@@ -354,7 +354,7 @@ function renderMarkdown(report: SniffReport, bounded: boolean): string {
   const coverageRows = report.coverage.map(
     (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(`${entry.notes}${entry.version ? ` (version ${entry.version})` : ""}`)} |`,
   );
-  coverageRows.push(...objectiveGapRows(report));
+  coverageRows.push(...manifestGapRows(report));
   const findingRows = retained.map((finding, index) => {
     const mapping = finding.smell && finding.refactoring
       ? `[${escapeMarkdown(finding.smell.name)}](${finding.smell.url}) → [${escapeMarkdown(finding.refactoring.name)}](${finding.refactoring.url})`
