@@ -32,20 +32,28 @@ export type TargetKind =
 export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 export type HistoryWindow =
-  | {
-    readonly kind: "refs";
-    readonly base: string;
-    readonly head: string;
-    /** Captured selection: the exact commits the user confirmed, kept through materialization. */
-    readonly commits?: readonly string[];
-    /** Captured diff base (merge base, or the empty tree); the change set is `diffBase..head`. */
-    readonly diffBase?: string;
-  }
+  | { readonly kind: "refs"; readonly base: string; readonly head: string }
   | { readonly kind: "since-date"; readonly date: string; readonly head?: string }
   | { readonly kind: "last-commits"; readonly count: number; readonly head?: string }
   | { readonly kind: "since-release"; readonly release: string; readonly head?: string }
   | { readonly kind: "previous-release"; readonly release?: string; readonly head?: string }
   | { readonly kind: "context-aware-default"; readonly head?: string };
+
+/**
+ * The host-owned selection captured when a window is resolved: exactly the commits the user confirmed and the
+ * diff base (merge base, or the empty tree). It lives in the resolved target only; request input cannot carry it.
+ */
+export type CapturedHistoryWindow = {
+  readonly kind: "refs";
+  readonly base: string;
+  readonly head: string;
+  readonly commits: readonly string[];
+  readonly diffBase: string;
+};
+
+export function isCapturedWindow(window: HistoryWindow | CapturedHistoryWindow): window is CapturedHistoryWindow {
+  return window.kind === "refs" && "diffBase" in window && "commits" in window;
+}
 
 export type TargetRequest =
   | { readonly kind: "whole-repo"; readonly root: string }
@@ -88,7 +96,7 @@ export type ResolvedTarget = {
   readonly immutableRef?: string;
   readonly repository?: string;
   readonly release?: { readonly tag: string; readonly previousTag?: string; readonly previousRef?: string; readonly deltaFiles: readonly string[]; readonly snapshotFiles: readonly string[] };
-  readonly history?: { readonly window: HistoryWindow; readonly capturedWindow?: HistoryWindow; readonly commits: readonly string[] };
+  readonly history?: { readonly window: HistoryWindow; readonly capturedWindow?: HistoryWindow | CapturedHistoryWindow; readonly commits: readonly string[] };
   readonly materialization: "in-place" | "temporary-checkout";
   /** Gaps in the file/change set, e.g. git could not produce the PR diff or disagrees with the provider's count. */
   readonly gaps?: readonly TargetGap[];
@@ -562,16 +570,39 @@ async function fetchCommits(
   return "full-fallback";
 }
 
+async function shallowBoundaries(runner: ArgvRunner, directory: string): Promise<string[]> {
+  const path = (await runner(["git", "-C", directory, "rev-parse", "--git-path", "shallow"], { cwd: directory })).stdout.trim();
+  const file = isAbsolute(path) ? path : resolve(directory, path);
+  return existsSync(file) ? readFileSync(file, "utf8").split(/\s+/).filter(Boolean) : [];
+}
+
+/**
+ * The merge base of two commits, only when shallow history cannot hide a better one. A boundary commit
+ * reachable from either tip that is not an ancestor of the candidate has unseen parents that could contain a
+ * newer common ancestor, so such a candidate is unproven.
+ */
+export async function provenMergeBase(runner: ArgvRunner, directory: string, left: string, right: string): Promise<string | undefined> {
+  const found = await runner(["git", "-C", directory, "merge-base", left, right], { cwd: directory });
+  const candidate = found.stdout.trim().split(/\s+/)[0];
+  if (found.code !== 0 || !candidate || !isImmutableRef(candidate)) return undefined;
+  const isAncestor = async (ancestor: string, descendant: string) => (await runner(["git", "-C", directory, "merge-base", "--is-ancestor", ancestor, descendant], { cwd: directory })).code === 0;
+  for (const boundary of await shallowBoundaries(runner, directory)) {
+    if (boundary === candidate || await isAncestor(boundary, candidate)) continue;
+    if (await isAncestor(boundary, left) || await isAncestor(boundary, right)) return undefined;
+  }
+  return candidate.toLowerCase();
+}
+
 async function connectCommits(runner: ArgvRunner, directory: string, commits: readonly string[], tags: boolean, refspecs: readonly string[], head: string, other: string): Promise<boolean> {
-  const mergeBase = async () => (await runner(["git", "-C", directory, "merge-base", other, head], { cwd: directory })).code === 0;
-  if (await mergeBase()) return true;
+  const proven = async () => (await provenMergeBase(runner, directory, other, head)) !== undefined;
+  if (await proven()) return true;
   for (const step of [50, 500, 5000, 2_147_483_647]) {
     try {
       await fetchCommits(runner, directory, commits, step === 2_147_483_647 ? ["--depth=2147483647"] : [`--deepen=${step}`], tags, refspecs);
     } catch {
       return false;
     }
-    if (await mergeBase()) return true;
+    if (await proven()) return true;
   }
   return false;
 }
@@ -622,7 +653,10 @@ export async function createTemporaryCheckout(
     for (const extra of extras) if (!(await hasCommit(runner, directory, extra))) missing.push(extra);
     let connected = true;
     const first = extras[0];
-    if (settings.connect && first && !missing.includes(first)) {
+    if (settings.connect && !first && (settings.extraCommits ?? []).some((commit) => commit.toLowerCase() === ref.toLowerCase())) {
+      // Identical endpoints (an empty diff) are trivially connected.
+      connected = true;
+    } else if (settings.connect && first && !missing.includes(first)) {
       connected = await connectCommits(runner, directory, wanted.filter((commit) => !missing.includes(commit)), tags, refspecs, ref.toLowerCase(), first);
     } else if (settings.connect) {
       connected = false;
@@ -654,7 +688,15 @@ export async function withTemporaryCheckout<T>(
 }
 
 /** Fetch only what the target needs: ancestry for history and release deltas, both ends for PR/MR diffs. */
-export function checkoutOptions(target: ResolvedTarget): CheckoutOptions {
+export function checkoutOptions(target: ResolvedTarget, walksHistory = false): CheckoutOptions {
+  const options = baseCheckoutOptions(target);
+  if (!walksHistory || options.history === "full") return options;
+  // A selected analyzer that walks revisions (gitleaks) needs every commit of the target and its parents.
+  if (target.kind === "whole-repo" || target.kind === "repository" || target.kind === "history") return { ...options, history: "full" };
+  return options;
+}
+
+function baseCheckoutOptions(target: ResolvedTarget): CheckoutOptions {
   if (target.kind === "pr" || target.kind === "mr") {
     return { extraCommits: target.baseRef ? [target.baseRef] : [], connect: true, refspecs: target.providerRefs ?? [] };
   }
@@ -664,7 +706,7 @@ export function checkoutOptions(target: ResolvedTarget): CheckoutOptions {
   switch (window.kind) {
     case "refs":
       // A captured selection only needs the two trees; an unresolved range needs its ancestry.
-      return window.commits && window.diffBase ? { extraCommits: [window.diffBase] } : { history: "full", extraCommits: [window.base] };
+      return isCapturedWindow(window) ? { extraCommits: [window.diffBase] } : { history: "full", extraCommits: [window.base] };
     case "last-commits":
       return { history: { depth: window.count + 1 } };
     case "context-aware-default":
@@ -683,12 +725,17 @@ export type ResolvedTargetLease = {
   release(): void;
 };
 
-export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver, materializer?: ProviderTargetMaterializer): Promise<ResolvedTargetLease> {
+export type TargetLeaseOptions = {
+  /** A selected analyzer walks revisions, so the checkout must hold the full ancestry of the target. */
+  readonly walksHistory?: boolean;
+};
+
+export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv, providerResolver?: ProviderTargetResolver, materializer?: ProviderTargetMaterializer, options: TargetLeaseOptions = {}): Promise<ResolvedTargetLease> {
   const resolved = await resolveTarget(request, runner, providerResolver);
   if (resolved.materialization === "in-place") return { target: validateResolvedTarget(resolved), release: () => undefined };
   const immutable = resolved.immutableRef ?? resolved.headRef;
   if (!immutable || !isImmutableRef(immutable)) throw new TargetResolutionError("invalid-ref", "Resolved target lacks a full commit SHA");
-  const checkout = await createTemporaryCheckout(resolved.repository ?? resolved.root, immutable, runner, checkoutOptions(resolved));
+  const checkout = await createTemporaryCheckout(resolved.repository ?? resolved.root, immutable, runner, checkoutOptions(resolved, options.walksHistory === true));
   try {
     if (!materializer) throw new TargetResolutionError("invalid-target", "Provider target materialization is unavailable in this host");
     const { fetch, missing, connected } = checkout;

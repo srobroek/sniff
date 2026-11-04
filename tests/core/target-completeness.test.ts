@@ -4,15 +4,18 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { intakeConfirmationText } from "../../src/core/confirmation-text.ts";
 import { canonicalConfirmationRequest, createRunManifest } from "../../src/core/intake.ts";
+import { runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
+import { cancelRunLease } from "../../src/core/run-registry.ts";
 import {
   type ArgvResult,
   type ArgvRunner,
   createTemporaryCheckout,
   EMPTY_TREE,
+  type ResolvedTarget,
   resolveTarget,
   runArgv,
 } from "../../src/core/target.ts";
-import { resolveHistoryAtRoot, withResolvedTarget } from "../../src/core/target-provider.ts";
+import { materializeProviderTarget, resolveHistoryAtRoot, resolveProviderTarget, resolveTargetLease, withResolvedTarget } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
 afterEach(() => {
@@ -48,7 +51,7 @@ function repo(init = true) {
     write(files);
     git("add", "-A");
     tick += 1;
-    const date = `2020-01-${String(tick).padStart(2, "0")}T12:00:00Z`;
+    const date = new Date(Date.UTC(2020, 0, tick, 12)).toISOString();
     const result = Bun.spawnSync(["git", "commit", "-q", "-m", message], { cwd: root, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
     if (result.exitCode !== 0) throw new Error(result.stderr.toString());
     return git("rev-parse", "HEAD");
@@ -151,7 +154,7 @@ describe("PR change sets come from git", () => {
     await withResolvedTarget({ kind: "pr", repository: PR_URL, number: 1 }, (target) => {
       expect([...target.files].sort()).toEqual(EXPECTED_PR_FILES);
       expect(target.gaps).toHaveLength(1);
-      expect(target.gaps?.[0]).toMatchObject({ field: "files", impact: "high" });
+      expect(target.gaps?.[0]).toMatchObject({ field: "target", impact: "high" });
       expect(target.gaps?.[0]?.reason).toContain("provider reports 100");
       const manifest = createRunManifest({ target, intent: "audit", scopeMode: "full", objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } });
       expect(manifest.gaps).toContainEqual(target.gaps?.[0] ?? { field: "missing", reason: "", impact: "low" });
@@ -354,4 +357,147 @@ describe("parentless targets", () => {
     expect(cloned.exitCode).toBe(0);
     await expect(resolveTarget({ kind: "commit", root: join(shallow, "c"), commit: "HEAD" })).rejects.toMatchObject({ code: "command-failure", details: expect.any(String) });
   });
+});
+
+const count = (dir: string, ...rest: string[]) => Number(Bun.spawnSync(["git", "-C", dir, "rev-list", "--count", ...rest]).stdout.toString().trim());
+
+describe("history-walking analyzers see the ancestry they need", () => {
+  function secretRepo() {
+    const r = repo();
+    r.commit({ "app.ts": "v1\n" }, "init");
+    r.commit({ "app.ts": "v1\n", "secret.env": "TOKEN=sk_live_REMOVED_SECRET\n" }, "oops");
+    r.git("rm", "-q", "secret.env");
+    r.commit({ "app.ts": "v2\n" }, "remove the secret");
+    return r;
+  }
+  const intake = (root: string, scopeMode: "full" | "quick") => runSniffIntakeTool({ input: { target: { kind: "whole-repo", root }, intent: "audit", scopeMode, objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
+
+  test("whole-repo with gitleaks selected keeps a secret removed before HEAD visible in the checkout", async () => {
+    const r = secretRepo();
+    const result = await intake(r.root, "full");
+    try {
+      expect(result.manifest?.analyzers.some((analyzer) => analyzer.name === "gitleaks:tracked-history" && analyzer.disposition === "selected")).toBe(true);
+      const checkout = result.manifest?.resolvedTarget.root ?? "";
+      expect(Bun.spawnSync(["git", "-C", checkout, "log", "--all", "--format=%H", "-S", "sk_live_REMOVED_SECRET"]).stdout.toString().trim()).not.toBe("");
+      expect(count(checkout, "HEAD")).toBe(3);
+    } finally {
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+    }
+  }, 30_000);
+
+  test("without a history-walking recipe selected the checkout stays shallow", async () => {
+    const r = secretRepo();
+    const result = await intake(r.root, "quick");
+    try {
+      expect(result.manifest?.analyzers.some((analyzer) => analyzer.name === "gitleaks:tracked-history" && analyzer.disposition === "selected")).toBe(false);
+      expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(1);
+    } finally {
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+    }
+  }, 30_000);
+
+  test("a confirmed local history window keeps every commit and its parents when history is walked", async () => {
+    const r = secretRepo();
+    const request = { kind: "history", rootOrRepository: r.root, window: { kind: "last-commits", count: 1 } } as const;
+    const walked = await resolveTargetLease(request, runArgv, { walksHistory: true });
+    const plain = await resolveTargetLease(request, runArgv);
+    try {
+      expect(count(walked.target.root, "HEAD")).toBe(3);
+      expect(count(plain.target.root, "HEAD")).toBe(1);
+      expect(walked.target.history?.commits).toEqual(plain.target.history?.commits ?? []);
+    } finally {
+      walked.release();
+      plain.release();
+    }
+  }, 30_000);
+});
+
+describe("merge base proof in shallow history", () => {
+  /** HEAD merges a short branch from old ancestor A, while its path to the newer common ancestor B is long. */
+  function deepTopology() {
+    const r = repo();
+    const a = r.commit({ "a.ts": "a\n" }, "A");
+    r.commit({ "m1.ts": "base work\n" }, "m1");
+    const b = r.commit({ "b.ts": "b\n" }, "B");
+    const base = r.commit({ "m2.ts": "more base work\n" }, "m2");
+    r.git("checkout", "-q", "-b", "side", a);
+    r.commit({ "p.ts": "p\n" }, "P");
+    r.git("checkout", "-q", "-b", "pr", b);
+    for (let index = 0; index < 60; index += 1) r.commit({ [`chain/c${index}.ts`]: `${index}\n` }, `c${index}`);
+    const merge = Bun.spawnSync(["git", "merge", "--no-ff", "-q", "-m", "merge side", "side"], { cwd: r.root, stdout: "pipe", stderr: "pipe", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@e.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@e.invalid" } });
+    if (merge.exitCode !== 0) throw new Error(merge.stderr.toString());
+    const head = r.git("rev-parse", "HEAD");
+    r.git("update-ref", "refs/pull/1/head", head);
+    r.git("checkout", "-q", "main");
+    r.git("branch", "-q", "-D", "pr");
+    return { server: r, head, base, b };
+  }
+
+  test("a merge base found in shallow history is not accepted until it is proven", async () => {
+    const fixture = deepTopology();
+    const runner = hostRunner({ remotes: { [PR_URL]: fixture.server.root }, gh: () => ok(JSON.stringify({ headRefOid: fixture.head, baseRefOid: fixture.base })) });
+    await withResolvedTarget({ kind: "pr", repository: PR_URL, number: 1 }, (target) => {
+      expect(target.gaps).toBeUndefined();
+      // Relative to B the PR adds the chain and the side commit; m1/m2/b are base-side changes and must not appear.
+      expect(target.files).toContain("p.ts");
+      expect(target.files).toContain("chain/c0.ts");
+      for (const unrelated of ["m1.ts", "m2.ts", "b.ts"]) expect(target.files).not.toContain(unrelated);
+      expect(target.files).toHaveLength(61);
+    }, runner);
+  }, 60_000);
+
+  test("history that stays shallow at the server is a gap, not a guessed diff", async () => {
+    const fixture = deepTopology();
+    const shallow = scratch("sniff-shallow-server-");
+    const cloned = Bun.spawnSync(["git", "clone", "-q", "--depth=20", "--no-single-branch", `file://${fixture.server.root}`, join(shallow, "s")]);
+    expect(cloned.exitCode).toBe(0);
+    Bun.spawnSync(["git", "-C", join(shallow, "s"), "fetch", "-q", "--depth=20", "origin", "refs/pull/1/head:refs/pull/1/head"]);
+    const runner = hostRunner({ remotes: { [PR_URL]: join(shallow, "s") }, gh: () => ok(JSON.stringify({ headRefOid: fixture.head, baseRefOid: fixture.base })) });
+    await withResolvedTarget({ kind: "pr", repository: PR_URL, number: 1 }, (target) => {
+      expect(target.files).toEqual([]);
+      expect(target.gaps?.[0]).toMatchObject({ field: "target", impact: "high" });
+      expect(target.gaps?.[0]?.reason).toContain("merge base");
+    }, runner);
+  }, 60_000);
+
+  test("identical base and head is a connected, empty change set without a gap", async () => {
+    const fixture = pullRequestServer();
+    const runner = hostRunner({ remotes: { [GL_URL]: fixture.server.root }, gh: () => ok(JSON.stringify({ diff_refs: { head_sha: fixture.head, base_sha: fixture.head }, changes_count: "0" })) });
+    await withResolvedTarget({ kind: "mr", repository: GL_URL, iid: 3 }, (target) => {
+      expect(target.files).toEqual([]);
+      expect(target.changes).toEqual([]);
+      expect(target.gaps).toBeUndefined();
+    }, runner);
+  }, 30_000);
+});
+
+describe("captured selections are host-owned", () => {
+  test("a request window carrying commits or diffBase is rejected, locally and for remotes", async () => {
+    const r = repo();
+    r.commit({ "a.ts": "a\n" });
+    const head = r.commit({ "b.ts": "b\n" });
+    const forged = { kind: "refs", base: "HEAD~1", head: "HEAD", commits: ["f".repeat(40)], diffBase: head } as never;
+    const runner = hostRunner({ remotes: { "https://example.com/o/r.git": r.root } });
+    await expect(resolveProviderTarget({ kind: "history", rootOrRepository: r.root, window: forged }, runner)).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(resolveProviderTarget({ kind: "history", rootOrRepository: "https://example.com/o/r.git", window: forged }, runner)).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(resolveHistoryAtRoot(r.root, forged, runner)).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(runSniffIntakeTool({ input: { target: { kind: "history", rootOrRepository: r.root, window: forged }, intent: "audit", scopeMode: "full", objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) })).rejects.toMatchObject({ code: "invalid-target" });
+  }, 30_000);
+
+  test("a captured selection is validated against the repository at materialization", async () => {
+    const r = repo();
+    r.commit({ "a.ts": "a\n" });
+    const head = r.commit({ "b.ts": "b\n" });
+    const base = r.git("rev-parse", "HEAD~1");
+    const resolved = await resolveHistoryAtRoot(r.root, { kind: "last-commits", count: 1 }, runArgv);
+    const captured = resolved.history?.capturedWindow;
+    if (!captured || !("diffBase" in captured)) throw new Error("expected a captured selection");
+    const withCaptured = (window: unknown): ResolvedTarget => ({ ...resolved, history: { window: { kind: "last-commits", count: 1 }, capturedWindow: window as never, commits: [head] } });
+    const keep = await materializeProviderTarget(withCaptured(captured), runArgv);
+    expect(keep.files).toEqual(["b.ts"]);
+    // Nonexistent commit as diff base, a selection that does not start at its head, and a repeated commit.
+    await expect(materializeProviderTarget(withCaptured({ ...captured, diffBase: "e".repeat(40) }), runArgv)).rejects.toThrow();
+    await expect(materializeProviderTarget(withCaptured({ ...captured, commits: [base] }), runArgv)).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(materializeProviderTarget(withCaptured({ ...captured, commits: [head, head] }), runArgv)).rejects.toMatchObject({ code: "invalid-target" });
+  }, 30_000);
 });

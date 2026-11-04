@@ -4,11 +4,13 @@ import { resolve } from "node:path";
 import {
   type ArgvResult,
   type ArgvRunner,
+  type CapturedHistoryWindow,
   type CheckoutInfo,
   EMPTY_TREE,
   emptyTreeId,
   firstParent,
   type HistoryWindow,
+  isCapturedWindow,
   isImmutableRef,
   parseGitNameStatus,
   type ResolvedTarget,
@@ -19,6 +21,7 @@ import {
   splitNul,
   type TargetChange,
   type TargetGap,
+  type TargetLeaseOptions,
   type TargetRequest,
   TargetResolutionError,
   validateGitOperand,
@@ -307,6 +310,13 @@ async function captureHistoryWindow(repository: string, window: HistoryWindow, r
   return { ...window, head };
 }
 
+/** Captured selections are host-owned; a caller-supplied window may not carry them. */
+function rejectForgedSelection(window: HistoryWindow): void {
+  if ("commits" in window || "diffBase" in window) {
+    throw new TargetResolutionError("invalid-target", "A history window cannot carry a captured commit selection or diff base");
+  }
+}
+
 export async function resolveProviderTarget(request: TargetRequest, runner: ArgvRunner): Promise<ResolvedTarget> {
   if (request.kind === "pr") return resolveGitHubPullRequest(request, runner);
   if (request.kind === "mr") return resolveGitLabMergeRequest(request, runner);
@@ -332,6 +342,7 @@ export async function resolveProviderTarget(request: TargetRequest, runner: Argv
     };
   }
   if (request.kind === "history") {
+    rejectForgedSelection(request.window);
     const local = existsSync(resolve(request.rootOrRepository));
     if (local) return resolveHistoryAtRoot(resolve(request.rootOrRepository), request.window, runner);
     const repository = validateRepository(request.rootOrRepository);
@@ -359,8 +370,8 @@ export async function resolveTarget(request: TargetRequest, runner: ArgvRunner =
     : resolveProviderTarget(request, runner);
 }
 
-export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv) {
-  return resolveLocalTargetLease(request, runner, resolveProviderTarget, materializeProviderTarget);
+export async function resolveTargetLease(request: TargetRequest, runner: ArgvRunner = runArgv, options?: TargetLeaseOptions) {
+  return resolveLocalTargetLease(request, runner, resolveProviderTarget, materializeProviderTarget, options);
 }
 
 export async function withResolvedTarget<T>(request: TargetRequest, callback: (target: ResolvedTarget) => T | Promise<T>, runner: ArgvRunner = runArgv): Promise<T> {
@@ -423,22 +434,26 @@ async function mergeBase(root: string, base: string, head: string, runner: ArgvR
   return parseCommit(result.stdout.trim().split(/\s+/)[0], "History merge base");
 }
 
-export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, runner: ArgvRunner): Promise<ResolvedTarget> {
+export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, runner: ArgvRunner, captured?: CapturedHistoryWindow): Promise<ResolvedTarget> {
+  rejectForgedSelection(window);
   let head: string;
   let base: string;
   let commits: string[];
   // The change set is `diffBase..head`. Windows that start at their oldest commit have an ancestor base;
   // ref ranges diff from the merge base so a diverged base contributes nothing.
   let diffBase: string | undefined;
-  switch (window.kind) {
+  if (captured) {
+    // The host captured this selection at resolution; keep it exactly, after checking it against the repository.
+    head = await localCommit(root, captured.head, runner);
+    base = captured.base === EMPTY_TREE ? EMPTY_TREE : parseCommit(captured.base, "History base");
+    diffBase = captured.diffBase === EMPTY_TREE ? EMPTY_TREE : parseCommit(captured.diffBase, "History diff base");
+    commits = captured.commits.map((commit) => parseCommit(commit, "History commit"));
+    if (commits.length > 0 && commits[0] !== head) throw new TargetResolutionError("invalid-target", "Captured history selection does not start at its head");
+    if (diffBase !== EMPTY_TREE) await localCommit(root, diffBase, runner);
+    if (commits.length > 0 && (new Set(commits)).size !== commits.length) throw new TargetResolutionError("invalid-target", "Captured history selection repeats a commit");
+  } else switch (window.kind) {
     case "refs":
-      if (window.commits && window.diffBase) {
-        head = await localCommit(root, window.head, runner);
-        // A captured selection is kept exactly as confirmed; it is not recomputed from the range.
-        base = window.base === EMPTY_TREE ? EMPTY_TREE : parseCommit(window.base, "History base");
-        diffBase = window.diffBase === EMPTY_TREE ? EMPTY_TREE : parseCommit(window.diffBase, "History diff base");
-        commits = window.commits.map((commit) => parseCommit(commit, "History commit"));
-      } else {
+      {
         base = await localCommit(root, window.base, runner);
         head = await localCommit(root, window.head, runner);
         commits = await logRange(root, [`${base}..${head}`], runner);
@@ -512,7 +527,7 @@ async function materializeChangeRequest(target: ResolvedTarget, runner: ArgvRunn
   const base = target.baseRef;
   const head = target.immutableRef;
   const gaps: TargetGap[] = [...(target.gaps ?? [])];
-  const gap = (reason: string) => gaps.push({ field: "files", reason, impact: "high" });
+  const gap = (reason: string) => gaps.push({ field: "target", reason: `Change set incomplete: ${reason}`, impact: "high" });
   let changes: TargetChange[] = [];
   if (!base || !head) {
     gap("The provider did not supply both a base and a head commit, so the change set could not be computed from git.");
@@ -539,7 +554,9 @@ export async function materializeProviderTarget(target: ResolvedTarget, runner: 
   if (target.kind === "pr" || target.kind === "mr") return materializeChangeRequest(target, runner, checkout);
   if (target.kind === "history" && target.history) {
     const window = target.history.capturedWindow ?? target.history.window;
-    const history = await resolveHistoryAtRoot(target.root, window, runner);
+    const captured = isCapturedWindow(window) ? window : undefined;
+    // A captured selection is replayed as-is; the request window stays the caller's original.
+    const history = await resolveHistoryAtRoot(target.root, captured ? target.history.window : window, runner, captured);
     if (!history.history) throw new TargetResolutionError("invalid-target", "Materialized history target omitted history metadata");
     return {
       ...history,
