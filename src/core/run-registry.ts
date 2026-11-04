@@ -35,6 +35,8 @@ type LeaseRecord = {
   readonly releaseTarget: () => void;
   readonly reservations: Map<string, AnalyzerReservation>;
   readonly activeProcesses: Map<number, SpawnedProcess>;
+  /** The one in-flight report attempt; a second concurrent attempt on the same lease is rejected. */
+  reportClaim?: string;
   pendingRelease?: Promise<void>;
   expiryTimer?: NodeJS.Timeout;
 };
@@ -299,6 +301,29 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
     throw error;
   }
   reservation.state = "completed";
+}
+
+/**
+ * Takes the lease's one-shot reporting state before a report attempt awaits anything, so a second
+ * attempt with the same capability cannot race the first into producing two reports.
+ */
+export function beginRunReport(capability: string, manifestId: string): string {
+  const record = activeLease(capability, manifestId);
+  if (record.reportClaim !== undefined) throw new Error("A Sniff report is already in progress for this run capability");
+  const claim = randomBytes(16).toString("base64url");
+  record.reportClaim = claim;
+  return claim;
+}
+
+/** Throws unless the lease is still live and the report attempt still holds its claim, e.g. after a cancel while awaiting approval. */
+export function assertRunReport(capability: string, manifestId: string, claim: string): void {
+  if (activeLease(capability, manifestId).reportClaim !== claim) throw new Error("Sniff report attempt no longer holds this run capability");
+}
+
+/** Ends a report attempt that wrote nothing, keeping the lease for a corrected retry. */
+export function endRunReport(capability: string, manifestId: string, claim: string): void {
+  const record = activeLeases.get(capability);
+  if (record?.manifestId === manifestId && record.reportClaim === claim) record.reportClaim = undefined;
 }
 
 export function readRunManifest(capability: string, manifestId: string): RunManifest {

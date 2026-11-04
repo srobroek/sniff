@@ -15,7 +15,7 @@ import {
 } from "./report.ts";
 import { registerReportArtifacts } from "./report-artifact-registry.ts";
 import { type OpenedReportDirectory, openReportDirectory } from "./report-native-persistence.ts";
-import { finalizeRunLease, readRunManifest, validateReportCoverage, validateReportManifest } from "./run-registry.ts";
+import { assertRunReport, beginRunReport, endRunReport, finalizeRunLease, readRunManifest, validateReportCoverage, validateReportManifest } from "./run-registry.ts";
 
 export type SniffReportMode = "render" | "save";
 export type SaveAuthorizationRequest = {
@@ -104,7 +104,13 @@ function saveDigest(request: Omit<SaveAuthorizationRequest, "digest">): string {
     .digest("hex");
 }
 
+/**
+ * Builds, and in save mode persists, one report for a lease. The lease ends only once artifacts
+ * exist: render registered them or save wrote them. Any earlier failure (validation, output
+ * directory, denied approval, failed write) keeps the lease for a corrected retry.
+ */
 export async function runSniffReportTool(options: SniffReportToolOptions): Promise<SniffReportToolResult> {
+  const claim = beginRunReport(options.capability, options.manifestId);
   let finalizeLease = false;
   try {
     const manifest = readRunManifest(options.capability, options.manifestId);
@@ -123,9 +129,9 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       extensions: { ...(suppliedExtensions ?? {}), "sniff.intake": manifest },
     });
     const artifacts = createReportArtifacts(report);
-    finalizeLease = true;
     if (options.mode !== "save") {
       const readCapability = registerReportArtifacts(artifacts);
+      finalizeLease = true;
       return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, [], readCapability), savedPaths: [] };
     }
     if (options.runtime === undefined) throw new Error("sniff_report mode=save requires a trusted save authorization boundary");
@@ -145,8 +151,11 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       };
       const request = { ...unsigned, digest: saveDigest(unsigned) };
       const approval = await options.runtime.authorizeSave(request);
+      // A cancel or expiry while approval was pending ended the run; nothing may be written for it.
+      assertRunReport(options.capability, options.manifestId, claim);
       if (!approval || approval.acceptedDigest !== request.digest) throw new Error("Sniff report save authorization was denied or mismatched");
       const savedPaths = saveReportArtifactsAt(artifacts, planned.opened);
+      finalizeLease = true;
       const readCapability = registerReportArtifacts(artifacts);
       return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, savedPaths, readCapability), savedPaths };
     } finally {
@@ -154,5 +163,6 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
     }
   } finally {
     if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId);
+    else endRunReport(options.capability, options.manifestId, claim);
   }
 }
