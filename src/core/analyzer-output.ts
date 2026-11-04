@@ -4,6 +4,7 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import { ANALYZER_MAX_OBSERVATIONS } from "./analyzer-limits.ts";
 import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipeId } from "./analyzer-recipes.ts";
 import { parseOpenGrepOutput } from "./opengrep.ts";
+import type { StreamIncompleteness } from "./process-control.ts";
 
 export { ANALYZER_MAX_OBSERVATIONS };
 
@@ -385,7 +386,17 @@ function isSniffAnalyzerRecipeId(value: string): value is SniffAnalyzerRecipeId 
   return value in SNIFF_ANALYZER_RECIPES;
 }
 
-export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false): AnalyzerParseResult {
+const INCOMPLETENESS_REASONS: Record<StreamIncompleteness, string> = {
+  "descendant-held-pipe": "Analyzer output stream was still held open by a descendant process after the analyzer exited, so capture stopped before end of output",
+};
+
+/**
+ * Parses one analyzer run's stdout. `truncated` means the byte limit cut the capture; `incomplete`
+ * names any other reason the stream never reached EOF. Either makes the capture incomplete, each
+ * with its own reason, so a small valid output is never reported as a capture-limit overflow.
+ */
+export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false, incomplete?: StreamIncompleteness): AnalyzerParseResult {
+  if (incomplete !== undefined && !truncated) return incompleteResult(stdout, false, INCOMPLETENESS_REASONS[incomplete]);
   if (!isSniffAnalyzerRecipeId(recipeId)) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
   const recipe = SNIFF_ANALYZER_RECIPES[recipeId];
   if (recipe.tool !== tool) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);

@@ -27,7 +27,7 @@ import {
   type ToolRec,
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
-import { processAlive, type SpawnedProcess, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
+import { processAlive, type SpawnedProcess, type StreamIncompleteness, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
 import {
   type AnalyzerRunAuthorization,
   abandonAnalyzerReservation,
@@ -65,8 +65,12 @@ export type CommandResult = {
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
+	/** The stream exceeded the byte limit and was cut at it. */
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
+	/** The stream never reached EOF for a reason other than the byte limit. */
+	stdoutIncomplete?: StreamIncompleteness;
+	stderrIncomplete?: StreamIncompleteness;
 	outputLimitBytes: number;
 	timedOut: boolean;
 	signalCode?: string;
@@ -251,8 +255,10 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 		exitCode,
 		stdout: stdout.text,
 		stderr: stderr.text,
-		stdoutTruncated: stdout.truncated || stdout.abandoned,
-		stderrTruncated: stderr.truncated || stderr.abandoned,
+		stdoutTruncated: stdout.truncated,
+		stderrTruncated: stderr.truncated,
+		...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
+		...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
 		outputLimitBytes,
 		timedOut,
 		error: aborted ? "operation aborted" : undefined,
@@ -260,6 +266,14 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 		timeoutMs,
 	};
 }
+/** Install-log notes for a command whose captured output is bounded or incomplete. */
+function outputCaptureNotes(result: CommandResult): string[] {
+	const notes: string[] = [];
+	if (result.stdoutTruncated || result.stderrTruncated) notes.push(`      (output truncated at ${result.outputLimitBytes} bytes per stream)`);
+	if (result.stdoutIncomplete || result.stderrIncomplete) notes.push("      (output incomplete: a descendant process held the stream open after the command exited)");
+	return notes;
+}
+
 function resolveCommand(
 	bin: string,
 	cwd: string,
@@ -616,7 +630,7 @@ async function ensureRustToolchain(
 		const installed = await runtime.run(argv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
 		if (installed.stdout.trim()) lines.push(installed.stdout.trimEnd());
 		if (installed.stderr.trim()) lines.push(installed.stderr.trimEnd());
-		if (installed.stdoutTruncated || installed.stderrTruncated) lines.push(`      (output truncated at ${installed.outputLimitBytes} bytes per stream)`);
+		lines.push(...outputCaptureNotes(installed));
 		if (installed.exitCode !== 0 || installed.timedOut || installed.error) return installed;
 	}
 	if (!makeDefault || installedLine?.includes("default")) return null;
@@ -625,7 +639,7 @@ async function ensureRustToolchain(
 	const selected = await runtime.run(defaultArgv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (selected.stdout.trim()) lines.push(selected.stdout.trimEnd());
 	if (selected.stderr.trim()) lines.push(selected.stderr.trimEnd());
-	if (selected.stdoutTruncated || selected.stderrTruncated) lines.push(`      (output truncated at ${selected.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(selected));
 	return selected.exitCode !== 0 || selected.timedOut || selected.error ? selected : null;
 }
 
@@ -701,7 +715,7 @@ async function installUnmanagedTool(
 	const install = await runtime.run(argv, probeCwd, installEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
-	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(install));
 	if (install.exitCode !== 0 || install.timedOut || install.error) {
 		const status = classifyInstallFailure(install);
 		lines.push(`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
@@ -766,7 +780,7 @@ async function prepareRustTargetToolchain(
 	const prepared = await runtime.run(argv, probeCwd, cargoEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (prepared.stdout.trim()) lines.push(prepared.stdout.trimEnd());
 	if (prepared.stderr.trim()) lines.push(prepared.stderr.trimEnd());
-	if (prepared.stdoutTruncated || prepared.stderrTruncated) lines.push(`      (output truncated at ${prepared.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(prepared));
 	if (prepared.exitCode !== 0 || prepared.timedOut || prepared.error) {
 		return {
 			status: classifyInstallFailure(prepared),
@@ -839,7 +853,7 @@ async function installMiseBundleUnlocked(
 	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, miseInstallTimeoutMs, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
-	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(install));
 	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
 		? classifyInstallFailure(install)
 		: undefined;
@@ -1204,7 +1218,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
       // Each shard is evaluated and parsed alone so no shard can mask another's exit or truncation.
       batches.push({
         result,
-        parsed: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated),
+        parsed: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated, result.stdoutIncomplete),
       });
       if (result.timedOut || result.error || result.exitCode === null || !acceptedExitCodes.includes(result.exitCode)) break;
     } catch (error) {

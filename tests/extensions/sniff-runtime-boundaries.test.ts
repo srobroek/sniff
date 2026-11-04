@@ -832,6 +832,23 @@ describe("adaptive runtime boundaries", () => {
     await cancelRunLease(crashed.lease.capability, crashed.lease.manifestId);
   });
 
+  test("reports a descendant-held output pipe as incomplete output with an accurate reason", async () => {
+    const held = localLease();
+    const base = analyzerRuntime([]);
+    const runtime = analyzerRuntime([], {
+      resolveCommand: base.resolveCommand,
+      run: async (argv, _cwd, _env, timeoutMs) => argv.includes("--csv")
+        ? { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, stdoutIncomplete: "descendant-held-pipe", outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }
+        : { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs },
+    });
+    const result = await runSniffAnalyzer({ capability: held.lease.capability, manifestId: held.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    expect(result).toMatchObject({ ok: false, outcome: "incomplete-output" });
+    expect(result.capture).toMatchObject({ incomplete: true, truncated: false });
+    expect(result.report).toContain("held open by a descendant process");
+    expect(result.report).not.toContain("exceeded");
+    await cancelRunLease(held.lease.capability, held.lease.manifestId);
+  });
+
   test("words a timeout from the effective deadline", async () => {
     const budgeted = localLease({ budget: { maxMinutes: 1 } });
     const base = analyzerRuntime([]);

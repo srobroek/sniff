@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import sniffInstallTool from "../../extensions/sniff-install-tool.ts";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../../src/core/analyzer-artifact-registry.ts";
-import { ANALYZER_MAX_OBSERVATIONS, mergeAnalyzerResults, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
+import { ANALYZER_MAX_OBSERVATIONS, mergeAnalyzerResults, parseAnalyzerOutput, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
 import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
@@ -255,6 +255,24 @@ describe("bounded analyzer output projections", () => {
 		expect(bounded.capture.reason).toContain(ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US"));
 	});
 
+	test("reports a descendant-held pipe as an incomplete capture with an accurate reason", () => {
+		const root = tempDir("sniff-analyzer-held-pipe-");
+		const outputs: Array<[string, string]> = [
+			["lizard:complexity", "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n"],
+			["gitleaks:tracked-history", "[]"],
+			["opengrep:hardcoded-values", '{"results":[]}'],
+		];
+		for (const [recipeId, stdout] of outputs) {
+			const recipe = SNIFF_ANALYZER_RECIPES[recipeId as keyof typeof SNIFF_ANALYZER_RECIPES];
+			const complete = parseAnalyzerOutput(recipe.tool, recipeId, stdout, root);
+			expect(complete.capture.incomplete).toBe(false);
+			const held = parseAnalyzerOutput(recipe.tool, recipeId, stdout, root, false, "descendant-held-pipe");
+			expect({ recipeId, incomplete: held.capture.incomplete, truncated: held.capture.truncated }).toEqual({ recipeId, incomplete: true, truncated: false });
+			expect(held.capture.reason).toContain("held open by a descendant process");
+			expect(held.capture.reason).not.toContain("exceeded");
+		}
+	});
+
 	test("bounds a sharded run by the same observation cap as a single run", () => {
 		const root = tempDir("sniff-analyzer-merge-");
 		const shard = (offset: number, count: number) => parseOpenGrepOutput(JSON.stringify({ results: Array.from({ length: count }, (_, index) => ({ check_id: "r", path: `src/${offset + index}`, start: { line: 1, col: 1 }, extra: { message: "m", severity: "I" } })) }), root);
@@ -413,7 +431,9 @@ describe("bounded command execution", () => {
 		expect(elapsed).toBeLessThan(5_000);
 		expect(result.exitCode).toBe(0);
 		expect(result.timedOut).toBe(false);
-		expect(result.stdoutTruncated).toBe(true);
+		// A held pipe is an incomplete capture, not a byte-limit overflow.
+		expect(result.stdoutTruncated).toBe(false);
+		expect(result.stdoutIncomplete).toBe("descendant-held-pipe");
 	});
 
 	test("returns after a stop even while a setsid descendant holds stdout open", async () => {
@@ -426,7 +446,8 @@ describe("bounded command execution", () => {
 		const result = await pending;
 		expect(Date.now() - stoppedAt).toBeLessThan(5_000);
 		expect(result.error).toBe("operation aborted");
-		expect(result.stdoutTruncated).toBe(true);
+		expect(result.stdoutTruncated).toBe(false);
+		expect(result.stdoutIncomplete).toBe("descendant-held-pipe");
 		// The escaped sleeper is outside the process group by definition; it is recorded, not killed.
 		expect(processAlive(sleeper)).toBe(true);
 	});
@@ -487,6 +508,8 @@ describe("bounded command execution", () => {
 	test("keeps complete output when the child closes its streams", async () => {
 		const result = await runCommand(["sh", "-c", "printf complete; printf err >&2"], tmpdir(), process.env, 5_000);
 		expect(result).toMatchObject({ exitCode: 0, stdout: "complete", stderr: "err", stdoutTruncated: false, stderrTruncated: false, timedOut: false });
+		expect(result.stdoutIncomplete).toBeUndefined();
+		expect(result.stderrIncomplete).toBeUndefined();
 	});
 
 	test("terminates once when a timeout is followed by an abort", async () => {
