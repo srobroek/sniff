@@ -716,15 +716,16 @@ describe("adaptive runtime boundaries", () => {
       resolveCommand: base.resolveCommand,
       run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
         if (argv.includes("--csv")) {
-          onSpawn?.({ pid: 54321, exited: exit.promise });
+          onSpawn?.({ pid: 54321, exited: exit.promise, kill: () => order.push("kill") });
           spawned.resolve();
           await exit.promise;
         }
         return { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
+    // The fake child has no owned process group, so it is ended only through its own handle.
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
-      if (pid === -54321 || pid === 54321) order.push("kill");
+      if (pid === -54321 || pid === 54321) order.push("unowned-pid-signal");
       return true;
     }) as typeof process.kill);
     try {
@@ -762,16 +763,17 @@ describe("adaptive runtime boundaries", () => {
       run: async (argv, _cwd, _env, timeoutMs, _signal, outputLimitBytes, onSpawn) => {
         if (argv.includes("--csv")) {
           now = startedAt + 51;
-          onSpawn?.({ pid: 4242, exited: exit.promise });
+          onSpawn?.({ pid: 4242, exited: exit.promise, kill: () => {
+            order.push("kill");
+            expect(existsSync(leaseFixture.root)).toBe(true);
+          } });
         }
         return { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
+    // The fake child has no owned process group, so it is ended only through its own handle.
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, _signal?: NodeJS.Signals | number) => {
-      if (pid === -4242 || pid === 4242) {
-        order.push("kill");
-        expect(existsSync(leaseFixture.root)).toBe(true);
-      }
+      if (pid === -4242 || pid === 4242) order.push("unowned-pid-signal");
       return true;
     }) as typeof process.kill);
     try {
@@ -793,16 +795,22 @@ describe("adaptive runtime boundaries", () => {
   test("terminates a child registered against a foreign manifest and keeps the lease intact", async () => {
     const leaseFixture = localLease();
     const exited = Promise.withResolvers<number>();
-    const killed: number[] = [];
+    const killed: string[] = [];
+    const pidSignals: number[] = [];
     const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number) => {
-      killed.push(pid);
-      exited.resolve(0);
+      pidSignals.push(pid);
       return true;
     }) as typeof process.kill);
     try {
-      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", { pid: 777, exited: exited.promise }, runOwner)).toThrow("does not match the manifest ID");
+      const child = { pid: 777, exited: exited.promise, kill: (signal: "SIGTERM" | "SIGKILL") => {
+        killed.push(signal);
+        exited.resolve(0);
+      } };
+      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", child, runOwner)).toThrow("does not match the manifest ID");
       await exited.promise;
-      expect(killed).toContain(-777);
+      expect(killed).toContain("SIGTERM");
+      // Without an owned process group the bare PID is never signalled; it may already be reused.
+      expect(pidSignals).toEqual([]);
       expect(existsSync(leaseFixture.root)).toBe(true);
       await cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId, runOwner);
     } finally {

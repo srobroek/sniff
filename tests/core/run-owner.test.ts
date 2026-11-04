@@ -123,10 +123,13 @@ describe("owner-scoped run leases", () => {
     expect(errorOf(() => readRunManifest(capability, "manifest-wrong", theirs))).toBe("Unknown Sniff run capability");
 
     // The no-op paths leave the issuing owner's lease untouched.
+    // A child without an owned process group is ended through its own handle, never by bare PID.
     const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    const handleSignals: string[] = [];
     try {
-      sameAsUnknown((cap) => registerActiveProcess(cap, manifestId, { pid: 987_001, exited: Promise.resolve() }, theirs));
-      expect(kill).toHaveBeenCalledWith(-987_001, "SIGTERM");
+      sameAsUnknown((cap) => registerActiveProcess(cap, manifestId, { pid: 987_001, exited: Promise.resolve(), kill: (signal) => handleSignals.push(signal) }, theirs));
+      expect(handleSignals).toContain("SIGTERM");
+      expect(kill).not.toHaveBeenCalled();
     } finally {
       kill.mockRestore();
     }
@@ -263,16 +266,19 @@ describe("owner disposal", () => {
     const theirHome = authorizeAnalyzerRun(theirRun.capability, theirRun.manifestId, "lizard:complexity", theirs).home;
     const myExit = Promise.withResolvers<number>();
     const theirExit = Promise.withResolvers<number>();
+    // The fake children have no owned process group, so they are ended only through their own handles.
     const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    const signalled: number[] = [];
+    const child = (pid: number, exited: Promise<number>) => ({ pid, exited, kill: () => signalled.push(pid) });
     try {
-      registerActiveProcess(myRun.capability, myRun.manifestId, { pid: 987_101, exited: myExit.promise }, mine);
-      registerActiveProcess(theirRun.capability, theirRun.manifestId, { pid: 987_202, exited: theirExit.promise }, theirs);
+      registerActiveProcess(myRun.capability, myRun.manifestId, child(987_101, myExit.promise), mine);
+      registerActiveProcess(theirRun.capability, theirRun.manifestId, child(987_202, theirExit.promise), theirs);
       let settled = false;
       const disposal = mine.dispose().finally(() => {
         settled = true;
       });
       expect(mine.disposed).toBe(true);
-      expect(kill.mock.calls.map(([pid]) => Math.abs(pid))).toEqual([987_101]);
+      expect(signalled).toEqual([987_101]);
       await Bun.sleep(20);
       // The target and home outlive the child: nothing is released until it exited.
       expect(settled).toBe(false);
@@ -282,7 +288,8 @@ describe("owner disposal", () => {
       await disposal;
       expect(myRun.releases()).toBe(1);
       expect(existsSync(myHome)).toBe(false);
-      expect(kill.mock.calls.some(([pid]) => Math.abs(pid) === 987_202)).toBe(false);
+      expect(signalled).not.toContain(987_202);
+      expect(kill).not.toHaveBeenCalled();
       expect(theirRun.releases()).toBe(0);
       expect(existsSync(theirHome)).toBe(true);
       expect(readRunManifest(theirRun.capability, theirRun.manifestId, theirs).manifestId).toBe(theirRun.manifestId);
@@ -299,14 +306,15 @@ describe("owner disposal", () => {
     const home = authorizeAnalyzerRun(run.capability, run.manifestId, "lizard:complexity", mine).home;
     const exit = Promise.withResolvers<number>();
     const signals: string[] = [];
-    // The child ignores SIGTERM and exits only once the escalation timer sends SIGKILL.
-    const kill = vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: string | number) => {
-      signals.push(String(signal));
+    // The child ignores SIGTERM and exits only once the escalation timer sends SIGKILL; with no owned
+    // process group it is signalled through its own handle, never by bare PID.
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    const handle = { pid: 987_303, exited: exit.promise, kill: (signal: "SIGTERM" | "SIGKILL") => {
+      signals.push(signal);
       if (signal === "SIGKILL") setTimeout(() => exit.resolve(0), 30);
-      return true;
-    }) as typeof process.kill);
+    } };
     try {
-      registerActiveProcess(run.capability, run.manifestId, { pid: 987_303, exited: exit.promise }, mine);
+      registerActiveProcess(run.capability, run.manifestId, handle, mine);
       const cancel = cancelRunLease(run.capability, run.manifestId, mine);
       let disposed = false;
       const disposal = mine.dispose().then(() => {
@@ -319,6 +327,7 @@ describe("owner disposal", () => {
       expect(existsSync(home)).toBe(true);
       await disposal;
       expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(kill).not.toHaveBeenCalled();
       expect(run.releases()).toBe(1);
       expect(existsSync(home)).toBe(false);
       await cancel;

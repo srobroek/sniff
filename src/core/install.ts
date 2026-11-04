@@ -28,7 +28,7 @@ import {
   type ToolRec,
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
-import { processAlive, type SpawnedProcess, type StreamIncompleteness, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
+import { processAlive, type SpawnedProcess, type StreamIncompleteness, spawnInOwnedGroup, TERMINATION_GRACE_MS, terminateAndAwait, terminateProcess } from "./process-control.ts";
 import type { SniffRunOwner } from "./run-owner.ts";
 import {
   type AnalyzerRunAuthorization,
@@ -178,8 +178,15 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
-	const proc = Bun.spawn(argv, { cwd, env, stdout: "pipe", stderr: "pipe", stdin: "ignore", detached: true });
-	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
+	const { proc, group } = spawnInOwnedGroup(argv, { cwd, env });
+	const handle: SpawnedProcess = { pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal), group };
+	try {
+		onSpawn?.(handle);
+	} catch (error) {
+		// A rejected adoption leaves this call nobody to report to; still end the group before releasing it.
+		void terminateAndAwait(handle).finally(() => group.end());
+		throw error;
+	}
 	let timedOut = false;
 	let aborted = false;
 	let reaped = false;
@@ -187,36 +194,22 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	let drainTimer: ReturnType<typeof setTimeout> | undefined;
 	let escalation: Promise<void> | undefined;
 	const drain = Promise.withResolvers<void>();
-	const groupAlive = (): boolean => {
-		try {
-			process.kill(-proc.pid, 0);
-			return true;
-		} catch (error) {
-			return (error as NodeJS.ErrnoException).code === "EPERM";
-		}
-	};
 	/**
 	 * Terminates the child's whole process group once: SIGTERM, then SIGKILL after the grace period.
 	 * Escalation is tracked apart from the leader's exit, so a same-group descendant that ignores
-	 * SIGTERM is still killed after the leader died. The group ID cannot be reused while any member
-	 * lives; a group found empty is never signalled. A descendant that called setsid left the group
-	 * and is out of reach by design; its held pipe is recorded as an abandoned capture instead.
-	 * Residual risk: between the last member exiting and a probe, the kernel could hand the numeric
-	 * ID to a new group, which requires the PID space to wrap within the grace window. An owned
-	 * supervisor that holds the group open would close this; the earlier unprobed signalling had the
-	 * same window, only longer.
+	 * SIGTERM is still killed after the leader died. Every group signal goes through the owned group,
+	 * whose sentinel member keeps the group ID from being reused, so it never reaches a foreign group;
+	 * once the group is no longer owned only the leader's own handle is signalled. A descendant that
+	 * called setsid left the group and is out of reach by design; its held pipe is recorded as an
+	 * abandoned capture instead.
 	 */
 	const terminateGroup = (): Promise<void> => {
 		if (escalation) return escalation;
-		if (reaped && !groupAlive()) {
-			escalation = Promise.resolve();
-			return escalation;
-		}
 		const escalated = Promise.withResolvers<void>();
 		escalation = escalated.promise;
-		terminateProcess(proc, "SIGTERM");
+		terminateProcess(handle, "SIGTERM");
 		forceKill = setTimeout(() => {
-			if (!reaped || groupAlive()) terminateProcess(proc, "SIGKILL");
+			terminateProcess(handle, "SIGKILL");
 			escalated.resolve();
 		}, TERMINATION_GRACE_MS);
 		return escalation;
@@ -242,35 +235,42 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 		drainTimer = setTimeout(drain.resolve, OUTPUT_DRAIN_MS);
 		return code;
 	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
-		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
-		exited,
-	]);
-	clearTimeout(timeout);
-	clearTimeout(drainTimer);
-	drain.resolve();
-	// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
-	if (stdout.abandoned || stderr.abandoned) void terminateGroup();
-	// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
-	if (escalation) await escalation;
-	clearTimeout(forceKill);
-	signal?.removeEventListener("abort", onAbort);
-	return {
-		argv,
-		exitCode,
-		stdout: stdout.text,
-		stderr: stderr.text,
-		stdoutTruncated: stdout.truncated,
-		stderrTruncated: stderr.truncated,
-		...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
-		...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
-		outputLimitBytes,
-		timedOut,
-		error: aborted ? "operation aborted" : undefined,
-		signalCode: proc.signalCode ?? undefined,
-		timeoutMs,
-	};
+	try {
+		const [stdout, stderr, exitCode] = await Promise.all([
+			readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+			readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+			exited,
+		]);
+		clearTimeout(timeout);
+		clearTimeout(drainTimer);
+		drain.resolve();
+		// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
+		if (stdout.abandoned || stderr.abandoned) void terminateGroup();
+		// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
+		if (escalation) await escalation;
+		return {
+			argv,
+			exitCode,
+			stdout: stdout.text,
+			stderr: stderr.text,
+			stdoutTruncated: stdout.truncated,
+			stderrTruncated: stderr.truncated,
+			...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
+			...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
+			outputLimitBytes,
+			timedOut,
+			error: aborted ? "operation aborted" : undefined,
+			signalCode: proc.signalCode ?? undefined,
+			timeoutMs,
+		};
+	} finally {
+		clearTimeout(timeout);
+		clearTimeout(drainTimer);
+		clearTimeout(forceKill);
+		signal?.removeEventListener("abort", onAbort);
+		// Analyzers must not leave processes behind: whatever still shares the group, sentinel included, ends here.
+		group.end();
+	}
 }
 /** Install-log notes for a command whose captured output is bounded or incomplete. */
 function outputCaptureNotes(result: CommandResult): string[] {
