@@ -331,10 +331,12 @@ describe("toolkit install lock", () => {
       start("B");
       start("C");
       await until(() => marker("waiting-B") && marker("waiting-C"), "B and C to wait");
-      // A dies inside the critical section, the case a stale-lock takeover used to handle.
+      // A dies inside the critical section, the case a stale-lock takeover used to handle. Its
+      // marker goes first, while A still holds the lock and will never touch it again: once A is
+      // dead, B or C may take the released lock at once and must find the critical section empty.
+      rmSync(join(sync, "inside"), { recursive: true, force: true });
       holders.get("A")?.kill("SIGKILL");
       await holders.get("A")?.exited;
-      rmSync(join(sync, "inside"), { recursive: true, force: true });
       await until(() => marker("entered-B") || marker("entered-C"), "B or C to enter");
       const [first, second] = marker("entered-B") ? ["B", "C"] : ["C", "B"];
       expect(marker(`entered-${second}`)).toBe(false);
