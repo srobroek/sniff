@@ -152,6 +152,13 @@ describe("structured Sniff reports", () => {
     expect(first.reportId).toBe(later.reportId);
   });
 
+  test("normalizes repeated leading ./ segments idempotently", () => {
+    const report = buildSniffReport(reportInput([finding({ location: { path: "././src/parser.ts", line: 42, anchor: "parseRequest" } })]));
+    expect(report.findings[0]?.location.path).toBe("src/parser.ts");
+    expect(report.findings[0]?.id).toBe(deterministicFindingId(finding()));
+    expect(deterministicFindingId(finding({ location: { path: ".\\./src/parser.ts", line: 42, anchor: "parseRequest" } }))).toBe(deterministicFindingId(finding()));
+  });
+
   test("keeps evidence confidence independent from impact", () => {
     const report = buildSniffReport(
       reportInput([
