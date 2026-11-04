@@ -120,8 +120,8 @@ const ABANDONED = Symbol("abandoned");
  * Reads one output stream up to the byte limit. Once `abandon` settles, the read stops, the
  * reader is cancelled, and the result is marked truncated because the stream never reached EOF.
  */
-async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean }> {
-	if (!stream) return { text: "", truncated: false };
+async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean; abandoned: boolean }> {
+	if (!stream) return { text: "", truncated: false, abandoned: false };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let retained = 0;
@@ -161,7 +161,7 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 		output.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return { text: Buffer.from(output).toString("utf8"), truncated: truncated || abandoned };
+	return { text: Buffer.from(output).toString("utf8"), truncated, abandoned };
 }
 
 
@@ -174,35 +174,58 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
 	let timedOut = false;
 	let aborted = false;
-	let stopping = false;
 	let reaped = false;
 	let forceKill: ReturnType<typeof setTimeout> | undefined;
 	let drainTimer: ReturnType<typeof setTimeout> | undefined;
+	let escalation: Promise<void> | undefined;
 	const drain = Promise.withResolvers<void>();
-	// Termination runs once: a timeout followed by an abort must not schedule a second SIGKILL.
+	const groupAlive = (): boolean => {
+		try {
+			process.kill(-proc.pid, 0);
+			return true;
+		} catch (error) {
+			return (error as NodeJS.ErrnoException).code === "EPERM";
+		}
+	};
+	/**
+	 * Terminates the child's whole process group once: SIGTERM, then SIGKILL after the grace period.
+	 * Escalation is tracked apart from the leader's exit, so a same-group descendant that ignores
+	 * SIGTERM is still killed after the leader died. The group ID cannot be reused while any member
+	 * lives; a group found empty is never signalled. A descendant that called setsid left the group
+	 * and is out of reach by design; its held pipe is recorded as an abandoned capture instead.
+	 */
+	const terminateGroup = (): Promise<void> => {
+		if (escalation) return escalation;
+		if (reaped && !groupAlive()) {
+			escalation = Promise.resolve();
+			return escalation;
+		}
+		const escalated = Promise.withResolvers<void>();
+		escalation = escalated.promise;
+		terminateProcess(proc, "SIGTERM");
+		forceKill = setTimeout(() => {
+			if (!reaped || groupAlive()) terminateProcess(proc, "SIGKILL");
+			escalated.resolve();
+		}, TERMINATION_GRACE_MS);
+		return escalation;
+	};
+	// A timeout followed by an abort reuses the one escalation; it never schedules a second SIGKILL.
 	const stop = (reason: "timeout" | "abort") => {
 		if (reaped) {
-			// The child already exited; stop draining output an escaped descendant may hold open.
+			// The child already exited; stop draining output a descendant may hold open.
 			drain.resolve();
 			return;
 		}
 		if (reason === "timeout") timedOut = true;
 		if (reason === "abort") aborted = true;
-		if (stopping) return;
-		stopping = true;
 		clearTimeout(timeout);
-		terminateProcess(proc, "SIGTERM");
-		forceKill = setTimeout(() => {
-			if (!reaped) terminateProcess(proc, "SIGKILL");
-		}, TERMINATION_GRACE_MS);
+		void terminateGroup();
 	};
 	const timeout = setTimeout(() => stop("timeout"), timeoutMs);
 	const onAbort = () => stop("abort");
 	signal?.addEventListener("abort", onAbort, { once: true });
 	const exited = proc.exited.then((code) => {
 		reaped = true;
-		// Never signal a reaped process group: its ID may already belong to someone else.
-		clearTimeout(forceKill);
 		clearTimeout(timeout);
 		drainTimer = setTimeout(drain.resolve, OUTPUT_DRAIN_MS);
 		return code;
@@ -213,17 +236,21 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 		exited,
 	]);
 	clearTimeout(timeout);
-	clearTimeout(forceKill);
 	clearTimeout(drainTimer);
 	drain.resolve();
+	// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
+	if (stdout.abandoned || stderr.abandoned) void terminateGroup();
+	// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
+	if (escalation) await escalation;
+	clearTimeout(forceKill);
 	signal?.removeEventListener("abort", onAbort);
 	return {
 		argv,
 		exitCode,
 		stdout: stdout.text,
 		stderr: stderr.text,
-		stdoutTruncated: stdout.truncated,
-		stderrTruncated: stderr.truncated,
+		stdoutTruncated: stdout.truncated || stdout.abandoned,
+		stderrTruncated: stderr.truncated || stderr.abandoned,
 		outputLimitBytes,
 		timedOut,
 		error: aborted ? "operation aborted" : undefined,

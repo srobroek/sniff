@@ -431,6 +431,27 @@ describe("bounded command execution", () => {
 		expect(processAlive(sleeper)).toBe(true);
 	});
 
+	test("SIGKILLs a same-group descendant that ignores SIGTERM after a timeout kills its parent", async () => {
+		const { argv, ready } = sleeperCommand("trap", "sleep");
+		const pending = runCommand(argv, tmpdir(), process.env, 1_000);
+		const descendant = await sleeperPid(ready);
+		const result = await pending;
+		expect(result.timedOut).toBe(true);
+		const deadline = Date.now() + 2_000;
+		while (processAlive(descendant) && Date.now() < deadline) await Bun.sleep(20);
+		expect(processAlive(descendant)).toBe(false);
+	});
+
+	test("SIGKILLs a same-group descendant still holding stdout after its parent exits", async () => {
+		const { argv, ready } = sleeperCommand("trap", "exit");
+		const result = await runCommand(argv, tmpdir(), process.env, 20_000);
+		const descendant = await sleeperPid(ready);
+		expect(result.exitCode).toBe(0);
+		const deadline = Date.now() + 2_000;
+		while (processAlive(descendant) && Date.now() < deadline) await Bun.sleep(20);
+		expect(processAlive(descendant)).toBe(false);
+	});
+
 	test("keeps complete output when the child closes its streams", async () => {
 		const result = await runCommand(["sh", "-c", "printf complete; printf err >&2"], tmpdir(), process.env, 5_000);
 		expect(result).toMatchObject({ exitCode: 0, stdout: "complete", stderr: "err", stdoutTruncated: false, stderrTruncated: false, timedOut: false });
