@@ -69,6 +69,12 @@ Repository URLs must not contain credentials, queries, or fragments. Command err
 
 Provider commands use their own credential stores. Analyzer processes receive a restricted environment for untrusted targets.
 
+## Process supervision
+
+Sniff starts every analyzer and installer command through a small `/bin/dash` or `/bin/sh` supervisor that keeps the command's process group owned until cleanup finishes, so Sniff never signals a reused process group. The supervisor shell does not import shell-control variables such as `SHELLOPTS`, `BASH_ENV`, `ENV`, `IFS` or `OPTIND`, so the caller's environment cannot change or stop it. The command still receives exactly the caller's environment.
+
+That has one accepted exposure. The supervisor passes the values of those shell variables, and of variables whose names are not shell identifiers such as exported bash functions, as command-line arguments until it starts the command. During that window, under 1 ms on Linux and about 20 ms on macOS, any local user can read them with `ps`. All other variables, including credentials under ordinary names, travel only through the process environment.
+
 ## Cleanup
 
 A report closes its capability after success or failure. Explicit cancellation closes an unfinished run. A guarded timer removes abandoned checkouts and analyzer homes.

@@ -255,8 +255,19 @@ function assertSpawnable(executable: string | undefined, cwd: string, env: Spawn
 
 /**
  * Splits the caller's environment into what the supervisor shell may import and the `NAME=value`
- * assignments `env` restores before the command runs: shell variables, and names a shell might not
- * pass through. Together they are exactly the caller's environment.
+ * assignments restored before the command runs, by dash itself or by `env`: shell variables, and
+ * names a shell might not pass through. Together they are exactly the caller's environment.
+ *
+ * Accepted exposure: the restored assignments travel as command-line arguments, first of the
+ * supervisor shell and, on the `env` route, of `env`, until the final exec replaces them with the
+ * command's own argv. While they do, any local user can read them with `ps`; measured, that lasts
+ * under 1 ms on Linux and about 20 ms on macOS. It affects only the values of names matched by
+ * `SHELL_VARIABLE` (such as PWD, OLDPWD, SHLVL, `_`, IFS, PS1-PS4, SHELLOPTS, BASH_ENV, ENV,
+ * CDPATH, OPTIND, TMOUT and the BASH* family) and of names that are not shell identifiers (such as
+ * exported bash functions, `BASH_FUNC_name%%`). Every other variable, which covers tokens and
+ * credentials under ordinary names, reaches the command only through the process environment.
+ * The trade is deliberate: importing those names would let the caller's environment control or
+ * stop the supervisor shell, for example `SHELLOPTS=noexec`.
  */
 function splitEnvironment(env: SpawnEnvironment): { readonly shell: Record<string, string>; readonly restored: string[]; readonly dashRestorable: boolean } {
   // Null-prototype: an own `__proto__` key is a valid variable and must be stored, not run a setter.
