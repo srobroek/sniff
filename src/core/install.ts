@@ -199,6 +199,10 @@ export async function runCommand(argv: string[], cwd: string, env: ProcessEnviro
 	 * SIGTERM is still killed after the leader died. The group ID cannot be reused while any member
 	 * lives; a group found empty is never signalled. A descendant that called setsid left the group
 	 * and is out of reach by design; its held pipe is recorded as an abandoned capture instead.
+	 * Residual risk: between the last member exiting and a probe, the kernel could hand the numeric
+	 * ID to a new group, which requires the PID space to wrap within the grace window. An owned
+	 * supervisor that holds the group open would close this; the earlier unprobed signalling had the
+	 * same window, only longer.
 	 */
 	const terminateGroup = (): Promise<void> => {
 		if (escalation) return escalation;
