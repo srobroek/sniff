@@ -10,9 +10,10 @@ import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePubl
 import { processAlive } from "../../src/core/process-control.ts";
 import type { ReportInput } from "../../src/core/report.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
-import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../../src/core/run-registry.ts";
+import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, readRunManifest, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../../src/core/run-registry.ts";
 import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../../src/core/target.ts";
 import { detectProvider, withResolvedTarget } from "../../src/core/target-provider.ts";
+import { unattendedIntakeAllowed } from "../../src/core/unattended.ts";
 
 const temporary: string[] = [];
 const sha = (value: string) => value.repeat(40);
@@ -254,34 +255,94 @@ describe("adaptive runtime boundaries", () => {
     }
   });
 
-  test("registered headless intake applies host-authorized defaults and direct calls fail closed", async () => {
-    const { root } = repository();
-    type ToolOutput = { details: { ok: boolean; result?: SniffIntakePublicResult; error?: string } };
-    type RegisteredTool = {
-      name: string;
-      execute: (id: string, params: { input: unknown }, signal: unknown, update: unknown, ctx: ExtensionContext) => Promise<ToolOutput>;
-    };
-    let definition: RegisteredTool | undefined;
+  type IntakeToolOutput = { details: { ok: boolean; result?: SniffIntakePublicResult; error?: string } };
+  type IntakeTool = { name: string; execute: (id: string, params: { input: unknown }, signal: unknown, update: unknown, ctx: ExtensionContext) => Promise<IntakeToolOutput> };
+
+  function registeredIntake(): IntakeTool {
+    let definition: IntakeTool | undefined;
     const schema = { describe() { return this; }, optional() { return this; } };
     const api = {
       zod: { object: () => schema, unknown: () => schema, string: () => schema },
-      registerTool: (tool: RegisteredTool) => { if (tool.name === "sniff_intake") definition = tool; },
+      registerTool: (tool: IntakeTool) => { if (tool.name === "sniff_intake") definition = tool; },
     };
     sniffIntakeExtension(api as unknown as ExtensionAPI);
     if (!definition) throw new Error("sniff_intake was not registered");
-    const output = await definition.execute("id", { input: { target: { kind: "files", root, paths: [] }, intent: "audit", scopeMode: "full", interactive: false } }, undefined, undefined, {
+    return definition;
+  }
+
+  async function withUnattendedEnv<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+    const previous = process.env.SNIFF_UNATTENDED_INTAKE;
+    if (value === undefined) delete process.env.SNIFF_UNATTENDED_INTAKE;
+    else process.env.SNIFF_UNATTENDED_INTAKE = value;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete process.env.SNIFF_UNATTENDED_INTAKE;
+      else process.env.SNIFF_UNATTENDED_INTAKE = previous;
+    }
+  }
+
+  test("unattendedIntakeAllowed accepts only 1, true and yes", () => {
+    for (const value of ["1", "true", "TRUE", "yes", " Yes "]) expect(unattendedIntakeAllowed({ SNIFF_UNATTENDED_INTAKE: value })).toBe(true);
+    for (const value of [undefined, "", "0", "false", "no", "on", "2"]) expect(unattendedIntakeAllowed({ SNIFF_UNATTENDED_INTAKE: value })).toBe(false);
+    expect(unattendedIntakeAllowed({})).toBe(false);
+  });
+
+  test("OMP headless intake with the operator opt-in records the opt-in as the host actor's reason", async () => {
+    const { root } = repository();
+    const definition = registeredIntake();
+    const output = await withUnattendedEnv("1", () => definition.execute("id", { input: { target: { kind: "files", root, paths: [] }, intent: "audit", scopeMode: "full", interactive: false } }, undefined, undefined, {
       hasUI: false,
       mode: "rpc",
       cwd: root,
-    } as unknown as ExtensionContext);
+    } as unknown as ExtensionContext));
     expect(output.details.ok).toBe(true);
     expect(output.details.result).not.toHaveProperty("manifest");
     expect(output.details.result).not.toHaveProperty("files");
     expect(output.details.result?.reportTarget).toMatchObject({ kind: "files", scopeMode: "full" });
     expect(output.details.result?.reportTarget).not.toHaveProperty("baseRef");
     expect(output.details.result?.reportTarget?.filesAnalyzed).toBe(0);
-    if (output.details.result?.lease) cancelRunLease(output.details.result.lease.capability, output.details.result.lease.manifestId);
+    const lease = output.details.result?.lease;
+    if (!lease) throw new Error("expected a lease");
+    const manifest = readRunManifest(lease.capability, lease.manifestId);
+    expect(manifest.authorization.actor).toBe("extension-host");
+    expect(manifest.authorization.reason).toContain("SNIFF_UNATTENDED_INTAKE");
+    await cancelRunLease(lease.capability, lease.manifestId);
     await expect(runSniffIntakeTool({ input: { target: { kind: "files", root, paths: [] }, intent: "audit", interactive: false } })).rejects.toThrow("trusted confirmation boundary");
+  });
+
+  test("OMP headless intake refuses by default and tool arguments cannot opt in", async () => {
+    const { root } = repository();
+    const definition = registeredIntake();
+    const headless = { hasUI: false, mode: "rpc", cwd: root } as unknown as ExtensionContext;
+    for (const extra of [{}, { unattended: true }, { env: { SNIFF_UNATTENDED_INTAKE: "1" } }, { SNIFF_UNATTENDED_INTAKE: "1" }]) {
+      for (const env of [undefined, "0", "nope"]) {
+        const output = await withUnattendedEnv(env, () => definition.execute("id", { input: { target: { kind: "files", root, paths: [] }, intent: "audit", scopeMode: "full", interactive: false, ...extra } }, undefined, undefined, headless));
+        expect(output.details.ok).toBe(false);
+        expect(output.details.result).toBeUndefined();
+        expect(output.details.error).toContain("SNIFF_UNATTENDED_INTAKE=1");
+      }
+    }
+  });
+
+  test("OMP noninteractive intake with a UI asks ui.confirm and honours a refusal, regardless of the opt-in", async () => {
+    const { root } = repository();
+    const definition = registeredIntake();
+    for (const env of [undefined, "1"]) {
+      for (const approve of [true, false]) {
+        const prompts: string[] = [];
+        const ctx = { hasUI: true, mode: "tui", cwd: root, ui: { confirm: async (title: string) => { prompts.push(title); return approve; } } } as unknown as ExtensionContext;
+        const output = await withUnattendedEnv(env, () => definition.execute("id", { input: { target: { kind: "files", root, paths: [] }, intent: "audit", scopeMode: "full", interactive: false } }, undefined, undefined, ctx));
+        expect(prompts).toHaveLength(1);
+        expect(output.details.ok).toBe(approve);
+        if (approve) {
+          const lease = output.details.result?.lease;
+          if (!lease) throw new Error("expected a lease");
+          expect(readRunManifest(lease.capability, lease.manifestId).authorization.actor).toBe("interactive-user");
+          await cancelRunLease(lease.capability, lease.manifestId);
+        } else expect(output.details.result).toBeUndefined();
+      }
+    }
   });
 
   test("distinguishes missing provider executables from launch failures", async () => {

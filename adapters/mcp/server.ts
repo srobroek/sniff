@@ -33,6 +33,7 @@ import {
 import type { ReportInput } from "../../src/core/report.ts";
 import { readReportArtifact } from "../../src/core/report-artifact-registry.ts";
 import { sniffToolInputSchemas } from "../../src/core/tool-schemas.ts";
+import { UNATTENDED_INTAKE_REASON, UNATTENDED_INTAKE_REQUIRED_MESSAGE, unattendedIntakeAllowed } from "../../src/core/unattended.ts";
 
 const SERVER_VERSION = "0.1.0";
 const MAX_FRAME_BYTES = 1_048_576;
@@ -284,7 +285,7 @@ export const tools = [
   {
     name: "sniff_intake",
     title: "Sniff adaptive intake",
-    description: "Resolve the Sniff intake plan, issue a run lease, and return reportTarget for the matching sniff_report payload.",
+    description: "Resolve the Sniff intake plan, issue a run lease, and return reportTarget for the matching sniff_report payload. The plan needs the person's confirmation through MCP form elicitation, including for interactive:false, which only skips the interview. Without elicitation no lease is issued unless the operator set SNIFF_UNATTENDED_INTAKE=1 in the server environment; tool arguments cannot enable it.",
     inputSchema: sniffToolInputSchemas.sniff_intake,
     outputSchema: outputSchemas.intake,
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
@@ -616,26 +617,31 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     const interview = publicIntakeInterview(input);
     if (!interview.planSummary) return toolSuccess({ ok: true, interview }, JSON.stringify(interview));
   }
-  if (!noninteractive && !supportsFormElicitation()) {
+  const unattended = noninteractive && unattendedIntakeAllowed();
+  if (!unattended && !supportsFormElicitation()) {
     const interview = publicIntakeInterview(input);
+    const message = noninteractive ? UNATTENDED_INTAKE_REQUIRED_MESSAGE : "MCP form elicitation is required before issuing a lease";
     return toolSuccess(
-      { ok: false, interview, confirmationRequired: true, error: { code: "confirmation_required", message: "MCP form elicitation is required before issuing a lease" } },
-      "Sniff intake requires MCP form elicitation; no lease was issued.",
+      { ok: false, interview, confirmationRequired: true, error: { code: "confirmation_required", message } },
+      noninteractive ? `${message} No lease was issued.` : "Sniff intake requires MCP form elicitation; no lease was issued.",
     );
   }
+  const confirm = (request: DigestRequest) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request.");
   const resultPromise = runSniffIntakeTool(
     { input: noninteractive ? input : { ...input, interactive: true } },
-    noninteractive
+    unattended
       ? {
           authority: {
             authorize: async (request) => ({
               acceptedDigest: request.digest,
               actor: "mcp-headless-read-authority",
-              reason: "Explicit interactive:false requests a server-owned noninteractive read authorization for this exact intake digest.",
+              reason: UNATTENDED_INTAKE_REASON,
             }),
           },
         }
-      : { confirmInteractive: (request) => elicitDigest(request, signal, "Confirm the complete canonical Sniff intake request.") },
+      : noninteractive
+        ? { authority: { authorize: confirm } }
+        : { confirmInteractive: confirm },
   );
   const result = await raceWithAbort(resultPromise, signal).catch((error) => {
     void resultPromise.then(
@@ -651,7 +657,7 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
         // The core rejection was observed; never leave a late promise unhandled.
       },
     );
-    if (!noninteractive && isElicitationFailure(error)) throw confirmationRequiredError();
+    if (!unattended && isElicitationFailure(error)) throw confirmationRequiredError();
     throw error;
   });
   if (signal.aborted) {

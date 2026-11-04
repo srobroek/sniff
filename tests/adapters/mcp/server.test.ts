@@ -438,9 +438,9 @@ printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,mai
     }
   });
 
-  test("issues a lifecycle lease for explicit noninteractive intake without elicitation", async () => {
+  test("issues a lifecycle lease for explicit noninteractive intake without elicitation when the operator opts in", async () => {
     const root = repository();
-    const client = startClient();
+    const client = startClient("accept", { SNIFF_UNATTENDED_INTAKE: "1" });
     try {
       await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "headless-test", version: "1" } });
       const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false } } })).result);
@@ -462,9 +462,9 @@ printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,mai
     }
   });
 
-  test("issues a minimal noninteractive lease with recorded defaults and gaps", async () => {
+  test("issues a minimal noninteractive lease with recorded defaults and gaps when the operator opts in", async () => {
     const root = repository();
-    const client = startClient();
+    const client = startClient("accept", { SNIFF_UNATTENDED_INTAKE: "true" });
     try {
       await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "minimal-headless-test", version: "1" } });
       const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { target: { kind: "working-tree", root }, intent: "audit", interactive: false } } })).result);
@@ -484,6 +484,71 @@ printf 'nloc,ccn,param,length,location,file,function\\n60,11,1,55,1-55,é.ts,mai
     } finally {
       await client.close();
       expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("noninteractive intake issues no lease without elicitation unless the operator opts in", async () => {
+    const root = repository();
+    for (const env of [{ SNIFF_UNATTENDED_INTAKE: "" }, { SNIFF_UNATTENDED_INTAKE: "0" }, { SNIFF_UNATTENDED_INTAKE: "maybe" }]) {
+      const client = startClient("accept", env);
+      try {
+        await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "headless-default-test", version: "1" } });
+        const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false } } })).result);
+        const structured = object(intake.structuredContent);
+        expect(structured.ok).toBe(false);
+        expect(structured.confirmationRequired).toBe(true);
+        expect(structured).not.toHaveProperty("lease");
+        expect(object(structured.error).code).toBe("confirmation_required");
+        expect(String(object(structured.error).message)).toContain("SNIFF_UNATTENDED_INTAKE=1");
+        expect(client.elicitationParams).toHaveLength(0);
+      } finally {
+        await client.close();
+        expect(await client.stderr()).toBe("");
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test("noninteractive intake asks for form elicitation by default and issues a lease once accepted", async () => {
+    const root = repository();
+    const client = startClient("accept", { SNIFF_UNATTENDED_INTAKE: "" });
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "headless-elicit-test", version: "1" } });
+      const intake = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false } } })).result);
+      const structured = object(intake.structuredContent);
+      expect(client.elicitationParams).toHaveLength(1);
+      expect(structured.ok).toBe(true);
+      const lease = object(structured.lease);
+      await client.request("tools/call", { name: "sniff_cancel", arguments: { capability: lease.capability, manifestId: lease.manifestId } });
+
+      const declined = startClient("decline", { SNIFF_UNATTENDED_INTAKE: "" });
+      try {
+        await declined.request("initialize", { protocolVersion: "2025-06-18", capabilities: { elicitation: {} }, clientInfo: { name: "headless-decline-test", version: "1" } });
+        const refused = object((await declined.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false } } })).result);
+        expect(object(refused.structuredContent)).not.toHaveProperty("lease");
+        expect(refused.isError).toBe(true);
+      } finally {
+        await declined.close();
+      }
+    } finally {
+      await client.close();
+      expect(await client.stderr()).toBe("");
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("tool arguments cannot enable unattended intake", async () => {
+    const root = repository();
+    const client = startClient("accept", { SNIFF_UNATTENDED_INTAKE: "" });
+    try {
+      await client.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "headless-args-test", version: "1" } });
+      for (const extra of [{ unattended: true }, { env: { SNIFF_UNATTENDED_INTAKE: "1" } }, { SNIFF_UNATTENDED_INTAKE: "1" }]) {
+        const result = object((await client.request("tools/call", { name: "sniff_intake", arguments: { input: { ...intakeInput(root), interactive: false, ...extra }, ...extra } })).result);
+        expect(object(result.structuredContent)).not.toHaveProperty("lease");
+      }
+    } finally {
+      await client.close();
       rmSync(root, { recursive: true, force: true });
     }
   });

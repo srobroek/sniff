@@ -66,6 +66,8 @@ Example requests:
 
 Requests can specify any frontier axis. Sniff resolves missing choices and shows the plan that needs confirmation.
 
+Intake asks you to confirm the plan, including when the request sets `interactive: false`. Unattended MCP or OMP sessions need the operator to set `SNIFF_UNATTENDED_INTAKE=1` in the server environment; OpenCode uses `confirm: false` and permission rules instead. See [Security and trust](security-and-trust.md#unattended-intake).
+
 Read [Interviewing](interviewing.md) for request patterns and noninteractive defaults. Read [Sniff types](sniff-types.md) for exact values.
 
 ## Approve, analyze, and report

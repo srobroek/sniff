@@ -10,6 +10,7 @@ import {
 } from "../src/core/intake-use-case.ts";
 import { cancelRunLease } from "../src/core/run-registry.ts";
 import { sniffIntakeApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
+import { UNATTENDED_INTAKE_REASON, UNATTENDED_INTAKE_REQUIRED_MESSAGE, unattendedIntakeAllowed } from "../src/core/unattended.ts";
 
 function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): SniffIntakeRuntime {
 	return {
@@ -20,7 +21,10 @@ function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): Snif
 		},
 		authority: {
 			authorize: async (request) => {
-				if (!ctx.hasUI) return hostAuthorized ? { acceptedDigest: request.digest, actor: "extension-host", reason: "The host executed the read-approved sniff_intake tool." } : false;
+				if (!ctx.hasUI) {
+					if (!hostAuthorized) throw new Error(UNATTENDED_INTAKE_REQUIRED_MESSAGE);
+					return { acceptedDigest: request.digest, actor: "extension-host", reason: UNATTENDED_INTAKE_REASON };
+				}
 				const granted = await ctx.ui.confirm("Authorize noninteractive Sniff intake", confirmationMessage(request));
 				return granted ? { acceptedDigest: request.digest, actor: "interactive-user", reason: "Confirmed through the OMP UI boundary." } : false;
 			},
@@ -37,7 +41,7 @@ export default function sniffIntakeTool(pi: ExtensionAPI): void {
 		parameters: sniffToolInputSchemas.sniff_intake as unknown as TSchema,
 		execute: async (_id, params: { input: unknown }, _signal, _onUpdate, ctx) => {
 			try {
-				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, true));
+				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, unattendedIntakeAllowed()));
 				const publicResult = publicSniffIntakeResult(result);
 				return { content: [{ type: "text", text: JSON.stringify(publicResult) }], details: { ok: true, result: publicResult } };
 			} catch (error) {

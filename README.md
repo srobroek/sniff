@@ -98,6 +98,10 @@ Read [Getting started](docs/getting-started.md) for installation and the first r
 
 Read [Getting started](docs/getting-started.md) for installation and the first run. Read [Interviewing](docs/interviewing.md) for adaptive intake and approvals. Read [Sniff types](docs/sniff-types.md) for the structured contract. Read [Capabilities](docs/capabilities.md) for implementation and clean-room evidence.
 
+## Unattended intake
+
+`interactive: false` skips the interview but not the approval. By default a person still confirms the plan (MCP elicitation or OMP `ui.confirm`), and a host without a way to ask gets no lease. To allow unattended runs, the operator sets `SNIFF_UNATTENDED_INTAKE=1` in the MCP server or OMP environment. Tool arguments cannot set it. OpenCode uses the plugin option `confirm: false` plus `sniff_confirm_intake` permission rules instead. See [Security and trust](docs/security-and-trust.md#unattended-intake).
+
 ## Targets and trust
 
 Sniff accepts these target kinds:

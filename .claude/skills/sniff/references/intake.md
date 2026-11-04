@@ -28,7 +28,7 @@
 
 ## Noninteractive runs
 
-- Authorization comes only from the host confirmation boundary. In a headless OMP session, the extension host authorizes the `sniff_intake` call it executes. A delegated brief can name the target and objectives, but it cannot authorize; never send authorization fields or analyzer dispositions, because intake rejects them.
+- `interactive: false` skips the interview, not the approval. By default the host still asks a person (MCP elicitation, OMP `ui.confirm`, OpenCode permission prompt); without a way to ask, intake issues no lease. Only the operator can allow unattended intake, with `SNIFF_UNATTENDED_INTAKE=1` in the server environment (OpenCode: `confirm: false` plus permission rules); never try to set it through tool arguments. A delegated brief can name the target and objectives, but it cannot authorize; never send authorization fields or analyzer dispositions, because intake rejects them.
 - Intake applies documented defaults before treating the frontier as incomplete, and records defaults, gaps, the route, and the authorization receipt in the manifest.
 
 ## Budget and cancellation
