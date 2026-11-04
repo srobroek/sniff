@@ -179,6 +179,19 @@ export function validateGitOperand(value: string, label: string): string {
   return trimmed;
 }
 
+/**
+ * A `since-date` window value as an explicit UTC instant for git's `--since`/`--shallow-since`.
+ * Git reads a bare `YYYY-MM-DD` as the current time of day on that date in the host's time zone,
+ * so the same window would select different commits on different hosts and at different hours.
+ * A bare date means midnight UTC; a timestamp without an offset is read as UTC.
+ */
+export function historySinceInstant(value: string): string {
+  const date = validateGitOperand(value, "History date");
+  const instant = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T00:00:00Z` : /(?:Z|[+-]\d{2}:\d{2})$/.test(date) ? date : `${date}Z`);
+  if (Number.isNaN(instant)) throw new TargetResolutionError("invalid-target", "History date must be an ISO 8601 date or timestamp");
+  return new Date(instant).toISOString();
+}
+
 export function validateRepository(repository: string): string {
   const value = validateGitOperand(repository, "Repository");
   if (/\s/.test(value)) throw new TargetResolutionError("invalid-target", "Repository URL contains whitespace");
@@ -533,7 +546,7 @@ function depthArguments(history: CheckoutOptions["history"]): string[] {
   if (history === undefined || history === "tip") return ["--depth=1"];
   if (history === "full") return [];
   if ("depth" in history) return [`--depth=${Math.max(1, Math.floor(history.depth))}`];
-  return [`--shallow-since=${validateGitOperand(history.since, "History date")}`];
+  return [`--shallow-since=${historySinceInstant(history.since)}`];
 }
 
 /**

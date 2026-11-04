@@ -434,7 +434,7 @@ describe("history semantics", () => {
     ];
     for (const window of windows) await resolveTarget({ kind: "history", rootOrRepository: root, window }, runner);
     expect(calls).toContainEqual({ argv: ["git", "log", "--format=%H", `${base}..${head}`], cwd: root });
-    expect(calls).toContainEqual({ argv: ["git", "log", "--format=%H", "--since=2026-01-02", head], cwd: root });
+    expect(calls).toContainEqual({ argv: ["git", "log", "--format=%H", "--since=2026-01-02T00:00:00.000Z", head], cwd: root });
     expect(calls).toContainEqual({ argv: ["git", "log", "--format=%H", "-n", "3", head], cwd: root });
     expect(calls).toContainEqual({ argv: ["git", "log", "--format=%H", "-n", "1", head], cwd: root });
     expect(calls).toContainEqual({ argv: ["git", "describe", "--tags", "--abbrev=0", head], cwd: root });

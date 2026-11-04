@@ -66,7 +66,7 @@ Sniff uses provider credential stores. Repository URLs must not contain user inf
 `HistoryWindow` contains six values:
 
 - `refs`: compare `base` with `head`.
-- `since-date`: select history after `date`. An optional `head` ends the window.
+- `since-date`: select history after `date`. An optional `head` ends the window. A bare date means midnight UTC, and a timestamp without an offset is read as UTC, so the window selects the same commits on every host.
 - `last-commits`: select a positive `count`. An optional `head` ends the window.
 - `since-release`: select changes after `release`. An optional `head` ends the window.
 - `previous-release`: compare a release with its predecessor. `release` and `head` are optional.

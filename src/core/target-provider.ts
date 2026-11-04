@@ -10,6 +10,7 @@ import {
   emptyTreeId,
   firstParent,
   type HistoryWindow,
+  historySinceInstant,
   isCapturedWindow,
   isImmutableRef,
   parseGitNameStatus,
@@ -461,7 +462,7 @@ export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, 
       break;
     case "since-date":
       {
-        const date = validateDate(window.date);
+        const date = historySinceInstant(validateDate(window.date));
         head = await localCommit(root, window.head ?? "HEAD", runner);
         commits = await logRange(root, [`--since=${date}`, head], runner);
       }
