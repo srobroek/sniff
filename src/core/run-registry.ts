@@ -198,33 +198,44 @@ export function issueRunLease(
   targetLease: ResolvedTargetLease,
   options: { readonly ttlMs?: number; readonly sandboxGrant?: string; readonly now?: () => number } = {},
 ): RunLeaseReceipt {
-  const canonicalManifest = canonicalManifestJson(manifest);
-  const target = validateResolvedTarget(targetLease.target);
-  if (canonicalManifestJson({ ...manifest, resolvedTarget: target }) !== canonicalManifest) {
-    targetLease.release();
-    throw new Error("Run manifest target does not match the materialized lease target");
-  }
-  const capability = randomBytes(32).toString("base64url");
   const now = options.now ?? Date.now;
-  const issuedAt = now();
-  const expiresAt = issuedAt + (options.ttlMs ?? LEASE_TTL_MS);
-  const home = mkdtempSync(join(tmpdir(), "sniff-run-home-"));
-  const record: LeaseRecord = {
-    capability,
-    manifestId: manifest.manifestId,
-    manifest,
-    canonicalManifest,
-    target,
-    targetIdentity: targetFingerprint(target),
-    issuedAt,
-    expiresAt,
-    now,
-    home,
-    ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
-    releaseTarget: targetLease.release,
-    reservations: new Map(),
-    activeProcesses: new Map(),
-  };
+  let home: string | undefined;
+  let record: LeaseRecord;
+  try {
+    const canonicalManifest = canonicalManifestJson(manifest);
+    const target = validateResolvedTarget(targetLease.target);
+    if (canonicalManifestJson({ ...manifest, resolvedTarget: target }) !== canonicalManifest) {
+      throw new Error("Run manifest target does not match the materialized lease target");
+    }
+    const issuedAt = now();
+    home = mkdtempSync(join(tmpdir(), "sniff-run-home-"));
+    record = {
+      capability: randomBytes(32).toString("base64url"),
+      manifestId: manifest.manifestId,
+      manifest,
+      canonicalManifest,
+      target,
+      targetIdentity: targetFingerprint(target),
+      issuedAt,
+      expiresAt: issuedAt + (options.ttlMs ?? LEASE_TTL_MS),
+      now,
+      home,
+      ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
+      releaseTarget: targetLease.release,
+      reservations: new Map(),
+      activeProcesses: new Map(),
+    };
+  } catch (error) {
+    // Until the lease is registered nothing else owns the target or home, so every failure releases both.
+    if (home !== undefined) rmSync(home, { recursive: true, force: true });
+    try {
+      targetLease.release();
+    } catch {
+      // Preserve the issuance failure.
+    }
+    throw error;
+  }
+  const { capability, expiresAt } = record;
   activeLeases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
     // Expiry is best-effort cleanup and must never crash the extension host.
@@ -364,15 +375,12 @@ export function finalizeRunLease(capability: string, manifestId: string): Promis
   return record?.manifestId === manifestId ? releaseRecord(record, "released") : Promise.resolve();
 }
 
+/**
+ * Releases every active lease. Shutdown cleanup is best-effort: the promise settles only once every
+ * lease's children exited and its cleanup ran, and one failed release never cuts the others short.
+ */
 export function releaseAllRunLeases(reason: string): Promise<void> {
   const bounded = boundedReason(reason);
-  const pending: Promise<void>[] = [];
-  for (const record of [...activeLeases.values()]) {
-    try {
-      pending.push(releaseRecord(record, "cancelled", bounded));
-    } catch {
-      // Shutdown cleanup is best-effort; continue releasing every active lease.
-    }
-  }
-  return Promise.all(pending).then(() => undefined);
+  const pending = [...activeLeases.values()].map((record) => releaseRecord(record, "cancelled", bounded));
+  return Promise.allSettled(pending).then(() => undefined);
 }

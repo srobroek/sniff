@@ -208,6 +208,52 @@ describe("adaptive runtime boundaries", () => {
     expect(() => releaseAllRunLeases("second shutdown")).not.toThrow();
   });
 
+  test("releases the materialized target whenever lease issuance fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "sniff-issue-failure-"));
+    temporary.push(root);
+    writeFileSync(join(root, "a.ts"), "export {};\n");
+    const manifest = createRunManifest({ target: validateResolvedTarget({ kind: "files", label: "a.ts", root, files: ["a.ts"], materialization: "in-place" }), intent: "audit", scopeMode: "full" });
+    let releases = 0;
+    const release = () => {
+      releases += 1;
+    };
+    expect(() => issueRunLease(manifest, { target: { ...manifest.resolvedTarget, root: join(root, "missing") }, release })).toThrow();
+    expect(releases).toBe(1);
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(root, "no-such-tmpdir");
+    try {
+      expect(() => issueRunLease(manifest, { target: manifest.resolvedTarget, release })).toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+    expect(releases).toBe(2);
+  });
+
+  test("shutdown waits for every lease even when another lease's release fails", async () => {
+    const failing = localLease({ onRelease: () => { throw new Error("release exploded"); } });
+    const busy = localLease();
+    const exit = Promise.withResolvers<number>();
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    try {
+      registerActiveProcess(busy.lease.capability, busy.lease.manifestId, { pid: 98_765, exited: exit.promise });
+      let settled = false;
+      const shutdown = releaseAllRunLeases("SIGTERM: adapter shutdown").finally(() => {
+        settled = true;
+      });
+      await Bun.sleep(20);
+      expect(failing.releases()).toBe(1);
+      expect(settled).toBe(false);
+      expect(busy.releases()).toBe(0);
+      exit.resolve(0);
+      await expect(shutdown).resolves.toBeUndefined();
+      expect(busy.releases()).toBe(1);
+    } finally {
+      kill.mockRestore();
+      exit.resolve(0);
+    }
+  });
+
   test("registered headless intake applies host-authorized defaults and direct calls fail closed", async () => {
     const { root } = repository();
     type ToolOutput = { details: { ok: boolean; result?: SniffIntakePublicResult; error?: string } };
