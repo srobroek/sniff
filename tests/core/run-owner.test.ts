@@ -273,6 +273,41 @@ describe("owner disposal", () => {
     }
   });
 
+  test("dispose waits for a cancel already in progress whose child ignores SIGTERM", async () => {
+    const mine = owner("project-a");
+    const run = lease(mine);
+    const home = authorizeAnalyzerRun(run.capability, run.manifestId, "lizard:complexity", mine).home;
+    const exit = Promise.withResolvers<number>();
+    const signals: string[] = [];
+    // The child ignores SIGTERM and exits only once the escalation timer sends SIGKILL.
+    const kill = vi.spyOn(process, "kill").mockImplementation(((_pid: number, signal?: string | number) => {
+      signals.push(String(signal));
+      if (signal === "SIGKILL") setTimeout(() => exit.resolve(0), 30);
+      return true;
+    }) as typeof process.kill);
+    try {
+      registerActiveProcess(run.capability, run.manifestId, { pid: 987_303, exited: exit.promise }, mine);
+      const cancel = cancelRunLease(run.capability, run.manifestId, mine);
+      let disposed = false;
+      const disposal = mine.dispose().then(() => {
+        disposed = true;
+      });
+      await Bun.sleep(20);
+      expect(signals).toEqual(["SIGTERM"]);
+      expect(disposed).toBe(false);
+      expect(run.releases()).toBe(0);
+      expect(existsSync(home)).toBe(true);
+      await disposal;
+      expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(run.releases()).toBe(1);
+      expect(existsSync(home)).toBe(false);
+      await cancel;
+    } finally {
+      kill.mockRestore();
+      exit.resolve(0);
+    }
+  });
+
   test("a disposed owner refuses further use, keeps nothing, and disposing again is a no-op", async () => {
     const mine = owner("project-a");
     const run = lease(mine);
