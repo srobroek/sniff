@@ -352,8 +352,26 @@ describe("probe timeouts", () => {
 });
 
 describe("bounded command execution", () => {
-	// Forks a sleeper into its own session that inherits stdout, prints its PID, then lets the parent continue.
-	const SETSID_SLEEPER = 'use POSIX; my $pid = fork(); if ($pid == 0) { POSIX::setsid(); sleep 30; exit 0; } print "$pid\\n"; STDOUT->flush();';
+	/**
+	 * Forks a sleeper that inherits stdout. The sleeper enters its own session (`setsid`) or stays
+	 * in the parent's process group ignoring SIGTERM (`trap`), then atomically writes its PID to the
+	 * ready file. The parent waits for that file before it prints the PID and either exits or sleeps,
+	 * so the sleeper is ready before anything under test can stop the parent.
+	 */
+	const SLEEPER = [
+		"use POSIX;",
+		"my ($ready, $mode, $then) = @ARGV;",
+		"my $pid = fork(); die \"fork failed\" unless defined $pid;",
+		"if ($pid == 0) {",
+		"  if ($mode eq \"setsid\") { POSIX::setsid(); } else { $SIG{TERM} = \"IGNORE\"; }",
+		"  open(my $fh, \">\", \"$ready.tmp\") or die; print $fh $$; close($fh); rename(\"$ready.tmp\", $ready) or die;",
+		"  sleep 30; exit 0;",
+		"}",
+		"for (1 .. 1000) { last if -e $ready; select(undef, undef, undef, 0.01); }",
+		"print \"$pid\\n\"; STDOUT->flush();",
+		"exit 0 if $then eq \"exit\";",
+		"sleep 30;",
+	].join("\n");
 	const sleepers: number[] = [];
 	afterAll(() => {
 		for (const pid of sleepers) {
@@ -365,12 +383,32 @@ describe("bounded command execution", () => {
 		}
 	});
 
+	function sleeperCommand(mode: "setsid" | "trap", then: "exit" | "sleep"): { argv: string[]; ready: string } {
+		const ready = join(tempDir("sniff-sleeper-"), "ready");
+		return { argv: ["perl", "-e", SLEEPER, ready, mode, then], ready };
+	}
+
+	/** Waits for the sleeper's ready file and returns its PID, registered for cleanup only once proven a real foreign PID. */
+	async function sleeperPid(ready: string): Promise<number> {
+		const deadline = Date.now() + 10_000;
+		while (!existsSync(ready)) {
+			if (Date.now() > deadline) throw new Error("sleeper never became ready");
+			await Bun.sleep(10);
+		}
+		const text = readFileSync(ready, "utf8").trim();
+		const pid = Number(text);
+		if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) throw new Error(`sleeper reported an invalid PID: ${JSON.stringify(text)}`);
+		sleepers.push(pid);
+		return pid;
+	}
+
 	test("returns once the child exits even while a setsid descendant holds stdout open", async () => {
+		const { argv, ready } = sleeperCommand("setsid", "exit");
 		const startedAt = Date.now();
-		const result = await runCommand(["perl", "-e", SETSID_SLEEPER], tmpdir(), process.env, 20_000);
+		const result = await runCommand(argv, tmpdir(), process.env, 20_000);
 		const elapsed = Date.now() - startedAt;
-		const sleeper = Number(result.stdout.trim());
-		sleepers.push(sleeper);
+		const sleeper = await sleeperPid(ready);
+		expect(result.stdout.trim()).toBe(String(sleeper));
 		expect(processAlive(sleeper)).toBe(true);
 		expect(elapsed).toBeLessThan(5_000);
 		expect(result.exitCode).toBe(0);
@@ -378,13 +416,19 @@ describe("bounded command execution", () => {
 		expect(result.stdoutTruncated).toBe(true);
 	});
 
-	test("returns after a timeout even while a setsid descendant holds stdout open", async () => {
-		const startedAt = Date.now();
-		const result = await runCommand(["perl", "-e", `${SETSID_SLEEPER} sleep 30;`], tmpdir(), process.env, 200);
-		sleepers.push(Number(result.stdout.trim()));
-		expect(Date.now() - startedAt).toBeLessThan(5_000);
-		expect(result.timedOut).toBe(true);
+	test("returns after a stop even while a setsid descendant holds stdout open", async () => {
+		const { argv, ready } = sleeperCommand("setsid", "sleep");
+		const controller = new AbortController();
+		const pending = runCommand(argv, tmpdir(), process.env, 20_000, controller.signal);
+		const sleeper = await sleeperPid(ready);
+		const stoppedAt = Date.now();
+		controller.abort();
+		const result = await pending;
+		expect(Date.now() - stoppedAt).toBeLessThan(5_000);
+		expect(result.error).toBe("operation aborted");
 		expect(result.stdoutTruncated).toBe(true);
+		// The escaped sleeper is outside the process group by definition; it is recorded, not killed.
+		expect(processAlive(sleeper)).toBe(true);
 	});
 
 	test("keeps complete output when the child closes its streams", async () => {
