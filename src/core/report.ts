@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, resolve, sep } from "node:path";
-import { type OpenedReportDirectory, openReportDirectory, saveReportEntriesAt } from "./report-native-persistence.ts";
+import { canonicalJson, compareCodeUnits as compareText, stableJson } from "./canonical-json.ts";
+import { type OpenedReportDirectory, openReportDirectory, type ReportSaveResult, saveReportEntriesAt } from "./report-native-persistence.ts";
 import { assertReportInput, assertSniffReportSchema } from "./report-schema.ts";
 
 export const SNIFF_REPORT_SCHEMA_VERSION = "1.0.0" as const;
@@ -154,31 +155,8 @@ export interface PublicReportArtifacts {
   descriptorCount: number;
   descriptorsTruncated: boolean;
   receipt: Pick<ValidationReceipt, "schemaVersion" | "reportId" | "findingCount" | "artifactCount">;
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => compareText(left, right))
-        .map(([key, entry]) => [key, canonicalValue(entry)]),
-    );
-  }
-  return value;
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
-function canonicalJson(value: unknown): string {
-  return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
+  /** Set only when a save published the report but could not make it durable. */
+  durabilityWarning?: string;
 }
 
 function sha256(value: string): string {
@@ -235,6 +213,37 @@ function reportIdentity(report: Omit<SniffReport, "reportId">): string {
   });
 }
 
+/**
+ * Reports and artifact sets this module built and validated. Each is a private, deeply frozen
+ * graph that shares nothing mutable with its input, so membership proves the value still is what
+ * was validated and downstream steps skip re-validation; anything else (a parsed, cloned, or
+ * spread copy) is validated, or rebuilt and compared, in full.
+ */
+const builtReports = new WeakSet<SniffReport>();
+const builtArtifacts = new WeakSet<ReportArtifacts>();
+
+/** Freezes a graph this module just created. A frozen subtree is one this module already deep-froze. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
+/** A private, validated, deeply frozen copy of `report`, recorded as built. */
+function sealReport(report: SniffReport, verifyDerived: boolean): SniffReport {
+  const sealed = structuredClone(report);
+  validateReport(sealed, verifyDerived);
+  deepFreeze(sealed);
+  builtReports.add(sealed);
+  return sealed;
+}
+
+function assertBuiltOrValid(report: SniffReport): void {
+  if (!builtReports.has(report)) validateSniffReport(report);
+}
+
 export function buildSniffReport(value: unknown): SniffReport {
   assertReportInput(value);
   const input = value;
@@ -258,24 +267,30 @@ export function buildSniffReport(value: unknown): SniffReport {
     census: calculateCensus(findings),
   };
   const report: SniffReport = { ...withoutId, reportId: `report-${sha256(reportIdentity(withoutId)).slice(0, 16)}` };
-  validateSniffReport(report);
-  return report;
+  // The IDs, census, and report ID were derived just above, so only the schema, date, and
+  // duplicate checks can still fail; re-deriving them would hash every finding a second time.
+  return sealReport(report, false);
 }
 
-export function validateSniffReport(value: unknown): asserts value is SniffReport {
+function validateReport(value: unknown, verifyDerived: boolean): asserts value is SniffReport {
   assertSniffReportSchema(value);
   const report = value;
   requireCondition(!Number.isNaN(Date.parse(report.generatedAt)), "generatedAt must be a real date-time");
   const ids = new Set<string>();
   for (const [index, finding] of report.findings.entries()) {
-    requireCondition(finding.id === deterministicFindingId(finding), `findings[${index}].id does not match its structural identity`);
+    if (verifyDerived) requireCondition(finding.id === deterministicFindingId(finding), `findings[${index}].id does not match its structural identity`);
     requireCondition(!ids.has(finding.id), `findings[${index}].id duplicates ${finding.id}`);
     ids.add(finding.id);
   }
+  if (!verifyDerived) return;
   const expectedCensus = calculateCensus(report.findings);
   requireCondition(stableJson(report.census) === stableJson(expectedCensus), "census does not match findings");
   const expectedReportId = `report-${sha256(reportIdentity(report)).slice(0, 16)}`;
   requireCondition(report.reportId === expectedReportId, "reportId does not match report contents");
+}
+
+export function validateSniffReport(value: unknown): asserts value is SniffReport {
+  validateReport(value, true);
 }
 
 const VALUE_RANK: Record<Value, number> = { high: 3, medium: 2, low: 1 };
@@ -345,8 +360,8 @@ function manifestGapRows(report: SniffReport): string[] {
   );
 }
 
+/** Renders an already validated report. */
 function renderMarkdown(report: SniffReport, bounded: boolean): string {
-  validateSniffReport(report);
   const files = fileArtifactNameMap(report);
   const allRetained = report.findings.filter((finding) => finding.adversarial.verdict !== "drop").sort(comparePriority);
   const retained = bounded ? allRetained.slice(0, MAX_REPORT_SUMMARY_FINDINGS) : allRetained;
@@ -417,10 +432,12 @@ function renderMarkdown(report: SniffReport, bounded: boolean): string {
 }
 
 export function renderSniffMarkdown(report: SniffReport): string {
+  assertBuiltOrValid(report);
   return renderMarkdown(report, true);
 }
 
 export function renderCompleteSniffMarkdown(report: SniffReport): string {
+  assertBuiltOrValid(report);
   return renderMarkdown(report, false);
 }
 
@@ -448,11 +465,11 @@ function createFileArtifacts(report: SniffReport): ReportFileArtifact[] {
   });
 }
 
-export function createReportArtifacts(report: SniffReport): ReportArtifacts {
-  validateSniffReport(report);
+export function createReportArtifacts(source: SniffReport): ReportArtifacts {
+  const report = builtReports.has(source) ? source : sealReport(source, true);
   const json = canonicalJson(report);
-  const markdown = renderSniffMarkdown(report);
-  const fullMarkdown = renderCompleteSniffMarkdown(report);
+  const markdown = renderMarkdown(report, true);
+  const fullMarkdown = renderMarkdown(report, false);
   const manifestJson = canonicalJson(manifestFromReport(report));
   const coverageJson = canonicalJson(report.coverage);
   const fileArtifacts = createFileArtifacts(report);
@@ -488,7 +505,10 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
   };
   const indexJson = canonicalJson(index);
   const indexDescriptor: ReportArtifactDescriptor = { kind: "index", relativePath: "index.json", sha256: sha256(indexJson), bytes: Buffer.byteLength(indexJson) };
-  return { report, json, markdown, fullMarkdown, receipt, index, indexJson, manifestJson, coverageJson, fileArtifacts, descriptors: [indexDescriptor, ...descriptorsWithoutIndex] };
+  const artifacts: ReportArtifacts = { report, json, markdown, fullMarkdown, receipt, index, indexJson, manifestJson, coverageJson, fileArtifacts, descriptors: [indexDescriptor, ...descriptorsWithoutIndex] };
+  deepFreeze(artifacts);
+  builtArtifacts.add(artifacts);
+  return artifacts;
 }
 
 export function projectReportArtifacts(artifacts: ReportArtifacts, savedPaths: readonly string[] = [], readCapability = ""): PublicReportArtifacts {
@@ -504,14 +524,16 @@ export function projectReportArtifacts(artifacts: ReportArtifacts, savedPaths: r
     }
   }
   const descriptors: ReportArtifactDescriptor[] = [];
+  // The serialized array is "[" + items joined by "," + "]", so its size is tracked incrementally.
+  let itemBytes = 0;
+  const arrayBytesWith = (item: ReportArtifactDescriptor): number => 2 + itemBytes + descriptors.length + Buffer.byteLength(JSON.stringify(item));
   for (const descriptor of artifacts.descriptors.slice(0, MAX_PUBLIC_REPORT_DESCRIPTORS)) {
     const { sourcePath: _sourcePath, ...withoutSourcePath } = descriptor;
     const savedPath = savedByRelativePath.get(descriptor.relativePath);
     const withSavedPath = savedPath === undefined ? withoutSourcePath : { ...withoutSourcePath, savedPath };
-    const candidate = Buffer.byteLength(JSON.stringify([...descriptors, withSavedPath])) <= MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES
-      ? withSavedPath
-      : withoutSourcePath;
-    if (Buffer.byteLength(JSON.stringify([...descriptors, candidate])) > MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES) break;
+    const candidate = arrayBytesWith(withSavedPath) <= MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES ? withSavedPath : withoutSourcePath;
+    if (arrayBytesWith(candidate) > MAX_PUBLIC_REPORT_DESCRIPTOR_BYTES) break;
+    itemBytes += Buffer.byteLength(JSON.stringify(candidate));
     descriptors.push(candidate);
   }
   return {
@@ -560,13 +582,13 @@ function assertArtifactIntegrity(artifacts: ReportArtifacts): ReportArtifacts {
   return canonical;
 }
 
-export function saveReportArtifactsAt(artifacts: ReportArtifacts, directory: OpenedReportDirectory): string[] {
-  const canonical = assertArtifactIntegrity(artifacts);
+export function saveReportArtifactsAt(artifacts: ReportArtifacts, directory: OpenedReportDirectory): ReportSaveResult {
+  const canonical = builtArtifacts.has(artifacts) ? artifacts : assertArtifactIntegrity(artifacts);
   const entries = saveEntries(canonical);
   return saveReportEntriesAt(directory, canonical.report.reportId, entries);
 }
 
-export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): string[] {
+export function saveReportArtifacts(artifacts: ReportArtifacts, directory: string): ReportSaveResult {
   const opened = openReportDirectory(canonicalizeTrustedTemporaryPrefix(directory));
   try {
     return saveReportArtifactsAt(artifacts, opened);

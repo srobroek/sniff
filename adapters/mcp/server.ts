@@ -14,11 +14,11 @@ import {
 import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.ts";
 import {
   cancelRunLease,
+  createSniffRunOwner,
   decisionFrontier,
   type IntakeInput,
   intakeInput,
   publicSniffIntakeResult,
-  releaseAllRunLeases,
   runSniffAnalyzer,
   runSniffInstall,
   runSniffIntakeTool,
@@ -45,6 +45,9 @@ const MAX_OUTPUT_STRUCTURED_BYTES = 524_288;
 const MAX_CONCURRENT_REQUESTS = 8;
 const MAX_QUEUED_REQUESTS = 32;
 const ELICITATION_TIMEOUT_MS = 120_000;
+
+/** One stdio client per process: every run and artifact this server issues belongs to this owner. */
+const runOwner = createSniffRunOwner({ label: "mcp-stdio" });
 
 // MCP stdio is newline-delimited JSON. The SDK's transport already provides
 // ordered, backpressured writes; this small transport adds an input frame cap,
@@ -276,7 +279,7 @@ const outputSchemas = {
   cancel: resultSchema({ capability: stringSchema, manifestId: stringSchema, released: { type: "boolean" } }),
   install: resultSchema({ report: stringSchema, tools: { type: "array", items: { type: "object" } } }),
   analyzer: resultSchema({ report: stringSchema, outcome: stringSchema, preflight: { type: ["object", "null"] }, acceptedExitCodes: { type: "array", items: { type: "integer" } }, analyzerResultId: stringSchema, readCapability: stringSchema, descriptors: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer", minimum: 0 }, descriptorsTruncated: { type: "boolean" }, observations: analyzerObservationSchema, observationPreview: { type: "object", required: ["total", "returned", "truncated"], properties: { total: { type: "integer", minimum: 0 }, returned: { type: "integer", minimum: 0 }, truncated: { type: "boolean" } }, additionalProperties: false }, capture: analyzerCaptureSchema }),
-  report: resultSchema({ reportId: stringSchema, readCapability: stringSchema, summary: stringSchema, artifacts: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer" }, descriptorsTruncated: { type: "boolean" }, receipt: { type: "object" }, savedPaths: { type: "array", items: stringSchema } }),
+  report: resultSchema({ reportId: stringSchema, readCapability: stringSchema, summary: stringSchema, artifacts: { type: "array", items: { type: "object" } }, descriptorCount: { type: "integer" }, descriptorsTruncated: { type: "boolean" }, receipt: { type: "object" }, savedPaths: { type: "array", items: stringSchema }, durabilityWarning: stringSchema }),
   reportArtifact: resultSchema({ reportId: stringSchema, relativePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
   analyzerArtifact: resultSchema({ analyzerResultId: stringSchema, relativePath: stringSchema, sourcePath: stringSchema, content: stringSchema, offset: { type: "integer", minimum: 0 }, nextOffset: { type: "integer", minimum: 0 }, eof: { type: "boolean" }, bytes: { type: "integer", minimum: 0 }, totalBytes: { type: "integer", minimum: 0 }, sha256: stringSchema }),
 } as const;
@@ -631,6 +634,7 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
     { input: noninteractive ? input : { ...input, interactive: true } },
     unattended
       ? {
+          owner: runOwner,
           authority: {
             authorize: async (request) => ({
               acceptedDigest: request.digest,
@@ -640,15 +644,15 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
           },
         }
       : noninteractive
-        ? { authority: { authorize: confirm } }
-        : { confirmInteractive: confirm },
+        ? { owner: runOwner, authority: { authorize: confirm } }
+        : { owner: runOwner, confirmInteractive: confirm },
   );
   const result = await raceWithAbort(resultPromise, signal).catch((error) => {
     void resultPromise.then(
       async (late) => {
         if (!late.lease) return;
         try {
-          await cancelRunLease(late.lease.capability, late.lease.manifestId);
+          await cancelRunLease(late.lease.capability, late.lease.manifestId, runOwner);
         } catch {
           // The request was already cancelled or expired.
         }
@@ -663,7 +667,7 @@ async function intake(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
   if (signal.aborted) {
     if (result.lease) {
       try {
-        await cancelRunLease(result.lease.capability, result.lease.manifestId);
+        await cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
       } catch {
         // The lease was already finalized or expired.
       }
@@ -714,7 +718,7 @@ async function analyzer(args: JsonObject, signal: AbortSignal): Promise<ToolResp
   const capability = requiredString(args.capability, "capability");
   const manifestId = requiredString(args.manifestId, "manifestId");
   const analyzerName = requiredString(args.analyzer, "analyzer");
-  const result = await runSniffAnalyzer({ capability, manifestId, analyzer: analyzerName, signal });
+  const result = await runSniffAnalyzer({ capability, manifestId, analyzer: analyzerName, owner: runOwner, signal });
   const capture = result.capture ? { bytes: Number(result.capture.bytes), truncated: Boolean(result.capture.truncated), digest: String(result.capture.digest), incomplete: Boolean(result.capture.incomplete), ...(result.capture.reason ? { reason: String(result.capture.reason) } : {}) } : undefined;
   const error = result.ok ? undefined : { code: "analyzer_failed", message: boundedString(result.report, 1_024) };
   const value = {
@@ -745,16 +749,16 @@ async function report(args: JsonObject, signal: AbortSignal): Promise<ToolRespon
   inspectInput(args.report);
   const mode = args.mode as SniffReportMode | undefined;
   const runtime = mode === "save" ? { authorizeSave: async (request: SaveAuthorizationRequest) => elicitDigest(request, signal, "Authorize saving this exact canonical Sniff report (directory, manifest, artifacts, and digest).") } : undefined;
-  const result = await runSniffReportTool({ capability, manifestId, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
+  const result = await runSniffReportTool({ capability, manifestId, owner: runOwner, mode, report: args.report as unknown as ReportInput, ...(typeof args.path === "string" ? { path: args.path } : {}), ...(runtime ? { runtime } : {}) });
   assertNotAborted(signal);
-  return toolSuccess({ ok: true, reportId: result.publicArtifacts.reportId, readCapability: result.publicArtifacts.readCapability, summary: result.publicArtifacts.summary, artifacts: result.publicArtifacts.descriptors, descriptorCount: result.publicArtifacts.descriptorCount, descriptorsTruncated: result.publicArtifacts.descriptorsTruncated, receipt: result.publicArtifacts.receipt, savedPaths: result.publicArtifacts.descriptors.flatMap((descriptor) => descriptor.savedPath ? [descriptor.savedPath] : []) }, result.publicArtifacts.summary);
+  return toolSuccess({ ok: true, reportId: result.publicArtifacts.reportId, readCapability: result.publicArtifacts.readCapability, summary: result.publicArtifacts.summary, artifacts: result.publicArtifacts.descriptors, descriptorCount: result.publicArtifacts.descriptorCount, descriptorsTruncated: result.publicArtifacts.descriptorsTruncated, receipt: result.publicArtifacts.receipt, savedPaths: result.publicArtifacts.descriptors.flatMap((descriptor) => descriptor.savedPath ? [descriptor.savedPath] : []), ...(result.durabilityWarning ? { durabilityWarning: result.durabilityWarning } : {}) }, result.durabilityWarning ? `${result.durabilityWarning}\n\n${result.publicArtifacts.summary}` : result.publicArtifacts.summary);
 }
 function reportArtifact(args: JsonObject): ToolResponse {
   const readCapability = requiredString(args.readCapability, "readCapability");
   const reportId = requiredString(args.reportId, "reportId");
   const relativePath = requiredString(args.relativePath, "relativePath");
   const offset = args.offset;
-  const result = readReportArtifact({ capability: readCapability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  const result = readReportArtifact({ capability: readCapability, reportId, relativePath, ...(offset === undefined ? {} : { offset: Number(offset) }) }, undefined, runOwner);
   return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
 }
 function analyzerArtifact(args: JsonObject): ToolResponse {
@@ -767,7 +771,7 @@ function analyzerArtifact(args: JsonObject): ToolResponse {
   if (offset !== undefined && (!Number.isSafeInteger(offset) || Number(offset) < 0)) throw new SniffMcpError("invalid_input", "Analyzer artifact offset must be a non-negative integer");
   const maxBytes = args.maxBytes;
   if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || Number(maxBytes) < 4 || Number(maxBytes) > MAX_OUTPUT_TEXT_BYTES)) throw new SniffMcpError("invalid_input", "Analyzer artifact maxBytes must be an integer from 4 through 65536");
-  const result = readAnalyzerArtifact({ capability: readCapability, analyzerResultId, ...(relativePath === undefined ? { sourcePath } : { relativePath }), ...(offset === undefined ? {} : { offset: Number(offset) }) });
+  const result = readAnalyzerArtifact({ capability: readCapability, analyzerResultId, ...(relativePath === undefined ? { sourcePath } : { relativePath }), ...(offset === undefined ? {} : { offset: Number(offset) }) }, undefined, runOwner);
   if (maxBytes === undefined || result.bytes <= Number(maxBytes)) return toolSuccess({ ok: true, ...result }, `Read ${result.bytes} bytes from ${result.relativePath} at offset ${result.offset}.`);
   const bytes = Buffer.from(result.content, "utf8");
   let end = Math.min(Number(maxBytes), bytes.byteLength);
@@ -786,7 +790,7 @@ async function callTool(name: string, args: JsonObject, signal: AbortSignal): Pr
     case "sniff_cancel": {
       const capability = requiredString(args.capability, "capability");
       const manifestId = requiredString(args.manifestId, "manifestId");
-      await cancelRunLease(capability, manifestId);
+      await cancelRunLease(capability, manifestId, runOwner);
       return toolSuccess({ ok: true, capability, manifestId, released: true }, "Sniff run cancelled and materialization released.");
     }
     case "sniff_install_tools": return install(args, signal);
@@ -812,11 +816,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 });
 
 let cleanupDone: Promise<void> | undefined;
-/** Releases every lease once; the returned promise settles after spawned analyzers exited and their trees were removed. */
+/** Disposes this server's run owner once; the returned promise settles after spawned analyzers exited and their trees were removed. */
 function cleanup(reason: string): Promise<void> {
   if (cleanupDone) return cleanupDone;
   semaphore.close(reason);
-  cleanupDone = releaseAllRunLeases(reason);
+  cleanupDone = runOwner.dispose(reason);
   return cleanupDone;
 }
 export async function serve(): Promise<void> {

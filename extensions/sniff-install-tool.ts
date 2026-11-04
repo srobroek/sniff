@@ -12,6 +12,7 @@ import {
   sniffInstallAuthorizationRequest,
 } from "../src/core/install.ts";
 import { analyzerArtifactPage, analyzerPageLimit, analyzerProjection, publicPreflight } from "../src/core/model-content.ts";
+import type { SniffRunOwner } from "../src/core/run-owner.ts";
 import { sniffInstallApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
 type SniffReadAnalyzerArtifactParams = Omit<AnalyzerArtifactReadOptions, "capability"> & {
@@ -19,7 +20,7 @@ type SniffReadAnalyzerArtifactParams = Omit<AnalyzerArtifactReadOptions, "capabi
   readonly maxBytes?: number;
 };
 
-function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
+function registerAnalyzerArtifactReader(pi: ExtensionAPI, owner: SniffRunOwner | undefined): void {
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_read_analyzer_artifact",
     label: "Read Sniff analyzer artifact",
@@ -30,7 +31,7 @@ function registerAnalyzerArtifactReader(pi: ExtensionAPI): void {
       try {
         const { readCapability, maxBytes, ...options } = params;
         const limit = analyzerPageLimit(maxBytes);
-        const { text, page } = analyzerArtifactPage(readAnalyzerArtifact({ ...options, capability: readCapability }), limit);
+        const { text, page } = analyzerArtifactPage(readAnalyzerArtifact({ ...options, capability: readCapability }, undefined, owner), limit);
         return { content: [{ type: "text", text }], details: { ok: true, analyzerResultId: page.analyzerResultId, relativePath: page.relativePath, sourcePath: page.sourcePath, offset: page.offset, nextOffset: page.nextOffset, eof: page.eof, bytes: page.bytes, totalBytes: page.totalBytes, sha256: page.sha256 } };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -58,7 +59,8 @@ async function confirmedInstall(params: SniffInstallParams, signal: AbortSignal 
   return runSniffInstall({ ...options, mode: "install" });
 }
 
-export default function sniffInstallTool(pi: ExtensionAPI): void {
+/** Registers install, analyzer, and artifact reading; `owner` scopes the runs, and omitted they use the process owner. */
+export default function sniffInstallTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
   pi.registerTool({
     name: "sniff_install_tools",
     label: "Sniff install tools",
@@ -86,7 +88,7 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
     parameters: sniffToolInputSchemas.sniff_run_analyzer as unknown as TSchema,
     execute: async (_id, params: { capability: string; manifestId: string; analyzer: string }, signal) => {
       try {
-        const result = await runSniffAnalyzer({ ...params, signal });
+        const result = await runSniffAnalyzer({ ...params, signal, owner });
         const text = result.ok
           ? JSON.stringify(analyzerProjection(params.analyzer, result))
           : result.report;
@@ -97,5 +99,5 @@ export default function sniffInstallTool(pi: ExtensionAPI): void {
       }
     },
   });
-  registerAnalyzerArtifactReader(pi);
+  registerAnalyzerArtifactReader(pi, owner);
 }

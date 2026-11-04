@@ -179,7 +179,7 @@ Registry expiry or eviction ends a read capability. Each page is UTF-8 safe and 
 - `gap`: a required analyzer was unavailable.
 - `not-applicable`: the analyzer did not match the target.
 
-A stopped run needs `sniff_cancel` before reporting. The lease registry is single-process state. See [Getting started](getting-started.md) for adapter installation and [Capabilities](capabilities.md) for verified behavior and clean-room limits.
+A stopped run needs `sniff_cancel` before reporting. The lease registry is single-process state, and each adapter instance is its own run owner. A capability works only through the owner that issued it. An owner holds at most 8 live runs, and its artifact budgets never evict another owner's artifacts. See [Getting started](getting-started.md) for adapter installation and [Capabilities](capabilities.md) for verified behavior and clean-room limits.
 
 ## Related guides
 

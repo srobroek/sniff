@@ -8,13 +8,14 @@ import {
   type SniffReportRuntime,
   type SniffReportToolOptions,
 } from "../src/core/report-use-case.ts";
+import type { SniffRunOwner } from "../src/core/run-owner.ts";
 import { sniffReportApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 
 type SniffReadReportArtifactParams = Omit<ReportArtifactReadOptions, "capability"> & {
   readonly readCapability: string;
 };
 
-function registerReportArtifactReader(pi: ExtensionAPI): void {
+function registerReportArtifactReader(pi: ExtensionAPI, owner: SniffRunOwner | undefined): void {
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_read_report_artifact",
     label: "Read Sniff report artifact",
@@ -24,7 +25,7 @@ function registerReportArtifactReader(pi: ExtensionAPI): void {
     execute: async (_id, params: SniffReadReportArtifactParams) => {
       try {
         const { readCapability, ...options } = params;
-        const result = readReportArtifact({ ...options, capability: readCapability });
+        const result = readReportArtifact({ ...options, capability: readCapability }, undefined, owner);
         const { text, page: delivered } = reportArtifactPage(result);
         const page = { nextOffset: delivered.nextOffset, eof: delivered.eof, bytes: delivered.bytes };
         return {
@@ -56,7 +57,8 @@ function runtimeForContext(ctx: ExtensionContext): SniffReportRuntime {
     },
   };
 }
-export default function sniffReportTool(pi: ExtensionAPI): void {
+/** Registers report and artifact reading; `owner` scopes the runs, and omitted they use the process owner. */
+export default function sniffReportTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
   pi.registerTool<TSchema, { readonly ok: boolean; readonly error?: string }>({
     name: "sniff_report",
     label: "Sniff structured report",
@@ -65,7 +67,7 @@ export default function sniffReportTool(pi: ExtensionAPI): void {
     parameters: sniffToolInputSchemas.sniff_report as unknown as TSchema,
     execute: async (_id, params: SniffReportToolOptions, _signal, _onUpdate, ctx) => {
       try {
-        const result = await runSniffReportTool({ ...params, runtime: runtimeForContext(ctx) });
+        const result = await runSniffReportTool({ ...params, runtime: runtimeForContext(ctx), owner });
         return {
           content: [{ type: "text", text: reportRenderContent(result.publicArtifacts) }],
           details: {
@@ -78,6 +80,7 @@ export default function sniffReportTool(pi: ExtensionAPI): void {
             descriptorCount: result.publicArtifacts.descriptorCount,
             descriptorsTruncated: result.publicArtifacts.descriptorsTruncated,
             receipt: result.publicArtifacts.receipt,
+            ...(result.durabilityWarning ? { durabilityWarning: result.durabilityWarning } : {}),
           },
         };
       } catch (error) {
@@ -86,5 +89,5 @@ export default function sniffReportTool(pi: ExtensionAPI): void {
       }
     },
   });
-  registerReportArtifactReader(pi);
+  registerReportArtifactReader(pi, owner);
 }

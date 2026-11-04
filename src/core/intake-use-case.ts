@@ -14,7 +14,8 @@ import {
 	type ScopeMode,
 	selectIntakeAnalyzers,
 } from "./intake.ts";
-import { issueRunLease, type RunLeaseReceipt } from "./run-registry.ts";
+import type { SniffRunOwner } from "./run-owner.ts";
+import { assertRunLeaseCapacity, issueRunLease, type RunLeaseReceipt } from "./run-registry.ts";
 import { type ArgvRunner, runArgv } from "./target.ts";
 import { resolveTargetLease } from "./target-provider.ts";
 
@@ -151,6 +152,8 @@ export type SniffIntakeRuntime = {
 	readonly authority?: IntakeAuthority;
 	readonly leaseTtlMs?: number;
 	readonly sandboxGrant?: string;
+	/** The owner the issued lease belongs to; omitted, the process owner. */
+	readonly owner?: SniffRunOwner;
 };
 const INTAKE_INTENTS: Record<string, true> = {
 	audit: true,
@@ -229,6 +232,8 @@ export async function runSniffIntakeTool(
 		budget = interview.plan.budget;
 	}
 
+	// Refuse an owner at its lease cap before materializing anything; issuance re-checks.
+	assertRunLeaseCapacity(runtime.owner);
 	const targetLease = await resolveTargetLease(targetRequest, runtime.runner ?? runArgv, { walksHistory: selectsHistoryWalk(targetRequest, security, objectives, scopeMode) });
 	try {
 		const target = targetLease.target;
@@ -248,6 +253,7 @@ export async function runSniffIntakeTool(
 			const lease = issueRunLease(manifest, targetLease, {
 				ttlMs: runtime.leaseTtlMs,
 				sandboxGrant: runtime.sandboxGrant,
+				owner: runtime.owner,
 			});
 			return { interview, confirmation: publicConfirmationSummary(canonicalConfirmationRequest(manifest)), manifest, lease };
 		}
@@ -262,6 +268,7 @@ export async function runSniffIntakeTool(
 		const lease = issueRunLease(manifest, targetLease, {
 			ttlMs: runtime.leaseTtlMs,
 			sandboxGrant: runtime.sandboxGrant,
+			owner: runtime.owner,
 		});
 		return { interview, confirmation: publicConfirmationSummary(canonicalConfirmationRequest(manifest)), manifest, lease };
 	} catch (error) {

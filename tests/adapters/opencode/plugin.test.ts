@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { anchorTarget, CONFIRM_ACTIONS, confirmSniffApproval, SNIFF_PLUGIN_ID, sniffOpenCodePlugin } from "../../../adapters/opencode/plugin.ts";
 import { intakeConfirmationText } from "../../../src/core/confirmation-text.ts";
-import { readRunManifest } from "../../../src/core/run-registry.ts";
+import { runLeaseStateForTests } from "../../../src/core/run-registry.ts";
 import { sniffToolInputSchemas } from "../../../src/core/tool-schemas.ts";
 import { type FakeHost, fakeHost, toolContext } from "./fake-host.ts";
 
@@ -260,10 +260,10 @@ describe("lifecycle", () => {
     const mine = json(await tool(first.host, "sniff_intake").execute(plannedFiles(project()), toolContext())).lease as { capability: string; manifestId: string };
     const theirs = json(await tool(second.host, "sniff_intake").execute(plannedFiles(project()), toolContext())).lease as { capability: string; manifestId: string };
     await first.cleanup();
-    expect(() => readRunManifest(mine.capability, mine.manifestId)).toThrow("cancelled");
-    expect(readRunManifest(theirs.capability, theirs.manifestId).manifestId).toBe(theirs.manifestId);
+    expect(runLeaseStateForTests(mine.capability)?.state).toBe("cancelled");
+    expect(runLeaseStateForTests(theirs.capability)?.state).toBe("live");
     await second.cleanup();
-    expect(() => readRunManifest(theirs.capability, theirs.manifestId)).toThrow("cancelled");
+    expect(runLeaseStateForTests(theirs.capability)?.state).toBe("cancelled");
   });
 
   test("a cancelled intake releases a lease that arrives after the abort", async () => {
@@ -323,9 +323,9 @@ describe("lifecycle", () => {
     const { host, cleanup } = await load(project());
     const lease = json(await tool(host, "sniff_intake").execute(plannedFiles(project()), toolContext())).lease as { capability: string; manifestId: string };
     await expect(tool(host, "sniff_report").execute({ capability: lease.capability, manifestId: "manifest-wrong", report: {} }, toolContext())).rejects.toThrow();
-    expect(readRunManifest(lease.capability, lease.manifestId).manifestId).toBe(lease.manifestId);
+    expect(runLeaseStateForTests(lease.capability)?.state).toBe("live");
     await cleanup();
-    expect(() => readRunManifest(lease.capability, lease.manifestId)).toThrow("cancelled");
+    expect(runLeaseStateForTests(lease.capability)?.state).toBe("cancelled");
   });
 
   test("a relative save path lands under the session directory after its own approval", async () => {

@@ -3,15 +3,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { recipeTargetSeparator, SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
+import { stableJson } from "./canonical-json.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
+import { assertUsableOwner, disposeAllSniffRunOwners, issuingOwner, MAX_LIVE_LEASES_PER_OWNER, type OwnerResource, ownerResource, ownerSees, type SniffRunOwner } from "./run-owner.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
 
 const LEASE_TTL_MS = 60 * 60 * 1_000;
 const TERMINAL_LIMIT = 1_024;
 
 type TerminalState = "cancelled" | "expired" | "released";
-type TerminalRecord = { readonly state: TerminalState; readonly reason?: string };
+type TerminalRecord = { readonly state: TerminalState; readonly reason?: string; readonly owner: SniffRunOwner };
 type ReservationState = "reserved" | "running" | "completed" | "failed";
 
 type AnalyzerReservation = {
@@ -22,6 +24,9 @@ type AnalyzerReservation = {
 
 type LeaseRecord = {
   readonly capability: string;
+  readonly owner: SniffRunOwner;
+  /** The issuing owner's lease state; the record leaves its live set when released. */
+  readonly ownerState: OwnerLeaseState;
   readonly manifestId: string;
   readonly manifest: RunManifest;
   readonly canonicalManifest: string;
@@ -40,8 +45,6 @@ type LeaseRecord = {
   pendingRelease?: Promise<void>;
   expiryTimer?: NodeJS.Timeout;
 };
-
-
 
 export type RunLeaseReceipt = {
   readonly capability: string;
@@ -62,19 +65,45 @@ export type AnalyzerRunAuthorization = {
   readonly remainingBudgetMs: number;
 };
 
+/**
+ * Every live lease by capability. Each record names its owner and a lookup sees only its own
+ * owner's records (ownerless calls act as the process owner). Terminal records keep replay
+ * evidence the same way.
+ */
 const activeLeases = new Map<string, LeaseRecord>();
 const terminalLeases = new Map<string, TerminalRecord>();
 
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, stableValue(entry)]));
-  }
-  return value;
+const OWNER_LEASES = Symbol("sniff.run-leases");
+
+type OwnerLeaseState = OwnerResource & {
+  /** Live leases, which count against the owner's lease cap. */
+  readonly leases: Map<string, LeaseRecord>;
+  /** Releases still awaiting analyzer exits and cleanup; they no longer count against the cap. */
+  readonly pending: Set<Promise<void>>;
+};
+
+/**
+ * The owner's lease state. Disposing the owner cancels every live lease and then waits for those
+ * releases and for any release already in progress (a cancel, finalize, or expiry still awaiting
+ * its analyzer children), so nothing the owner started outlives its disposal.
+ */
+function ownerLeaseState(owner: SniffRunOwner): OwnerLeaseState {
+  return ownerResource(owner, OWNER_LEASES, (): OwnerLeaseState => {
+    const leases = new Map<string, LeaseRecord>();
+    const pending = new Set<Promise<void>>();
+    return {
+      leases,
+      pending,
+      dispose: (reason) => {
+        const released = [...leases.values()].map((record) => releaseRecord(record, "cancelled", boundedReason(reason)));
+        return Promise.allSettled([...released, ...pending]).then(() => undefined);
+      },
+    };
+  });
 }
 
-function rememberTerminal(capability: string, state: TerminalState, reason?: string): void {
-  terminalLeases.set(capability, { state, ...(reason ? { reason } : {}) });
+function rememberTerminal(capability: string, owner: SniffRunOwner, state: TerminalState, reason?: string): void {
+  terminalLeases.set(capability, { state, owner, ...(reason ? { reason } : {}) });
   while (terminalLeases.size > TERMINAL_LIMIT) {
     const oldest = terminalLeases.keys().next().value;
     if (typeof oldest !== "string") break;
@@ -104,8 +133,9 @@ function swallowReleaseFailure(): void {}
 function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: string): Promise<void> {
   if (activeLeases.get(record.capability) !== record) return record.pendingRelease ?? Promise.resolve();
   activeLeases.delete(record.capability);
+  record.ownerState.leases.delete(record.capability);
   clearTimeout(record.expiryTimer);
-  rememberTerminal(record.capability, state, reason);
+  rememberTerminal(record.capability, record.owner, state, reason);
   const tracked = [...record.activeProcesses.values()];
   record.activeProcesses.clear();
   if (tracked.length === 0) {
@@ -120,14 +150,24 @@ function releaseRecord(record: LeaseRecord, state: TerminalState, reason?: strin
     finishRelease(record);
   });
   record.pendingRelease = pending;
+  const settled = () => {
+    record.ownerState.pending.delete(pending);
+  };
+  record.ownerState.pending.add(pending);
+  pending.then(settled, settled);
   return pending;
 }
 
-function activeLease(capability: string, manifestId: string): LeaseRecord {
+/**
+ * The live lease for a capability as seen by `owner`. Another owner's capability, live or
+ * terminal, fails exactly like one that was never issued, so its existence never leaks.
+ */
+function activeLease(capability: string, manifestId: string, owner: SniffRunOwner | undefined): LeaseRecord {
+  assertUsableOwner(owner);
   const record = activeLeases.get(capability);
-  if (!record) {
+  if (!record || !ownerSees(record.owner, owner)) {
     const terminal = terminalLeases.get(capability);
-    throw new Error(terminal ? `Sniff run capability was already ${terminal.state}${terminal.reason ? ` (${terminal.reason})` : ""}` : "Unknown Sniff run capability");
+    throw new Error(terminal && ownerSees(terminal.owner, owner) ? `Sniff run capability was already ${terminal.state}${terminal.reason ? ` (${terminal.reason})` : ""}` : "Unknown Sniff run capability");
   }
   if (record.manifestId !== manifestId) throw new Error("Sniff run capability does not match the manifest ID");
   if (record.now() >= record.expiresAt) {
@@ -193,15 +233,30 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
   };
 }
 
+/** The owner's live leases after releasing expired ones; throws once the owner is at its lease cap. */
+function leasesWithCapacity(owner: SniffRunOwner): OwnerLeaseState {
+  const state = ownerLeaseState(owner);
+  for (const record of [...state.leases.values()]) if (record.now() >= record.expiresAt) releaseRecord(record, "expired").catch(swallowReleaseFailure);
+  if (state.leases.size >= MAX_LIVE_LEASES_PER_OWNER) throw new Error(`A Sniff run owner may hold at most ${MAX_LIVE_LEASES_PER_OWNER} live Sniff runs; cancel or finish one first`);
+  return state;
+}
+
+/** Throws when `owner` (or the process owner) could not take another lease, before any target is resolved. */
+export function assertRunLeaseCapacity(owner?: SniffRunOwner): void {
+  leasesWithCapacity(issuingOwner(owner));
+}
+
 export function issueRunLease(
   manifest: RunManifest,
   targetLease: ResolvedTargetLease,
-  options: { readonly ttlMs?: number; readonly sandboxGrant?: string; readonly now?: () => number } = {},
+  options: { readonly ttlMs?: number; readonly sandboxGrant?: string; readonly now?: () => number; readonly owner?: SniffRunOwner } = {},
 ): RunLeaseReceipt {
   const now = options.now ?? Date.now;
   let home: string | undefined;
   let record: LeaseRecord;
   try {
+    const owner = issuingOwner(options.owner);
+    const ownerState = leasesWithCapacity(owner);
     const canonicalManifest = canonicalManifestJson(manifest);
     const target = validateResolvedTarget(targetLease.target);
     if (canonicalManifestJson({ ...manifest, resolvedTarget: target }) !== canonicalManifest) {
@@ -211,6 +266,8 @@ export function issueRunLease(
     home = mkdtempSync(join(tmpdir(), "sniff-run-home-"));
     record = {
       capability: randomBytes(32).toString("base64url"),
+      owner,
+      ownerState,
       manifestId: manifest.manifestId,
       manifest,
       canonicalManifest,
@@ -237,6 +294,7 @@ export function issueRunLease(
   }
   const { capability, expiresAt } = record;
   activeLeases.set(capability, record);
+  record.ownerState.leases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
     // Expiry is best-effort cleanup and must never crash the extension host.
     if (activeLeases.get(capability) === record) releaseRecord(record, "expired").catch(swallowReleaseFailure);
@@ -245,8 +303,8 @@ export function issueRunLease(
   return { capability, manifestId: manifest.manifestId, expiresAt: new Date(expiresAt).toISOString() };
 }
 
-export function authorizeAnalyzerRun(capability: string, manifestId: string, analyzer: string): AnalyzerRunAuthorization {
-  const record = activeLease(capability, manifestId);
+export function authorizeAnalyzerRun(capability: string, manifestId: string, analyzer: string, owner?: SniffRunOwner): AnalyzerRunAuthorization {
+  const record = activeLease(capability, manifestId, owner);
   if (record.reservations.has(analyzer)) throw new Error(`Analyzer ${analyzer} capability is one-shot and was already reserved`);
   const maxAnalyzers = record.manifest.budget.maxAnalyzers;
   if (maxAnalyzers !== undefined && record.reservations.size >= maxAnalyzers) throw new Error("Sniff run exceeds the manifest maxAnalyzers budget");
@@ -256,21 +314,26 @@ export function authorizeAnalyzerRun(capability: string, manifestId: string, ana
   return authorization;
 }
 
+/** The live record for a capability when it belongs to `owner` and the manifest; never throws. */
+function ownedRecord(capability: string, manifestId: string, owner: SniffRunOwner | undefined): LeaseRecord | undefined {
+  const record = activeLeases.get(capability);
+  return record !== undefined && record.manifestId === manifestId && ownerSees(record.owner, owner) ? record : undefined;
+}
+
 /**
  * Adopts a spawned analyzer child. The handle joins the lease's tracked set before the expiry
  * check so that a lease which expired between the spawn decision and this call releases through
  * the ordinary path: the child is terminated and awaited before the target and home go away.
  */
-export function registerActiveProcess(capability: string, manifestId: string, spawned: SpawnedProcess): void {
-  const record = activeLeases.get(capability);
-  const owned = record !== undefined && record.manifestId === manifestId;
-  if (owned) record.activeProcesses.set(spawned.pid, spawned);
+export function registerActiveProcess(capability: string, manifestId: string, spawned: SpawnedProcess, owner?: SniffRunOwner): void {
+  const record = ownedRecord(capability, manifestId, owner);
+  record?.activeProcesses.set(spawned.pid, spawned);
   try {
-    activeLease(capability, manifestId);
+    activeLease(capability, manifestId, owner);
   } catch (error) {
     // An owned record that expired released through releaseRecord, which adopted and cleared the
     // handle; any other failure leaves the child untracked, so terminate it here.
-    if (!owned || record.activeProcesses.has(spawned.pid)) {
+    if (!record || record.activeProcesses.has(spawned.pid)) {
       record?.activeProcesses.delete(spawned.pid);
       void terminateAndAwait(spawned);
     }
@@ -278,13 +341,12 @@ export function registerActiveProcess(capability: string, manifestId: string, sp
   }
 }
 
-export function unregisterActiveProcess(capability: string, manifestId: string, pid: number): void {
-  const record = activeLeases.get(capability);
-  if (record?.manifestId === manifestId) record.activeProcesses.delete(pid);
+export function unregisterActiveProcess(capability: string, manifestId: string, pid: number, owner?: SniffRunOwner): void {
+  ownedRecord(capability, manifestId, owner)?.activeProcesses.delete(pid);
 }
 
-export function prepareAnalyzerSpawn(capability: string, manifestId: string, analyzer: string, reservationId: string): AnalyzerRunAuthorization {
-  const record = activeLease(capability, manifestId);
+export function prepareAnalyzerSpawn(capability: string, manifestId: string, analyzer: string, reservationId: string, owner?: SniffRunOwner): AnalyzerRunAuthorization {
+  const record = activeLease(capability, manifestId, owner);
   const reservation = record.reservations.get(analyzer);
   if (!reservation || reservation.id !== reservationId || reservation.state !== "reserved") throw new Error(`Analyzer ${analyzer} reservation is not available for launch`);
   const authorization = authorizationFor(record, analyzer, reservationId);
@@ -292,14 +354,14 @@ export function prepareAnalyzerSpawn(capability: string, manifestId: string, ana
   return authorization;
 }
 
-export function abandonAnalyzerReservation(capability: string, manifestId: string, analyzer: string, reservationId: string): void {
-  const record = activeLease(capability, manifestId);
+export function abandonAnalyzerReservation(capability: string, manifestId: string, analyzer: string, reservationId: string, owner?: SniffRunOwner): void {
+  const record = activeLease(capability, manifestId, owner);
   const reservation = record.reservations.get(analyzer);
   if (reservation?.id === reservationId && reservation.state === "reserved") record.reservations.delete(analyzer);
 }
 
-export function completeAnalyzerReservation(capability: string, manifestId: string, analyzer: string, reservationId: string): void {
-  const record = activeLease(capability, manifestId);
+export function completeAnalyzerReservation(capability: string, manifestId: string, analyzer: string, reservationId: string, owner?: SniffRunOwner): void {
+  const record = activeLease(capability, manifestId, owner);
   const reservation = record.reservations.get(analyzer);
   if (!reservation || reservation.id !== reservationId || reservation.state !== "running") throw new Error(`Analyzer ${analyzer} reservation cannot be completed`);
   try {
@@ -318,8 +380,8 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
  * Takes the lease's one-shot reporting state before a report attempt awaits anything, so a second
  * attempt with the same capability cannot race the first into producing two reports.
  */
-export function beginRunReport(capability: string, manifestId: string): string {
-  const record = activeLease(capability, manifestId);
+export function beginRunReport(capability: string, manifestId: string, owner?: SniffRunOwner): string {
+  const record = activeLease(capability, manifestId, owner);
   if (record.reportClaim !== undefined) throw new Error("A Sniff report is already in progress for this run capability");
   const claim = randomBytes(16).toString("base64url");
   record.reportClaim = claim;
@@ -327,32 +389,32 @@ export function beginRunReport(capability: string, manifestId: string): string {
 }
 
 /** Throws unless the lease is still live and the report attempt still holds its claim, e.g. after a cancel while awaiting approval. */
-export function assertRunReport(capability: string, manifestId: string, claim: string): void {
-  if (activeLease(capability, manifestId).reportClaim !== claim) throw new Error("Sniff report attempt no longer holds this run capability");
+export function assertRunReport(capability: string, manifestId: string, claim: string, owner?: SniffRunOwner): void {
+  if (activeLease(capability, manifestId, owner).reportClaim !== claim) throw new Error("Sniff report attempt no longer holds this run capability");
 }
 
 /** Ends a report attempt that wrote nothing, keeping the lease for a corrected retry. */
-export function endRunReport(capability: string, manifestId: string, claim: string): void {
-  const record = activeLeases.get(capability);
-  if (record?.manifestId === manifestId && record.reportClaim === claim) record.reportClaim = undefined;
+export function endRunReport(capability: string, manifestId: string, claim: string, owner?: SniffRunOwner): void {
+  const record = ownedRecord(capability, manifestId, owner);
+  if (record?.reportClaim === claim) record.reportClaim = undefined;
 }
 
-export function readRunManifest(capability: string, manifestId: string): RunManifest {
-	return activeLease(capability, manifestId).manifest;
+export function readRunManifest(capability: string, manifestId: string, owner?: SniffRunOwner): RunManifest {
+  return activeLease(capability, manifestId, owner).manifest;
 }
-export function validateReportManifest(capability: string, manifestId: string, supplied: unknown): RunManifest {
-  const lease = activeLease(capability, manifestId);
+export function validateReportManifest(capability: string, manifestId: string, supplied: unknown, owner?: SniffRunOwner): RunManifest {
+  const lease = activeLease(capability, manifestId, owner);
   let serialized: string;
   try {
-    serialized = JSON.stringify(stableValue(supplied));
+    serialized = stableJson(supplied);
   } catch {
     throw new Error("sniff.intake manifest is not serializable");
   }
   if (serialized !== lease.canonicalManifest) throw new Error("sniff.intake manifest differs from the issued manifest");
   return lease.manifest;
 }
-export function validateReportCoverage(capability: string, manifestId: string, coverage: readonly { readonly tool: string; readonly status: string }[]): void {
-  const record = activeLease(capability, manifestId);
+export function validateReportCoverage(capability: string, manifestId: string, coverage: readonly { readonly tool: string; readonly status: string }[], owner?: SniffRunOwner): void {
+  const record = activeLease(capability, manifestId, owner);
   for (const entry of coverage) {
     if (entry.status !== "ran") continue;
     const selected = record.manifest.analyzers.filter((candidate) => candidate.disposition === "selected" && candidate.tool === entry.tool);
@@ -362,25 +424,36 @@ export function validateReportCoverage(capability: string, manifestId: string, c
 }
 
 /** Resolves once spawned analyzers have exited and the target and home were cleaned up. */
-export function releaseRunLease(capability: string, manifestId: string): Promise<void> {
-  return releaseRecord(activeLease(capability, manifestId), "released");
+export function releaseRunLease(capability: string, manifestId: string, owner?: SniffRunOwner): Promise<void> {
+  return releaseRecord(activeLease(capability, manifestId, owner), "released");
 }
 
-export function cancelRunLease(capability: string, manifestId: string): Promise<void> {
-  return releaseRecord(activeLease(capability, manifestId), "cancelled");
+export function cancelRunLease(capability: string, manifestId: string, owner?: SniffRunOwner): Promise<void> {
+  return releaseRecord(activeLease(capability, manifestId, owner), "cancelled");
 }
 
-export function finalizeRunLease(capability: string, manifestId: string): Promise<void> {
-  const record = activeLeases.get(capability);
-  return record?.manifestId === manifestId ? releaseRecord(record, "released") : Promise.resolve();
+export function finalizeRunLease(capability: string, manifestId: string, owner?: SniffRunOwner): Promise<void> {
+  const record = ownedRecord(capability, manifestId, owner);
+  return record ? releaseRecord(record, "released") : Promise.resolve();
 }
 
 /**
- * Releases every active lease. Shutdown cleanup is best-effort: the promise settles only once every
- * lease's children exited and its cleanup ran, and one failed release never cuts the others short.
+ * Process shutdown: disposes every run owner, releasing every active lease. Cleanup is
+ * best-effort: the promise settles only once every lease's children exited and its cleanup ran,
+ * and one failed release never cuts the others short.
  */
 export function releaseAllRunLeases(reason: string): Promise<void> {
-  const bounded = boundedReason(reason);
-  const pending = [...activeLeases.values()].map((record) => releaseRecord(record, "cancelled", bounded));
-  return Promise.allSettled(pending).then(() => undefined);
+  return disposeAllSniffRunOwners(boundedReason(reason));
+}
+
+/**
+ * Test-only: the state of any lease, whichever owner issued it, so a test can observe a lease
+ * whose owner it cannot reach (one held inside an adapter). It exposes no manifest and grants no
+ * capability; production code must use the owner-scoped lookups.
+ */
+export function runLeaseStateForTests(capability: string): { readonly state: "live" | TerminalState; readonly reason?: string; readonly ownerId: string } | undefined {
+  const record = activeLeases.get(capability);
+  if (record) return { state: "live", ownerId: record.owner.id };
+  const terminal = terminalLeases.get(capability);
+  return terminal ? { state: terminal.state, ...(terminal.reason ? { reason: terminal.reason } : {}), ownerId: terminal.owner.id } : undefined;
 }

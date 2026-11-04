@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
+import { stableJson } from "./canonical-json.ts";
 import type { RunManifest } from "./intake.ts";
 import { canonicalReportTargetIdentity } from "./intake-use-case.ts";
 import {
@@ -15,6 +16,7 @@ import {
 } from "./report.ts";
 import { registerReportArtifacts } from "./report-artifact-registry.ts";
 import { type OpenedReportDirectory, openReportDirectory } from "./report-native-persistence.ts";
+import type { SniffRunOwner } from "./run-owner.ts";
 import { assertRunReport, beginRunReport, endRunReport, finalizeRunLease, readRunManifest, validateReportCoverage, validateReportManifest } from "./run-registry.ts";
 
 export type SniffReportMode = "render" | "save";
@@ -38,6 +40,8 @@ export type SniffReportRuntime = {
 };
 export interface SniffReportToolOptions {
   capability: string;
+  /** The owner that issued the capability; omitted, the process owner. */
+  owner?: SniffRunOwner;
   manifestId: string;
   mode?: SniffReportMode;
   report: ReportInput;
@@ -48,6 +52,8 @@ export interface SniffReportToolResult {
   artifacts: ReportArtifacts;
   publicArtifacts: PublicReportArtifacts;
   savedPaths: string[];
+  /** Set only when the report was saved but its parent directory could not be synced. */
+  durabilityWarning?: string;
 }
 
 
@@ -93,15 +99,7 @@ function plannedDirectory(directory: string): PlannedDirectory {
 }
 
 function saveDigest(request: Omit<SaveAuthorizationRequest, "digest">): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(request, (_, value) =>
-        value && typeof value === "object" && !Array.isArray(value)
-          ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
-          : value,
-      ),
-    )
-    .digest("hex");
+  return createHash("sha256").update(stableJson(request)).digest("hex");
 }
 
 /**
@@ -110,18 +108,19 @@ function saveDigest(request: Omit<SaveAuthorizationRequest, "digest">): string {
  * directory, denied approval, failed write) keeps the lease for a corrected retry.
  */
 export async function runSniffReportTool(options: SniffReportToolOptions): Promise<SniffReportToolResult> {
-  const claim = beginRunReport(options.capability, options.manifestId);
+  const { owner } = options;
+  const claim = beginRunReport(options.capability, options.manifestId, owner);
   let finalizeLease = false;
   try {
-    const manifest = readRunManifest(options.capability, options.manifestId);
+    const manifest = readRunManifest(options.capability, options.manifestId, owner);
     const suppliedExtensions = options.report.extensions;
     if (suppliedExtensions !== undefined && (suppliedExtensions === null || typeof suppliedExtensions !== "object" || Array.isArray(suppliedExtensions))) {
       throw new Error("sniff report extensions must be an object");
     }
     const suppliedManifest = suppliedExtensions?.["sniff.intake"];
-    if (suppliedManifest !== undefined) validateReportManifest(options.capability, options.manifestId, suppliedManifest);
+    if (suppliedManifest !== undefined) validateReportManifest(options.capability, options.manifestId, suppliedManifest, owner);
     validateFindingPaths(manifest, options.report);
-    validateReportCoverage(options.capability, options.manifestId, options.report.coverage);
+    validateReportCoverage(options.capability, options.manifestId, options.report.coverage, owner);
     if (options.mode === "save" && !options.path?.trim()) throw new Error("sniff_report mode=save requires path");
     const report = buildSniffReport({
       ...options.report,
@@ -130,7 +129,7 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
     });
     const artifacts = createReportArtifacts(report);
     if (options.mode !== "save") {
-      const readCapability = registerReportArtifacts(artifacts);
+      const readCapability = registerReportArtifacts(artifacts, undefined, owner);
       finalizeLease = true;
       return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, [], readCapability), savedPaths: [] };
     }
@@ -152,17 +151,21 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       const request = { ...unsigned, digest: saveDigest(unsigned) };
       const approval = await options.runtime.authorizeSave(request);
       // A cancel or expiry while approval was pending ended the run; nothing may be written for it.
-      assertRunReport(options.capability, options.manifestId, claim);
+      assertRunReport(options.capability, options.manifestId, claim, owner);
       if (!approval || approval.acceptedDigest !== request.digest) throw new Error("Sniff report save authorization was denied or mismatched");
-      const savedPaths = saveReportArtifactsAt(artifacts, planned.opened);
+      // Once published the report exists, even when it is not yet durable: the run ends and the
+      // saved location is returned with the warning, since a retry would only collide with it.
+      const { savedPaths, durabilityWarning } = saveReportArtifactsAt(artifacts, planned.opened);
       finalizeLease = true;
-      const readCapability = registerReportArtifacts(artifacts);
-      return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, savedPaths, readCapability), savedPaths };
+      const readCapability = registerReportArtifacts(artifacts, undefined, owner);
+      const publicArtifacts = projectReportArtifacts(artifacts, savedPaths, readCapability);
+      if (durabilityWarning === undefined) return { artifacts, publicArtifacts, savedPaths };
+      return { artifacts, publicArtifacts: { ...publicArtifacts, durabilityWarning }, savedPaths, durabilityWarning };
     } finally {
       planned.opened.close();
     }
   } finally {
-    if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId);
-    else endRunReport(options.capability, options.manifestId, claim);
+    if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId, owner);
+    else endRunReport(options.capability, options.manifestId, claim, owner);
   }
 }

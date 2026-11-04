@@ -16,6 +16,7 @@ export * from "./report.ts";
 export * from "./report-artifact-registry.ts";
 export * from "./report-schema.ts";
 export * from "./report-use-case.ts";
+export * from "./run-owner.ts";
 export * from "./run-registry.ts";
 export {
   type AnalyzerSelectionContext,

@@ -1,9 +1,19 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, constants as fsConstants, readdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, constants as fsConstants, fsyncSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { parse, resolve, sep } from "node:path";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
+
+/**
+ * A published save. `durabilityWarning` is set when the report is in place under its final name
+ * but the parent directory sync after the rename failed, so the save may not survive a crash. The
+ * report exists either way: callers must treat it as saved, never as retryable.
+ */
+export interface ReportSaveResult {
+  readonly savedPaths: string[];
+  readonly durabilityWarning?: string;
+}
 
 export interface OpenedReportDirectory {
   readonly path: string;
@@ -161,6 +171,13 @@ function loadNativeSymbols(): NativeSymbols {
   throw new Error(`Sniff report persistence native API is unavailable: ${String(lastError)}`);
 }
 
+let syncDescriptor: (fd: number) => void = fsyncSync;
+
+/** Test seam: observe or fail the fsync of each saved file and directory; `undefined` restores fsync(2). */
+export function setReportFsyncForTests(sync: ((fd: number) => void) | undefined): void {
+  syncDescriptor = sync ?? fsyncSync;
+}
+
 function errno(symbols: NativeSymbols): number {
   return read.i32(symbols.errno() as Parameters<typeof read.i32>[0]);
 }
@@ -270,6 +287,7 @@ function writeEntry(directoryFd: number, relativePath: string, content: string, 
       if (written <= 0) throw new Error(`Sniff report write failed for ${relativePath}`);
       offset += written;
     }
+    syncDescriptor(fd);
   } catch (error) {
     try {
       removeEntry(directoryFd, relativePath, symbols, constants);
@@ -300,7 +318,7 @@ export function saveReportEntriesAt(
   directory: OpenedReportDirectory,
   reportId: string,
   entries: readonly ReportSaveEntry[],
-): string[] {
+): ReportSaveResult {
   validateEntries(entries);
   const constants = platformConstants();
   const symbols = loadNativeSymbols();
@@ -348,14 +366,27 @@ export function saveReportEntriesAt(
       writeEntry(entryDirectoryFd, name, content, symbols, constants);
       written.push(relativePath);
     }
+    // Every entry name must be durable before the tree becomes visible under its final name, and
+    // the rename itself only once the parent directory is synced.
+    syncDescriptor(filesFd);
+    syncDescriptor(stagingFd);
     const publishedResult = symbols.publishNoReplace(parentFd, stagingName, parentFd, reportId, constants.publishNoReplaceFlag);
     if (publishedResult < 0) throw operationError("publish", reportId, errno(symbols), constants);
     published = true;
+    const savedPaths = entries.map(([relativePath]) => `${directory.path}/${reportId}/${relativePath}`);
+    let durabilityWarning: string | undefined;
+    try {
+      syncDescriptor(parentFd);
+    } catch (error) {
+      // The rename already happened: the report is visible and a retry would collide with it.
+      const reason = error instanceof Error ? error.message : String(error);
+      durabilityWarning = `The Sniff report was saved to ${directory.path}/${reportId}, but syncing its parent directory failed (${reason}), so the save may not survive a crash or power loss.`;
+    }
     closeFd(filesFd);
     filesFd = undefined;
     closeFd(stagingFd);
     stagingFd = undefined;
-    return entries.map(([relativePath]) => `${directory.path}/${reportId}/${relativePath}`);
+    return durabilityWarning === undefined ? { savedPaths } : { savedPaths, durabilityWarning };
   } catch (error) {
     if (!published) {
       if (filesFd !== undefined) {

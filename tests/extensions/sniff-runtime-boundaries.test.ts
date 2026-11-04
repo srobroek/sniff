@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,7 @@ import { canonicalReportTargetIdentity, runSniffIntakeTool, type SniffIntakePubl
 import { processAlive } from "../../src/core/process-control.ts";
 import type { ReportInput } from "../../src/core/report.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
+import { createSniffRunOwner, type SniffRunOwner } from "../../src/core/run-owner.ts";
 import { authorizeAnalyzerRun, cancelRunLease, completeAnalyzerReservation, issueRunLease, prepareAnalyzerSpawn, readRunManifest, registerActiveProcess, releaseAllRunLeases, validateReportCoverage } from "../../src/core/run-registry.ts";
 import { type ArgvResult, type ArgvRunner, validateResolvedTarget } from "../../src/core/target.ts";
 import { detectProvider, withResolvedTarget } from "../../src/core/target-provider.ts";
@@ -18,7 +19,16 @@ import { unattendedIntakeAllowed } from "../../src/core/unattended.ts";
 const temporary: string[] = [];
 const sha = (value: string) => value.repeat(40);
 
-afterEach(() => {
+// Every run a test starts belongs to that test's own owner, disposed after it, so no lease outlives
+// its test and no test shares the process owner's lease cap. Only the shutdown tests use the
+// process owner on purpose, and releaseAllRunLeases cleans up after them.
+let runOwner: SniffRunOwner;
+beforeEach(() => {
+  runOwner = createSniffRunOwner({ label: "runtime-boundaries test" });
+});
+
+afterEach(async () => {
+  await runOwner.dispose();
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -53,7 +63,7 @@ function reportInput(manifest: RunManifest): ReportInput {
   };
 }
 
-function localLease(options: { remote?: boolean; ttlMs?: number; now?: () => number; files?: readonly string[]; kind?: RunManifest["resolvedTarget"]["kind"]; history?: RunManifest["resolvedTarget"]["history"]; budget?: RunManifest["budget"]; removeRootOnRelease?: boolean; onRelease?: () => void } = {}) {
+function localLease(options: { processOwner?: boolean; remote?: boolean; ttlMs?: number; now?: () => number; files?: readonly string[]; kind?: RunManifest["resolvedTarget"]["kind"]; history?: RunManifest["resolvedTarget"]["history"]; budget?: RunManifest["budget"]; removeRootOnRelease?: boolean; onRelease?: () => void } = {}) {
   const root = mkdtempSync(join(tmpdir(), "sniff-lease-target-"));
   temporary.push(root);
   const files = options.files ?? ["a.ts"];
@@ -76,7 +86,7 @@ function localLease(options: { remote?: boolean; ttlMs?: number; now?: () => num
       options.onRelease?.();
       if (options.removeRootOnRelease) rmSync(root, { recursive: true, force: true });
     },
-  }, { ttlMs: options.ttlMs, now: options.now });
+  }, { ttlMs: options.ttlMs, now: options.now, owner: options.processOwner ? undefined : runOwner });
   return { root, manifest, lease, releases: () => releases };
 }
 
@@ -164,6 +174,7 @@ function remoteRunner(repositoryUrl: string, providerKind: "git" | "github" | "g
 async function completeReport(result: SniffIntakeToolResult) {
   if (!result.manifest || !result.lease) throw new Error("Intake did not issue a leased manifest");
   return runSniffReportTool({
+    owner: runOwner,
     capability: result.lease.capability,
     manifestId: result.lease.manifestId,
     report: reportInput(result.manifest),
@@ -183,18 +194,18 @@ describe("adaptive runtime boundaries", () => {
       scopeMode: "full",
       objectives: ["correctness-and-resilience"],
       budget: { maxMinutes: 5 },
-    } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     if (!result.manifest || !result.lease) throw new Error("Missing intake lease");
     const checkout = result.manifest.resolvedTarget.root;
     expect(existsSync(checkout)).toBe(true);
-    cancelRunLease(result.lease.capability, result.lease.manifestId);
+    cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     expect(existsSync(checkout)).toBe(false);
-    expect(() => cancelRunLease(result.lease?.capability ?? "", result.lease?.manifestId ?? "")).toThrow("already cancelled");
+    expect(() => cancelRunLease(result.lease?.capability ?? "", result.lease?.manifestId ?? "", runOwner)).toThrow("already cancelled");
   }, 15_000);
 
   test("releases every active lease and preserves terminal replay evidence", () => {
-    const first = localLease({ remote: true, removeRootOnRelease: true });
-    const second = localLease({ remote: true, removeRootOnRelease: true });
+    const first = localLease({ processOwner: true, remote: true, removeRootOnRelease: true });
+    const second = localLease({ processOwner: true, remote: true, removeRootOnRelease: true });
     const firstHome = authorizeAnalyzerRun(first.lease.capability, first.lease.manifestId, "lizard:complexity").home;
     const secondHome = authorizeAnalyzerRun(second.lease.capability, second.lease.manifestId, "lizard:complexity").home;
     expect(existsSync(firstHome)).toBe(true);
@@ -220,12 +231,12 @@ describe("adaptive runtime boundaries", () => {
     const release = () => {
       releases += 1;
     };
-    expect(() => issueRunLease(manifest, { target: { ...manifest.resolvedTarget, root: join(root, "missing") }, release })).toThrow();
+    expect(() => issueRunLease(manifest, { target: { ...manifest.resolvedTarget, root: join(root, "missing") }, release }, { owner: runOwner })).toThrow();
     expect(releases).toBe(1);
     const previous = process.env.TMPDIR;
     process.env.TMPDIR = join(root, "no-such-tmpdir");
     try {
-      expect(() => issueRunLease(manifest, { target: manifest.resolvedTarget, release })).toThrow();
+      expect(() => issueRunLease(manifest, { target: manifest.resolvedTarget, release }, { owner: runOwner })).toThrow();
     } finally {
       if (previous === undefined) delete process.env.TMPDIR;
       else process.env.TMPDIR = previous;
@@ -234,8 +245,8 @@ describe("adaptive runtime boundaries", () => {
   });
 
   test("shutdown waits for every lease even when another lease's release fails", async () => {
-    const failing = localLease({ onRelease: () => { throw new Error("release exploded"); } });
-    const busy = localLease();
+    const failing = localLease({ processOwner: true, onRelease: () => { throw new Error("release exploded"); } });
+    const busy = localLease({ processOwner: true });
     const exit = Promise.withResolvers<number>();
     const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
     try {
@@ -267,7 +278,7 @@ describe("adaptive runtime boundaries", () => {
       zod: { object: () => schema, unknown: () => schema, string: () => schema },
       registerTool: (tool: IntakeTool) => { if (tool.name === "sniff_intake") definition = tool; },
     };
-    sniffIntakeExtension(api as unknown as ExtensionAPI);
+    sniffIntakeExtension(api as unknown as ExtensionAPI, runOwner);
     if (!definition) throw new Error("sniff_intake was not registered");
     return definition;
   }
@@ -306,11 +317,11 @@ describe("adaptive runtime boundaries", () => {
     expect(output.details.result?.reportTarget?.filesAnalyzed).toBe(0);
     const lease = output.details.result?.lease;
     if (!lease) throw new Error("expected a lease");
-    const manifest = readRunManifest(lease.capability, lease.manifestId);
+    const manifest = readRunManifest(lease.capability, lease.manifestId, runOwner);
     expect(manifest.authorization.actor).toBe("extension-host");
     expect(manifest.authorization.reason).toContain("SNIFF_UNATTENDED_INTAKE");
-    await cancelRunLease(lease.capability, lease.manifestId);
-    await expect(runSniffIntakeTool({ input: { target: { kind: "files", root, paths: [] }, intent: "audit", interactive: false } })).rejects.toThrow("trusted confirmation boundary");
+    await cancelRunLease(lease.capability, lease.manifestId, runOwner);
+    await expect(runSniffIntakeTool({ input: { target: { kind: "files", root, paths: [] }, intent: "audit", interactive: false } }, { owner: runOwner })).rejects.toThrow("trusted confirmation boundary");
   });
 
   test("OMP headless intake refuses by default and tool arguments cannot opt in", async () => {
@@ -340,8 +351,8 @@ describe("adaptive runtime boundaries", () => {
         if (approve) {
           const lease = output.details.result?.lease;
           if (!lease) throw new Error("expected a lease");
-          expect(readRunManifest(lease.capability, lease.manifestId).authorization.actor).toBe("interactive-user");
-          await cancelRunLease(lease.capability, lease.manifestId);
+          expect(readRunManifest(lease.capability, lease.manifestId, runOwner).authorization.actor).toBe("interactive-user");
+          await cancelRunLease(lease.capability, lease.manifestId, runOwner);
         } else expect(output.details.result).toBeUndefined();
       }
     }
@@ -447,7 +458,7 @@ describe("adaptive runtime boundaries", () => {
     const selected = manifest.analyzers.filter(({ disposition }) => disposition === "selected");
     expect(selected.map(({ name }) => name)).toEqual(["lizard:complexity", "opengrep:hardcoded-values"]);
     for (const analyzer of selected) {
-      expect((await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: analyzer.name, runtime })).ok).toBe(true);
+      expect((await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, analyzer: analyzer.name, runtime })).ok).toBe(true);
     }
     const executions = calls.filter(({ argv }) => argv[0] !== "mise" && !argv.includes("--version"));
     expect(executions).toHaveLength(2);
@@ -457,7 +468,7 @@ describe("adaptive runtime boundaries", () => {
     const miseWhich = calls.find(({ argv }) => argv.join(" ") === "mise which lizard");
     expect(miseWhich?.env).toMatchObject({ CARGO_HOME: join(coreToolkit, ".cargo"), MISE_AUTO_INSTALL: "0", MISE_CEILING_PATHS: runtime.toolkitCacheRoot, MISE_DATA_DIR: miseData, RUSTUP_HOME: join(coreToolkit, ".rustup"), RUSTUP_TOOLCHAIN: "" });
     expect(executions.find(({ argv }) => argv[0]?.endsWith("lizard"))?.env).toMatchObject({ CARGO_HOME: join(coreToolkit, ".cargo"), MISE_DATA_DIR: miseData, RUSTUP_HOME: join(coreToolkit, ".rustup"), RUSTUP_TOOLCHAIN: "" });
-    cancelRunLease(lease.capability, lease.manifestId);
+    cancelRunLease(lease.capability, lease.manifestId, runOwner);
 
     delete process.env.SNIFF_TEST_SECRET;
     delete process.env.MISE_DATA_DIR;
@@ -475,7 +486,7 @@ describe("adaptive runtime boundaries", () => {
         return { argv, exitCode: scan ? 1 : 0, stdout: scan ? "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n60,2,1,0,51,1-51,a.ts,long,long\n" : "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: manifest.manifestId, analyzer: "lizard:complexity", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: manifest.manifestId, analyzer: "lizard:complexity", runtime });
     expect(result).toMatchObject({
       ok: true,
       acceptedExitCodes: [0, 1],
@@ -484,7 +495,7 @@ describe("adaptive runtime boundaries", () => {
       observations: [{ ruleId: "lizard:complexity", path: "a.ts", message: expect.stringContaining("51 lines") }],
     });
     expect(calls.find(({ argv }) => argv[0]?.endsWith("lizard") && !argv.includes("--version"))?.argv).toEqual(expect.arrayContaining(["-C", "10", "-L", "50", "-a", "5", "--csv"]));
-    cancelRunLease(lease.capability, manifest.manifestId);
+    cancelRunLease(lease.capability, manifest.manifestId, runOwner);
   });
 
   test("revalidates every canonical file immediately before analyzer execution", async () => {
@@ -495,10 +506,10 @@ describe("adaptive runtime boundaries", () => {
     rmSync(join(root, "a.ts"));
     symlinkSync(join(outside, "secret.ts"), join(root, "a.ts"));
     const calls: AnalyzerCall[] = [];
-    const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) });
     expect(result).toMatchObject({ ok: false, outcome: "not-run" });
     expect(calls).toEqual([]);
-    cancelRunLease(lease.capability, lease.manifestId);
+    cancelRunLease(lease.capability, lease.manifestId, runOwner);
   });
 
   test("rejects a relative analyzer path that resolves to a remote lookalike", async () => {
@@ -509,10 +520,10 @@ describe("adaptive runtime boundaries", () => {
     chmodSync(lookalike, 0o755);
     const calls: AnalyzerCall[] = [];
     const runtime = analyzerRuntime(calls, { resolveOpenGrep: () => "tools/opengrep" });
-    const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime });
     expect(result.report).toContain("absolute host path");
     expect(calls).toHaveLength(0);
-    cancelRunLease(lease.capability, lease.manifestId);
+    cancelRunLease(lease.capability, lease.manifestId, runOwner);
   });
 
 	test("validates an analyzer symlink without changing its invocation path", async () => {
@@ -526,10 +537,10 @@ describe("adaptive runtime boundaries", () => {
 		symlinkSync(executable, proxy);
 		const calls: AnalyzerCall[] = [];
 		const runtime = analyzerRuntime(calls, { resolveCommand: (bin) => bin === "lizard" ? proxy : join(host, bin) });
-		const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: "lizard:complexity", runtime });
+		const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, analyzer: "lizard:complexity", runtime });
 		expect(result.ok).toBe(true);
 		expect(calls.every(({ argv }) => argv[0] === proxy)).toBe(true);
-		cancelRunLease(lease.capability, lease.manifestId);
+		cancelRunLease(lease.capability, lease.manifestId, runOwner);
 	});
 
   test("revalidates the target after preflight and before analyzer spawn", async () => {
@@ -552,76 +563,76 @@ describe("adaptive runtime boundaries", () => {
         return { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    const result = await runSniffAnalyzer({ capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime });
     expect(result).toMatchObject({ ok: false, outcome: "not-run" });
     expect(calls).toHaveLength(1);
-    cancelRunLease(lease.capability, lease.manifestId);
+    cancelRunLease(lease.capability, lease.manifestId, runOwner);
   });
 
   test("preserves empty and narrow scopes without repository widening", async () => {
     const empty = localLease({ remote: true, files: [] });
     expect(empty.manifest.analyzers.every(({ disposition }) => disposition === "skipped")).toBe(true);
-    expect((await runSniffAnalyzer({ capability: empty.lease.capability, manifestId: empty.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("not selected");
-    cancelRunLease(empty.lease.capability, empty.lease.manifestId);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: empty.lease.capability, manifestId: empty.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("not selected");
+    cancelRunLease(empty.lease.capability, empty.lease.manifestId, runOwner);
 
     const narrow = localLease({ remote: true });
     const calls: AnalyzerCall[] = [];
     expect(narrow.manifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("skipped");
-    expect((await runSniffAnalyzer({ capability: narrow.lease.capability, manifestId: narrow.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) })).ok).toBe(true);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: narrow.lease.capability, manifestId: narrow.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) })).ok).toBe(true);
     const execution = calls.at(-1)?.argv ?? [];
     expect(execution.at(-1)).toBe("a.ts");
     expect(execution).not.toContain(".");
-    cancelRunLease(narrow.lease.capability, narrow.lease.manifestId);
+    cancelRunLease(narrow.lease.capability, narrow.lease.manifestId, runOwner);
   });
   test("terminates OpenGrep operands before dash-prefixed filenames", async () => {
     const scoped = localLease({ remote: true, files: ["--exclude=*.ts"] });
     const calls: AnalyzerCall[] = [];
-    const result = await runSniffAnalyzer({ capability: scoped.lease.capability, manifestId: scoped.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: scoped.lease.capability, manifestId: scoped.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(calls) });
     expect(result.ok).toBe(true);
     const execution = calls.at(-1)?.argv ?? [];
     const separator = execution.indexOf("--");
     const operand = execution.indexOf("--exclude=*.ts");
     expect(separator).toBeGreaterThan(-1);
     expect(operand).toBeGreaterThan(separator);
-    cancelRunLease(scoped.lease.capability, scoped.lease.manifestId);
+    cancelRunLease(scoped.lease.capability, scoped.lease.manifestId, runOwner);
   });
   test("keeps the operand separator in every shard of a sharded scoped-files run", async () => {
     const sharded = localLease({ files: ["-a.py", "b.py"], budget: { maxFiles: 1 } });
     const calls: AnalyzerCall[] = [];
-    const result = await runSniffAnalyzer({ capability: sharded.lease.capability, manifestId: sharded.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(calls) });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: sharded.lease.capability, manifestId: sharded.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(calls) });
     expect(result.outcome).not.toBe("not-run");
     const shards = calls.filter((call) => call.argv.includes("--csv"));
     expect(shards.map((call) => call.argv.slice(-2))).toEqual([["--", "-a.py"], ["--", "b.py"]]);
-    await cancelRunLease(sharded.lease.capability, sharded.lease.manifestId);
+    await cancelRunLease(sharded.lease.capability, sharded.lease.manifestId, runOwner);
   });
   test("authorizes gitleaks for local whole-repo targets only", async () => {
     const wholeRepo = localLease({ kind: "whole-repo" });
     expect(wholeRepo.manifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("selected");
     const wholeCalls: AnalyzerCall[] = [];
-    const wholeResult = await runSniffAnalyzer({ capability: wholeRepo.lease.capability, manifestId: wholeRepo.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(wholeCalls) });
+    const wholeResult = await runSniffAnalyzer({ owner: runOwner, capability: wholeRepo.lease.capability, manifestId: wholeRepo.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(wholeCalls) });
     expect(wholeResult.ok).toBe(true);
     expect(wholeCalls.at(-1)?.argv).toContain(".");
     expect(wholeCalls.at(-1)?.argv).toContain("-");
-    cancelRunLease(wholeRepo.lease.capability, wholeRepo.lease.manifestId);
+    cancelRunLease(wholeRepo.lease.capability, wholeRepo.lease.manifestId, runOwner);
 
     const remoteRepo = localLease({ remote: true, kind: "whole-repo" });
     expect(remoteRepo.manifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("skipped");
-    cancelRunLease(remoteRepo.lease.capability, remoteRepo.lease.manifestId);
+    cancelRunLease(remoteRepo.lease.capability, remoteRepo.lease.manifestId, runOwner);
 
     for (const kind of ["files", "directory"] as const) {
       const scoped = localLease({ remote: true, kind });
       expect(scoped.manifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("skipped");
-      const result = await runSniffAnalyzer({ capability: scoped.lease.capability, manifestId: scoped.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime([]) });
+      const result = await runSniffAnalyzer({ owner: runOwner, capability: scoped.lease.capability, manifestId: scoped.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime([]) });
       expect(result.report).toContain("not selected");
-      cancelRunLease(scoped.lease.capability, scoped.lease.manifestId);
+      cancelRunLease(scoped.lease.capability, scoped.lease.manifestId, runOwner);
     }
   });
 
   test("makes analyzer recipes one-shot under sequential and concurrent replay", async () => {
     const sequential = localLease({ budget: { maxAnalyzers: 2 } });
-    expect((await runSniffAnalyzer({ capability: sequential.lease.capability, manifestId: sequential.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
-    expect((await runSniffAnalyzer({ capability: sequential.lease.capability, manifestId: sequential.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).report).toContain("one-shot");
-    cancelRunLease(sequential.lease.capability, sequential.lease.manifestId);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: sequential.lease.capability, manifestId: sequential.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: sequential.lease.capability, manifestId: sequential.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).report).toContain("one-shot");
+    cancelRunLease(sequential.lease.capability, sequential.lease.manifestId, runOwner);
 
     const concurrent = localLease();
     const base = analyzerRuntime([]);
@@ -632,32 +643,32 @@ describe("adaptive runtime boundaries", () => {
       run: async (argv, _cwd, _env, timeoutMs) => {
         if (!nested) {
           nested = true;
-          nestedReport = (await runSniffAnalyzer({ capability: concurrent.lease.capability, manifestId: concurrent.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: base })).report;
+          nestedReport = (await runSniffAnalyzer({ owner: runOwner, capability: concurrent.lease.capability, manifestId: concurrent.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: base })).report;
         }
         return { argv, exitCode: 0, stdout: '{"results":[]}', stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    expect((await runSniffAnalyzer({ capability: concurrent.lease.capability, manifestId: concurrent.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime })).ok).toBe(true);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: concurrent.lease.capability, manifestId: concurrent.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime })).ok).toBe(true);
     expect(nestedReport).toContain("one-shot");
-    cancelRunLease(concurrent.lease.capability, concurrent.lease.manifestId);
+    cancelRunLease(concurrent.lease.capability, concurrent.lease.manifestId, runOwner);
   });
 
   test("releases failed preflight reservations and enforces analyzer and file budgets", async () => {
     const retry = localLease();
     const unavailable = analyzerRuntime([], { resolveCommand: () => null });
-    expect((await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: unavailable })).ok).toBe(false);
-    expect((await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
-    cancelRunLease(retry.lease.capability, retry.lease.manifestId);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: unavailable })).ok).toBe(false);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
+    cancelRunLease(retry.lease.capability, retry.lease.manifestId, runOwner);
     const analyzerBound = localLease({ budget: { maxAnalyzers: 1 } });
 
-    expect((await runSniffAnalyzer({ capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
-    expect((await runSniffAnalyzer({ capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("maxAnalyzers");
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).ok).toBe(true);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: analyzerBound.lease.capability, manifestId: analyzerBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("maxAnalyzers");
     const fileBound = localLease({ files: ["a.ts", "b.ts"], budget: { maxFiles: 1 } });
     const shardedCalls: AnalyzerCall[] = [];
-    const sharded = await runSniffAnalyzer({ capability: fileBound.lease.capability, manifestId: fileBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(shardedCalls) });
+    const sharded = await runSniffAnalyzer({ owner: runOwner, capability: fileBound.lease.capability, manifestId: fileBound.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime(shardedCalls) });
     expect(sharded.outcome).toBe("completed");
     expect(shardedCalls.filter((call) => call.argv.includes("scan"))).toHaveLength(2);
-    cancelRunLease(fileBound.lease.capability, fileBound.lease.manifestId);
+    cancelRunLease(fileBound.lease.capability, fileBound.lease.manifestId, runOwner);
     expect(() => localLease({ budget: { maxAnalyzers: 0 } })).toThrow("positive finite integer");
   });
   test("enforces maxMinutes before, during, and after analyzer execution", async () => {
@@ -666,16 +677,16 @@ describe("adaptive runtime boundaries", () => {
     let now = startedAt;
     const expired = localLease({ budget: { maxMinutes: 1 }, now: () => now });
     now += 60_001;
-    expect((await runSniffAnalyzer({ capability: expired.lease.capability, manifestId: expired.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).report).toContain("maxMinutes budget expired");
-    cancelRunLease(expired.lease.capability, expired.lease.manifestId);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: expired.lease.capability, manifestId: expired.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) })).report).toContain("maxMinutes budget expired");
+    cancelRunLease(expired.lease.capability, expired.lease.manifestId, runOwner);
 
     now = startedAt;
     const clipped = localLease({ budget: { maxMinutes: 1 }, now: () => now });
     now += 59_000;
     const clippedCalls: AnalyzerCall[] = [];
-    expect((await runSniffAnalyzer({ capability: clipped.lease.capability, manifestId: clipped.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(clippedCalls) })).ok).toBe(true);
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: clipped.lease.capability, manifestId: clipped.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(clippedCalls) })).ok).toBe(true);
     expect(clippedCalls.at(-1)?.timeoutMs).toBe(1_000);
-    cancelRunLease(clipped.lease.capability, clipped.lease.manifestId);
+    cancelRunLease(clipped.lease.capability, clipped.lease.manifestId, runOwner);
 
     now = startedAt;
     const overrun = localLease({ budget: { maxMinutes: 1 }, now: () => now });
@@ -688,8 +699,8 @@ describe("adaptive runtime boundaries", () => {
         return { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    expect(await runSniffAnalyzer({ capability: overrun.lease.capability, manifestId: overrun.lease.manifestId, analyzer: "lizard:complexity", runtime })).toMatchObject({ ok: false, outcome: "not-run" });
-    cancelRunLease(overrun.lease.capability, overrun.lease.manifestId);
+    expect(await runSniffAnalyzer({ owner: runOwner, capability: overrun.lease.capability, manifestId: overrun.lease.manifestId, analyzer: "lizard:complexity", runtime })).toMatchObject({ ok: false, outcome: "not-run" });
+    cancelRunLease(overrun.lease.capability, overrun.lease.manifestId, runOwner);
   });
   test("waits for a terminated analyzer to exit before releasing its target and home", async () => {
     const order: string[] = [];
@@ -717,9 +728,9 @@ describe("adaptive runtime boundaries", () => {
       return true;
     }) as typeof process.kill);
     try {
-      const resultPromise = runSniffAnalyzer({ capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
+      const resultPromise = runSniffAnalyzer({ owner: runOwner, capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
       await spawned.promise;
-      const released = cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+      const released = cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId, runOwner);
       expect(order).toEqual(["kill"]);
       expect(existsSync(leaseFixture.root)).toBe(true);
       order.push("exit");
@@ -764,7 +775,7 @@ describe("adaptive runtime boundaries", () => {
       return true;
     }) as typeof process.kill);
     try {
-      const result = await runSniffAnalyzer({ capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
+      const result = await runSniffAnalyzer({ owner: runOwner, capability: leaseFixture.lease.capability, manifestId: leaseFixture.lease.manifestId, analyzer: "lizard:complexity", runtime });
       expect(result).toMatchObject({ ok: false, outcome: "not-run" });
       expect(result.report).toContain("expired");
       expect(order).toEqual(["kill"]);
@@ -789,11 +800,11 @@ describe("adaptive runtime boundaries", () => {
       return true;
     }) as typeof process.kill);
     try {
-      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", { pid: 777, exited: exited.promise })).toThrow("does not match the manifest ID");
+      expect(() => registerActiveProcess(leaseFixture.lease.capability, "other-manifest", { pid: 777, exited: exited.promise }, runOwner)).toThrow("does not match the manifest ID");
       await exited.promise;
       expect(killed).toContain(-777);
       expect(existsSync(leaseFixture.root)).toBe(true);
-      await cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+      await cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId, runOwner);
     } finally {
       kill.mockRestore();
       exited.resolve(0);
@@ -804,12 +815,12 @@ describe("adaptive runtime boundaries", () => {
     const startedAt = Date.parse("2026-09-11T00:00:00Z");
     let now = startedAt;
     const leaseFixture = localLease({ budget: { maxMinutes: 1 }, now: () => now });
-    const authorization = authorizeAnalyzerRun(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity");
-    prepareAnalyzerSpawn(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId);
+    const authorization = authorizeAnalyzerRun(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", runOwner);
+    prepareAnalyzerSpawn(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId, runOwner);
     now += 60_001;
-    expect(() => completeAnalyzerReservation(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId)).toThrow("Sniff analyzer exceeded the manifest maxMinutes budget");
-    expect(() => validateReportCoverage(leaseFixture.lease.capability, leaseFixture.lease.manifestId, [{ tool: "lizard", status: "ran" }])).toThrow("Report coverage claims analyzer lizard without a completed reservation");
-    cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId);
+    expect(() => completeAnalyzerReservation(leaseFixture.lease.capability, leaseFixture.lease.manifestId, "lizard:complexity", authorization.reservationId, runOwner)).toThrow("Sniff analyzer exceeded the manifest maxMinutes budget");
+    expect(() => validateReportCoverage(leaseFixture.lease.capability, leaseFixture.lease.manifestId, [{ tool: "lizard", status: "ran" }], runOwner)).toThrow("Report coverage claims analyzer lizard without a completed reservation");
+    cancelRunLease(leaseFixture.lease.capability, leaseFixture.lease.manifestId, runOwner);
   });
 
   test("serializes concurrent toolkit installs and re-probes the loser", async () => {
@@ -863,22 +874,22 @@ describe("adaptive runtime boundaries", () => {
     };
     const merged = localLease({ files: ["a.ts", "b.ts"], budget: { maxFiles: 1 } });
     const mergedCalls: AnalyzerCall[] = [];
-    const mergedResult = await runSniffAnalyzer({ capability: merged.lease.capability, manifestId: merged.lease.manifestId, analyzer: "lizard:complexity", runtime: shardRuntime(mergedCalls, () => 0) });
+    const mergedResult = await runSniffAnalyzer({ owner: runOwner, capability: merged.lease.capability, manifestId: merged.lease.manifestId, analyzer: "lizard:complexity", runtime: shardRuntime(mergedCalls, () => 0) });
     const shards = mergedCalls.filter((call) => call.argv.includes("--csv"));
     expect(shards).toHaveLength(2);
     expect(shards.map((call) => call.argv.at(-1))).toEqual(["a.ts", "b.ts"]);
     expect(mergedResult).toMatchObject({ ok: true, outcome: "completed-with-findings" });
     expect(mergedResult.capture?.incomplete).toBe(false);
     expect(mergedResult.observations?.map((observation) => observation.path).sort()).toEqual(["a.ts", "b.ts"]);
-    await cancelRunLease(merged.lease.capability, merged.lease.manifestId);
+    await cancelRunLease(merged.lease.capability, merged.lease.manifestId, runOwner);
 
     const rejectedLease = localLease({ files: ["a.ts", "b.ts"], budget: { maxFiles: 1 } });
     const rejectedCalls: AnalyzerCall[] = [];
-    const rejectedResult = await runSniffAnalyzer({ capability: rejectedLease.lease.capability, manifestId: rejectedLease.lease.manifestId, analyzer: "lizard:complexity", runtime: shardRuntime(rejectedCalls, (file) => file === "a.ts" ? 2 : 0) });
+    const rejectedResult = await runSniffAnalyzer({ owner: runOwner, capability: rejectedLease.lease.capability, manifestId: rejectedLease.lease.manifestId, analyzer: "lizard:complexity", runtime: shardRuntime(rejectedCalls, (file) => file === "a.ts" ? 2 : 0) });
     expect(rejectedResult).toMatchObject({ ok: false, outcome: "rejected-exit" });
     expect(rejectedResult.report).toContain("exit 2");
     expect(rejectedCalls.filter((call) => call.argv.includes("--csv"))).toHaveLength(1);
-    await cancelRunLease(rejectedLease.lease.capability, rejectedLease.lease.manifestId);
+    await cancelRunLease(rejectedLease.lease.capability, rejectedLease.lease.manifestId, runOwner);
   });
 
   test("classifies a crashed analyzer as a rejected exit and quotes a bounded stderr tail", async () => {
@@ -891,12 +902,12 @@ describe("adaptive runtime boundaries", () => {
         ? { argv, exitCode: 2, stdout: "", stderr: `${noise}\nTraceback: lizard crashed with boom\n`, stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }
         : { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs },
     });
-    const result = await runSniffAnalyzer({ capability: crashed.lease.capability, manifestId: crashed.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: crashed.lease.capability, manifestId: crashed.lease.manifestId, analyzer: "lizard:complexity", runtime });
     expect(result).toMatchObject({ ok: false, outcome: "rejected-exit" });
     expect(result.report).toContain("exit 2 is outside");
     expect(result.report).toContain("lizard crashed with boom");
     expect(Buffer.byteLength(result.report)).toBeLessThan(2_048 + 512);
-    await cancelRunLease(crashed.lease.capability, crashed.lease.manifestId);
+    await cancelRunLease(crashed.lease.capability, crashed.lease.manifestId, runOwner);
   });
 
   test("reports a descendant-held output pipe as incomplete output with an accurate reason", async () => {
@@ -908,12 +919,12 @@ describe("adaptive runtime boundaries", () => {
         ? { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, stdoutIncomplete: "descendant-held-pipe", outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }
         : { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs },
     });
-    const result = await runSniffAnalyzer({ capability: held.lease.capability, manifestId: held.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: held.lease.capability, manifestId: held.lease.manifestId, analyzer: "lizard:complexity", runtime });
     expect(result).toMatchObject({ ok: false, outcome: "incomplete-output" });
     expect(result.capture).toMatchObject({ incomplete: true, truncated: false });
     expect(result.report).toContain("held open by a descendant process");
     expect(result.report).not.toContain("exceeded");
-    await cancelRunLease(held.lease.capability, held.lease.manifestId);
+    await cancelRunLease(held.lease.capability, held.lease.manifestId, runOwner);
   });
 
   test("words a timeout from the effective deadline", async () => {
@@ -923,22 +934,22 @@ describe("adaptive runtime boundaries", () => {
       resolveCommand: base.resolveCommand,
       run: async (argv, _cwd, _env, timeoutMs) => ({ argv, exitCode: argv.includes("--csv") ? null : 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: argv.includes("--csv"), timeoutMs }),
     });
-    const result = await runSniffAnalyzer({ capability: budgeted.lease.capability, manifestId: budgeted.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: budgeted.lease.capability, manifestId: budgeted.lease.manifestId, analyzer: "lizard:complexity", runtime });
     expect(result).toMatchObject({ ok: false, outcome: "not-run" });
     expect(result.report).toContain("maxMinutes");
     expect(result.report).not.toContain("15 minute wall clock");
-    await cancelRunLease(budgeted.lease.capability, budgeted.lease.manifestId);
+    await cancelRunLease(budgeted.lease.capability, budgeted.lease.manifestId, runOwner);
   });
 
   test("abandons the reservation when preflight throws so the analyzer can be retried", async () => {
     const retry = localLease();
     const throwing = analyzerRuntime([], { readLauncher: () => { throw new Error("launcher read exploded"); } });
-    const failed = await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: throwing });
+    const failed = await runSniffAnalyzer({ owner: runOwner, capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: throwing });
     expect(failed).toMatchObject({ ok: false, outcome: "not-run", preflight: null });
     expect(failed.report).toContain("launcher read exploded");
-    const retried = await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) });
+    const retried = await runSniffAnalyzer({ owner: runOwner, capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) });
     expect(retried.ok).toBe(true);
-    await cancelRunLease(retry.lease.capability, retry.lease.manifestId);
+    await cancelRunLease(retry.lease.capability, retry.lease.manifestId, runOwner);
   });
 
   test("draws every shard from one analyzer wall clock", async () => {
@@ -956,29 +967,29 @@ describe("adaptive runtime boundaries", () => {
         return { argv, exitCode: 0, stdout: argv.includes("--csv") ? "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n" : "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: outputLimitBytes ?? 1_048_576, timedOut: false, timeoutMs };
       },
     });
-    const result = await runSniffAnalyzer({ capability: lease.lease.capability, manifestId: lease.lease.manifestId, analyzer: "lizard:complexity", runtime, now: () => now });
+    const result = await runSniffAnalyzer({ owner: runOwner, capability: lease.lease.capability, manifestId: lease.lease.manifestId, analyzer: "lizard:complexity", runtime, now: () => now });
     const shards = calls.filter((call) => call.argv.includes("--csv"));
     expect(shards.map((call) => call.timeoutMs)).toEqual([ANALYZER_TIMEOUT_MS, ANALYZER_TIMEOUT_MS - 500_000]);
     expect(result).toMatchObject({ ok: false, outcome: "not-run" });
     expect(result.report).toContain("minute wall clock");
-    await cancelRunLease(lease.lease.capability, lease.lease.manifestId);
+    await cancelRunLease(lease.lease.capability, lease.lease.manifestId, runOwner);
   });
 
   test("bounds a gitleaks history scan by its captured window and reports an unbounded scan honestly", async () => {
     const bounded = localLease({ kind: "history", history: { window: { kind: "since-release", release: "v1" }, capturedWindow: { kind: "refs", base: sha("b"), head: sha("a") }, commits: [sha("a")] } });
     const boundedCalls: AnalyzerCall[] = [];
-    const boundedResult = await runSniffAnalyzer({ capability: bounded.lease.capability, manifestId: bounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(boundedCalls) });
+    const boundedResult = await runSniffAnalyzer({ owner: runOwner, capability: bounded.lease.capability, manifestId: bounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(boundedCalls) });
     const boundedArgv = boundedCalls.at(-1)?.argv ?? [];
     expect(boundedArgv[boundedArgv.indexOf("--log-opts") + 1]).toBe(`${sha("b")}..${sha("a")}`);
     expect(boundedResult.report).not.toContain("unbounded");
-    await cancelRunLease(bounded.lease.capability, bounded.lease.manifestId);
+    await cancelRunLease(bounded.lease.capability, bounded.lease.manifestId, runOwner);
 
     const unbounded = localLease({ kind: "history", history: { window: { kind: "context-aware-default" }, commits: [sha("a")] } });
     const unboundedCalls: AnalyzerCall[] = [];
-    const unboundedResult = await runSniffAnalyzer({ capability: unbounded.lease.capability, manifestId: unbounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(unboundedCalls) });
+    const unboundedResult = await runSniffAnalyzer({ owner: runOwner, capability: unbounded.lease.capability, manifestId: unbounded.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(unboundedCalls) });
     expect(unboundedCalls.at(-1)?.argv).not.toContain("--log-opts");
     expect(unboundedResult.report).toContain("unbounded history scan");
-    await cancelRunLease(unbounded.lease.capability, unbounded.lease.manifestId);
+    await cancelRunLease(unbounded.lease.capability, unbounded.lease.manifestId, runOwner);
   });
 
   test("gitleaks scans exactly the confirmed commits of a history window, including a window that reaches the root commit", async () => {
@@ -995,10 +1006,10 @@ describe("adaptive runtime boundaries", () => {
         scopeMode: "full",
         objectives: ["bounded-security-smells"],
         budget: { maxMinutes: 5 },
-      } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+      } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
       if (!result.manifest || !result.lease) throw new Error("history intake produced no lease");
       const calls: AnalyzerCall[] = [];
-      const run = await runSniffAnalyzer({ capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
+      const run = await runSniffAnalyzer({ owner: runOwner, capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
       const argv = calls.at(-1)?.argv ?? [];
       const logOpts = argv[argv.indexOf("--log-opts") + 1] ?? "";
       expect(logOpts).not.toContain("4b825dc");
@@ -1009,7 +1020,7 @@ describe("adaptive runtime boundaries", () => {
       const scanned = walked.stdout.toString().split("\n").filter(Boolean);
       expect(scanned).toHaveLength(expected);
       expect(scanned.sort()).toEqual([...(result.manifest.resolvedTarget.history?.commits ?? [])].sort());
-      await cancelRunLease(result.lease.capability, result.lease.manifestId);
+      await cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     }
   }, 60_000);
 
@@ -1033,10 +1044,10 @@ describe("adaptive runtime boundaries", () => {
       scopeMode: "full",
       objectives: ["bounded-security-smells"],
       budget: { maxMinutes: 5 },
-    } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     if (!result.manifest || !result.lease) throw new Error("history intake produced no lease");
     const calls: AnalyzerCall[] = [];
-    await runSniffAnalyzer({ capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
+    await runSniffAnalyzer({ owner: runOwner, capability: result.lease.capability, manifestId: result.lease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(calls) });
     const argv = calls.at(-1)?.argv ?? [];
     const logOpts = (argv[argv.indexOf("--log-opts") + 1] ?? "").split(" ");
     // gitleaks reads `git log -p -U0 <log-opts>`; the merge's patch must carry the merged-in secret.
@@ -1044,7 +1055,7 @@ describe("adaptive runtime boundaries", () => {
     expect(patch.exitCode).toBe(0);
     expect(patch.stdout.toString()).toContain("sk_live_MERGED_IN_SECRET");
     expect(result.manifest.resolvedTarget.history?.commits).toHaveLength(1);
-    await cancelRunLease(result.lease.capability, result.lease.manifestId);
+    await cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
   }, 30_000);
 
   test("refuses to steal a toolkit lock from a live owner", async () => {
@@ -1092,7 +1103,7 @@ describe("adaptive runtime boundaries", () => {
       vi.advanceTimersByTime(21);
       expect(abandoned.releases()).toBe(1);
       expect(existsSync(abandoned.root)).toBe(false);
-      expect(() => cancelRunLease(abandoned.lease.capability, abandoned.lease.manifestId)).toThrow("already expired");
+      expect(() => cancelRunLease(abandoned.lease.capability, abandoned.lease.manifestId, runOwner)).toThrow("already expired");
       expect(abandoned.releases()).toBe(1);
     } finally {
       vi.useRealTimers();
@@ -1101,22 +1112,22 @@ describe("adaptive runtime boundaries", () => {
 
   test("rejects expired, forged, stale, and replayed capabilities while preserving extension namespaces", async () => {
     const expired = localLease({ ttlMs: 0 });
-    expect((await runSniffAnalyzer({ capability: expired.lease.capability, manifestId: expired.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("expired");
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: expired.lease.capability, manifestId: expired.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("expired");
 
     const forged = localLease();
     const forgedInput = reportInput(forged.manifest);
     const forgedExtensions = forgedInput.extensions;
     if (!forgedExtensions) throw new Error("report fixture extensions are missing");
     forgedExtensions["sniff.intake"] = { ...structuredClone(forged.manifest), intent: "history" };
-    await expect(runSniffReportTool({ capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: forgedInput })).rejects.toThrow("differs");
-    await expect(runSniffReportTool({ capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: reportInput(forged.manifest) })).resolves.toBeDefined();
-    await expect(runSniffReportTool({ capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: reportInput(forged.manifest) })).rejects.toThrow("already released");
+    await expect(runSniffReportTool({ owner: runOwner, capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: forgedInput })).rejects.toThrow("differs");
+    await expect(runSniffReportTool({ owner: runOwner, capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: reportInput(forged.manifest) })).resolves.toBeDefined();
+    await expect(runSniffReportTool({ owner: runOwner, capability: forged.lease.capability, manifestId: forged.lease.manifestId, report: reportInput(forged.manifest) })).rejects.toThrow("already released");
 
     const valid = localLease();
-    const result = await runSniffReportTool({ capability: valid.lease.capability, manifestId: valid.lease.manifestId, report: reportInput(valid.manifest) });
+    const result = await runSniffReportTool({ owner: runOwner, capability: valid.lease.capability, manifestId: valid.lease.manifestId, report: reportInput(valid.manifest) });
     expect(result.artifacts.report.extensions["example.dev"]).toEqual({ preserved: true });
-    await expect(runSniffReportTool({ capability: valid.lease.capability, manifestId: valid.lease.manifestId, report: reportInput(valid.manifest) })).rejects.toThrow("already released");
-    expect((await runSniffAnalyzer({ capability: "unknown", manifestId: valid.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("Unknown");
+    await expect(runSniffReportTool({ owner: runOwner, capability: valid.lease.capability, manifestId: valid.lease.manifestId, report: reportInput(valid.manifest) })).rejects.toThrow("already released");
+    expect((await runSniffAnalyzer({ owner: runOwner, capability: "unknown", manifestId: valid.lease.manifestId, analyzer: "opengrep:hardcoded-values", runtime: analyzerRuntime([]) })).report).toContain("Unknown");
   });
   test("hydrates an omitted manifest extension into exact report artifacts", async () => {
     const root = mkdtempSync(join(tmpdir(), "sniff-large-report-"));
@@ -1124,10 +1135,10 @@ describe("adaptive runtime boundaries", () => {
     writeFileSync(join(root, "seed.ts"), "export const value = 1;\n");
     const validated = validateResolvedTarget({ kind: "files", label: "seed.ts", root, files: ["seed.ts"], materialization: "in-place" });
     const manifest = createRunManifest({ target: { ...validated, label: "seed.ts, ".repeat(30_000) }, intent: "audit", scopeMode: "full" });
-    const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => {} });
+    const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => {} }, { owner: runOwner });
     const input = reportInput(manifest);
     delete input.extensions?.["sniff.intake"];
-    const result = await runSniffReportTool({ capability: lease.capability, manifestId: lease.manifestId, report: input });
+    const result = await runSniffReportTool({ owner: runOwner, capability: lease.capability, manifestId: lease.manifestId, report: input });
     const canonical = JSON.parse(result.artifacts.json) as { extensions: { "sniff.intake": RunManifest } };
     expect(canonical.extensions["sniff.intake"]).toEqual(manifest);
     expect(result.artifacts.markdown).toContain(result.artifacts.report.reportId);
@@ -1143,7 +1154,7 @@ describe("adaptive runtime boundaries", () => {
       scopeMode: "full",
       objectives: ["correctness-and-resilience"],
       budget: { maxMinutes: 5 },
-    } }, { runner: releaseFixture.runner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    } }, { owner: runOwner, runner: releaseFixture.runner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     const releaseRoot = release.manifest?.resolvedTarget.root ?? "";
     expect((await completeReport(release)).artifacts.report.target.kind).toBe("release");
     expect(existsSync(releaseRoot)).toBe(false);
@@ -1160,14 +1171,14 @@ describe("adaptive runtime boundaries", () => {
       scopeMode: "full",
       objectives: ["correctness-and-resilience", "bounded-security-smells"],
       budget: { maxMinutes: 5 },
-    } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     const historyManifest = history.manifest;
     const historyLease = history.lease;
     if (!historyManifest || !historyLease) throw new Error("history intake produced no lease");
     expect(historyManifest.resolvedTarget.kind).toBe("history");
     expect(historyManifest.analyzers.find(({ name }) => name === "gitleaks:tracked-history")?.disposition).toBe("selected");
     const gitleaksCalls: AnalyzerCall[] = [];
-    await runSniffAnalyzer({ capability: historyLease.capability, manifestId: historyLease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(gitleaksCalls) });
+    await runSniffAnalyzer({ owner: runOwner, capability: historyLease.capability, manifestId: historyLease.manifestId, analyzer: "gitleaks:tracked-history", runtime: analyzerRuntime(gitleaksCalls) });
     const gitleaksArgv = gitleaksCalls.at(-1)?.argv ?? [];
     const captured = historyManifest.resolvedTarget.history?.capturedWindow;
     if (captured?.kind !== "refs") throw new Error(`expected captured refs window, got ${JSON.stringify(captured)}`);
@@ -1182,14 +1193,14 @@ describe("adaptive runtime boundaries", () => {
       scopeMode: "full",
       objectives: ["correctness-and-resilience"],
       budget: { maxMinutes: 5 },
-    } }, { runner: mrFixture.runner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+    } }, { owner: runOwner, runner: mrFixture.runner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
     expect((await completeReport(mr)).artifacts.report.target.kind).toBe("mr");
   }, 20_000);
 
   test("binds canonical reports to matching authenticated target identities", async () => {
     for (const kind of ["working-tree", "files", "directory", "module", "commit", "range", "branch", "ref", "repository", "pr", "mr", "release", "history"] as const) {
       const current = localLease({ kind, remote: kind === "repository" });
-      const report = (await runSniffReportTool({ capability: current.lease.capability, manifestId: current.lease.manifestId, report: reportInput(current.manifest) })).artifacts.report;
+      const report = (await runSniffReportTool({ owner: runOwner, capability: current.lease.capability, manifestId: current.lease.manifestId, report: reportInput(current.manifest) })).artifacts.report;
       expect(report.target.kind).toBe(canonicalReportTargetIdentity(current.manifest.resolvedTarget, current.manifest.scopeMode).kind);
     }
     for (const field of ["kind", "label", "baseRef", "filesAnalyzed"] as const) {
@@ -1199,7 +1210,7 @@ describe("adaptive runtime boundaries", () => {
       if (field === "label") input.target.label = "forged";
       if (field === "baseRef") input.target.baseRef = sha("f");
       if (field === "filesAnalyzed") input.target.filesAnalyzed += 1;
-      await expect(runSniffReportTool({ capability: current.lease.capability, manifestId: current.lease.manifestId, report: input })).rejects.toThrow("must match");
+      await expect(runSniffReportTool({ owner: runOwner, capability: current.lease.capability, manifestId: current.lease.manifestId, report: input })).rejects.toThrow("must match");
     }
   });
 });

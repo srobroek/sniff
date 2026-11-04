@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { stableJson } from "./canonical-json.ts";
 import { objectiveCoverageGaps } from "./objective-gaps.ts";
 import { OBJECTIVE_GROUPS, type ObjectiveGroup, selectObjectiveGroups } from "./objectives.ts";
 import { reportPersistenceSupported } from "./report-native-persistence.ts";
@@ -139,19 +140,6 @@ function buildPlan(input: IntakeInput, objectives: readonly ObjectiveGroup[]): I
     budget: { ...input.budget },
     security: structuredClone(input.security ?? {}),
   };
-}
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(record).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, stableValue(entry)]));
-  }
-  return value;
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(stableValue(value));
 }
 
 function freezeDeep<T>(value: T): T {
