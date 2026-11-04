@@ -23,14 +23,28 @@ export const TERMINATION_GRACE_MS = 100;
 type GroupSignal = "SIGTERM" | "SIGKILL";
 
 /**
- * Supervisor run as `/bin/sh -c SUPERVISOR sniff-supervisor <argv...>`. Before exec'ing the real
- * command it forks a sentinel into the same process group, through an intermediate subshell so
- * the command never inherits an unknown child. The sentinel ignores SIGTERM/SIGHUP/SIGINT, has
- * stdio on /dev/null so it never holds a capture pipe, and keeps only the control socket on fd 3:
- * it reports its PID there and blocks reading it, so it exits on its own once Sniff closes the
- * socket or dies. The command is exec'd with fd 3 closed, so it keeps the leader PID and its argv.
+ * Variables a POSIX shell reads at startup or maintains itself (bash, dash, ksh and ash), plus
+ * bash's reserved `BASH*` family. Imported, they can change or stop the supervisor shell, for
+ * example `SHELLOPTS=noexec` parses without executing and a non-numeric `OPTIND` aborts dash, and
+ * the shell may rewrite them on export. They therefore never reach the shell's environment. A
+ * shell outside this family with other special names could still rewrite those on export.
  */
-const SUPERVISOR = "( { trap '' TERM HUP INT; read -r _ <&3; } </dev/null >/dev/null 2>&1 & echo \"$!\" >&3 ); exec \"$@\" 3>&-";
+const SHELL_VARIABLE = /^(?:BASH|BASH_.*|BASHOPTS|BASHPID|SHELLOPTS|POSIXLY_CORRECT|ENV|CDPATH|IFS|OPTIND|OPTARG|OPTERR|PS[1-4]|PPID|UID|EUID|GROUPS|LINENO|RANDOM|SRANDOM|SECONDS|HISTCMD|HIST[A-Z]*|PWD|OLDPWD|SHLVL|_|TMOUT|GLOBIGNORE|EXECIGNORE|FUNCNEST|FUNCNAME|DIRSTACK|PIPESTATUS|COMP_[A-Z]*|MAIL|MAILCHECK|MAILPATH|EPOCHSECONDS|EPOCHREALTIME|FCEDIT|FIGNORE|HOSTFILE|INPUTRC|TIMEFORMAT|PROMPT_COMMAND|IGNOREEOF|CHILD_MAX|FPATH|KSH_VERSION|ZDOTDIR)$/;
+const SHELL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Variables a shell exports on its own even when it imported none of them. */
+const SHELL_EXPORTED = ["PWD", "OLDPWD", "SHLVL", "_"];
+
+/**
+ * Supervisor run as `/bin/sh -c SUPERVISOR sniff-supervisor <NAME=value...> <argv...>`. Before the
+ * real command runs it forks a sentinel into the same process group, through an intermediate
+ * subshell so the command never inherits an unknown child. The sentinel ignores SIGTERM/SIGHUP/
+ * SIGINT, has stdio on /dev/null so it never holds a capture pipe, and keeps only the control
+ * socket on fd 3: it reports its PID there and blocks reading it, so it exits on its own once Sniff
+ * closes the socket or dies. The leader then exec's `env`, with fd 3 closed, which drops what the
+ * shell exported on its own, restores the caller's shell variables and exec's the command. The
+ * command thus keeps the leader PID, its argv, and exactly the caller's environment.
+ */
+const SUPERVISOR = `( { trap '' TERM HUP INT; read -r _ <&3; } </dev/null >/dev/null 2>&1 & echo "$!" >&3 ); exec /usr/bin/env ${SHELL_EXPORTED.map((name) => `-u ${name}`).join(" ")} -- "$@" 3>&-`;
 const SUPERVISOR_NAME = "sniff-supervisor";
 
 /**
@@ -137,17 +151,19 @@ function spawnError(code: "ENOENT" | "EACCES", message: string, path: string): N
 }
 
 /**
- * Resolves the word the supervisor shell exec's. An executable the shell could not exec is rejected
- * with the error a direct `Bun.spawn` throws, so a missing tool still fails to launch instead of
- * exiting 127. The shell's `exec` would parse a leading `-` as an option, so only such a name is
- * replaced by its resolved path; every other name reaches the command unchanged as its argv[0].
+ * Rejects an executable `env` could not exec, with the error a direct `Bun.spawn` throws, so a
+ * missing tool still fails to launch instead of exiting 127. `env` would read a name containing `=`
+ * as one more assignment, so such a name is refused rather than misread.
  */
-function execTarget(executable: string | undefined, cwd: string, env: SpawnEnvironment): string {
+function assertSpawnable(executable: string | undefined, cwd: string, env: SpawnEnvironment): void {
   if (executable === undefined || executable.length === 0) throw new TypeError("cmd must not be empty");
+  if (executable.includes("=")) throw new Error(`Sniff cannot launch an executable whose name contains "=": ${executable}`);
   if (!executable.includes("/")) {
-    const found = Bun.which(executable, { PATH: env.PATH ?? process.env.PATH ?? "", cwd });
-    if (found === null) throw Object.assign(new Error(`Executable not found in $PATH: "${executable}"`), { code: "ENOENT", errno: -2, path: executable });
-    return executable.startsWith("-") ? found : executable;
+    // `env` searches the caller's PATH, or the execvp default without one.
+    if (Bun.which(executable, { PATH: env.PATH ?? "/usr/bin:/bin", cwd }) === null) {
+      throw Object.assign(new Error(`Executable not found in $PATH: "${executable}"`), { code: "ENOENT", errno: -2, path: executable });
+    }
+    return;
   }
   const path = isAbsolute(executable) ? executable : resolve(cwd, executable);
   let isFile: boolean;
@@ -163,18 +179,35 @@ function execTarget(executable: string | undefined, cwd: string, env: SpawnEnvir
     runnable = false;
   }
   if (!runnable) throw spawnError("EACCES", `EACCES: permission denied, posix_spawn '${executable}'`, executable);
-  return executable.startsWith("-") ? path : executable;
+}
+
+/**
+ * Splits the caller's environment into what the supervisor shell may import and the `NAME=value`
+ * assignments `env` restores before the command runs: shell variables, and names a shell might not
+ * pass through. Together they are exactly the caller's environment.
+ */
+function splitEnvironment(env: SpawnEnvironment): { readonly shell: Record<string, string>; readonly restored: string[] } {
+  const shell: Record<string, string> = {};
+  const restored: string[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined || name.length === 0) continue;
+    if (SHELL_IDENTIFIER.test(name) && !SHELL_VARIABLE.test(name)) shell[name] = value;
+    else restored.push(`${name}=${value}`);
+  }
+  return { shell, restored };
 }
 
 /**
  * Spawns `argv` as the leader of a new session and process group, with a sentinel that keeps the
  * group ID owned until `group.release()`. The leader is the command itself after the supervisor
- * shell exec's it, so its PID, argv, exit code and signal match a direct spawn.
+ * shell and `env` exec it, so its PID, argv, environment, exit code and signal match a direct spawn.
  */
 export function spawnInOwnedGroup(argv: readonly string[], options: { readonly cwd: string; readonly env: SpawnEnvironment }) {
-  const proc = Bun.spawn(["/bin/sh", "-c", SUPERVISOR, SUPERVISOR_NAME, execTarget(argv[0], options.cwd, options.env), ...argv.slice(1)], {
+  assertSpawnable(argv[0], options.cwd, options.env);
+  const { shell, restored } = splitEnvironment(options.env);
+  const proc = Bun.spawn(["/bin/sh", "-c", SUPERVISOR, SUPERVISOR_NAME, ...restored, ...argv], {
     cwd: options.cwd,
-    env: options.env,
+    env: shell,
     stdio: ["ignore", "pipe", "pipe", "socket-fd"],
     detached: true,
   });

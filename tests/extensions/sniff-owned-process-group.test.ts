@@ -200,6 +200,8 @@ describe("owned process group", () => {
     expect(directError).toBeInstanceOf(Error);
     await expect(runCommand([missing], tmpdir(), process.env, 5_000)).rejects.toThrow((directError as Error).message);
     await expect(runCommand([join(tmpdir(), "sniff-missing", "-x")], tmpdir(), process.env, 5_000)).rejects.toThrow("ENOENT");
+    // env(1) would read such a name as an assignment, so it is refused instead of misread.
+    await expect(runCommand(["NAME=value"], tmpdir(), process.env, 5_000)).rejects.toThrow('contains "="');
   });
 
   test("terminateAndAwait signals an owned group only while the sentinel is alive and never an unowned PID", async () => {
@@ -242,6 +244,60 @@ describe("owned process group", () => {
       kill.mockRestore();
     }
     await until(() => !processAlive(sentinel), "the sentinel to exit");
+  });
+
+  test("a caller environment with shell startup knobs neither disables the supervisor nor reaches it", async () => {
+    const dir = tempDir();
+    const ready = join(dir, "ready");
+    const release = join(dir, "release");
+    const printer = join(dir, "startup.sh");
+    writeFileSync(printer, "echo STARTUP-FILE-RAN\necho STARTUP-FILE-RAN >&2\n");
+    const env: Record<string, string> = {
+      ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)),
+      SHELLOPTS: "noexec:xtrace",
+      BASHOPTS: "nullglob",
+      BASH_ENV: printer,
+      ENV: printer,
+      IFS: "x",
+      CDPATH: join(dir, "nowhere"),
+      POSIXLY_CORRECT: "1",
+      OPTIND: "not-a-number",
+      PS4: "TRACE ",
+      "BASH_FUNC_read%%": "() { return 0; }",
+      PWD: "/caller/pwd",
+      OLDPWD: "/caller/oldpwd",
+      SHLVL: "7",
+      _: "/caller/underscore",
+      "dash-name": "kept",
+    };
+    // Perl reads no shell variable, so it reports the environment the command really received.
+    const dump = 'open(my $fh, ">", "$ARGV[0].tmp") or die; print $fh $$; close($fh); rename("$ARGV[0].tmp", $ARGV[0]) or die; select(undef, undef, undef, 0.01) until -e $ARGV[1]; print map { "$_\\0$ENV{$_}\\0" } sort keys %ENV;';
+    let spawned: SpawnedProcess | undefined;
+    const pending = runCommand(["perl", "-e", dump, ready, release], dir, env, 20_000, undefined, undefined, (handle) => {
+      spawned = handle;
+    });
+    await until(() => existsSync(ready), "the command to start");
+    // The supervisor ran: its sentinel is alive and owns the group.
+    const sentinel = sentinelOf(spawned);
+    expect(processAlive(sentinel)).toBe(true);
+    expect(spawned?.group?.owned()).toBe(true);
+    writeFileSync(release, "");
+    const result = await pending;
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).not.toContain("STARTUP-FILE-RAN");
+    const fields = result.stdout.split("\0");
+    const received: Record<string, string> = {};
+    for (let index = 0; index + 1 < fields.length; index += 2) received[fields[index] ?? ""] = fields[index + 1] ?? "";
+    expect(received).toEqual(env);
+  });
+
+  test("the command receives exactly the caller's environment, not the supervisor shell's", async () => {
+    const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", ONLY: "this" };
+    const result = await runCommand(["perl", "-e", 'print map { "$_\\0$ENV{$_}\\0" } sort keys %ENV;'], tmpdir(), env, 20_000);
+    expect(result.exitCode).toBe(0);
+    // No PWD, SHLVL or OLDPWD from the shell, which a direct spawn never adds either.
+    expect(result.stdout).toBe(`ONLY\0this\0PATH\0${env.PATH}\0`);
   });
 
   test("the sentinel exits when the Sniff process is killed", async () => {
