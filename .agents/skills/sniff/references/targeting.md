@@ -58,7 +58,7 @@ The core request kind is exact and closed: `whole-repo`, `working-tree`, `files`
 - `git` supports local and remote refs, history, and temporary checkout. A non-Git tree supports only `files` and `directory` targets.
 - `gh` adds GitHub PR and release targets; `glab` adds GitLab MR and release targets.
 - Capture each remote ref as a full commit SHA before materialization, and fetch enough ancestry and tags for every requested window.
-- Run history commands only against captured SHAs or fetched release tags. Date and count windows use the captured head; release windows use the captured release and head commits. The default compares the captured head with its parent; a root commit compares against the empty tree. A resolved window keeps its exact commit set through materialization.
+- Run history commands only against captured SHAs or fetched release tags. Date and count windows use the captured head; a date window starts at that date's midnight UTC (a timestamp without an offset is UTC), not the host's local time. Release windows use the captured release and head commits. The default compares the captured head with its parent; a root commit compares against the empty tree. A resolved window keeps its exact commit set through materialization.
 - PR and MR change sets come from git between the captured base and head (never the provider file list, which is capped or absent). When git cannot produce them or disagrees with the provider count, the target carries a gap; surface it in the plan and report.
 
 ## File reduction
