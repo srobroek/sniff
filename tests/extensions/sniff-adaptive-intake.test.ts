@@ -109,7 +109,8 @@ describe("adaptive intake", () => {
     );
     expect(resolved.authorization).toMatchObject({ required: true, actor: "test-authority", acceptedDigest: resolved.confirmation.digest });
     expect(resolved.defaults.map(({ field }) => field).sort()).toEqual(["analyzers", "budget", "exclusions", "objectives"]);
-    expect(resolved.gaps.map(({ field }) => field)).toEqual(["budget"]);
+    // Default objectives include three groups no recipe serves; each is recorded as an unmet-objective gap.
+    expect(resolved.gaps.map(({ field }) => field).sort()).toEqual(["budget", "objectives", "objectives", "objectives"]);
     await expect(buildNoninteractiveManifest({ target: target("/tmp"), intent: "audit", scopeMode: "full", authorization: { acceptedDigest: "forged", actor: "caller" } })).rejects.toThrow("trusted confirmation boundary");
   });
   test("returns a minimized canonical confirmation target", () => {
