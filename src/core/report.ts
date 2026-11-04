@@ -212,12 +212,31 @@ function reportIdentity(report: Omit<SniffReport, "reportId">): string {
 }
 
 /**
- * Reports and artifact sets this module built and validated. Both are immutable values once built,
- * so downstream steps trust membership instead of re-validating; anything else (a parsed, cloned,
- * or spread copy) is validated, or rebuilt and compared, in full.
+ * Reports and artifact sets this module built and validated. Each is a private, deeply frozen
+ * graph that shares nothing mutable with its input, so membership proves the value still is what
+ * was validated and downstream steps skip re-validation; anything else (a parsed, cloned, or
+ * spread copy) is validated, or rebuilt and compared, in full.
  */
 const builtReports = new WeakSet<SniffReport>();
 const builtArtifacts = new WeakSet<ReportArtifacts>();
+
+/** Freezes a graph this module just created. A frozen subtree is one this module already deep-froze. */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
+/** A private, validated, deeply frozen copy of `report`, recorded as built. */
+function sealReport(report: SniffReport, verifyDerived: boolean): SniffReport {
+  const sealed = structuredClone(report);
+  validateReport(sealed, verifyDerived);
+  deepFreeze(sealed);
+  builtReports.add(sealed);
+  return sealed;
+}
 
 function assertBuiltOrValid(report: SniffReport): void {
   if (!builtReports.has(report)) validateSniffReport(report);
@@ -248,9 +267,7 @@ export function buildSniffReport(value: unknown): SniffReport {
   const report: SniffReport = { ...withoutId, reportId: `report-${sha256(reportIdentity(withoutId)).slice(0, 16)}` };
   // The IDs, census, and report ID were derived just above, so only the schema, date, and
   // duplicate checks can still fail; re-deriving them would hash every finding a second time.
-  validateReport(report, false);
-  builtReports.add(report);
-  return report;
+  return sealReport(report, false);
 }
 
 function validateReport(value: unknown, verifyDerived: boolean): asserts value is SniffReport {
@@ -446,8 +463,8 @@ function createFileArtifacts(report: SniffReport): ReportFileArtifact[] {
   });
 }
 
-export function createReportArtifacts(report: SniffReport): ReportArtifacts {
-  assertBuiltOrValid(report);
+export function createReportArtifacts(source: SniffReport): ReportArtifacts {
+  const report = builtReports.has(source) ? source : sealReport(source, true);
   const json = canonicalJson(report);
   const markdown = renderMarkdown(report, true);
   const fullMarkdown = renderMarkdown(report, false);
@@ -487,6 +504,7 @@ export function createReportArtifacts(report: SniffReport): ReportArtifacts {
   const indexJson = canonicalJson(index);
   const indexDescriptor: ReportArtifactDescriptor = { kind: "index", relativePath: "index.json", sha256: sha256(indexJson), bytes: Buffer.byteLength(indexJson) };
   const artifacts: ReportArtifacts = { report, json, markdown, fullMarkdown, receipt, index, indexJson, manifestJson, coverageJson, fileArtifacts, descriptors: [indexDescriptor, ...descriptorsWithoutIndex] };
+  deepFreeze(artifacts);
   builtArtifacts.add(artifacts);
   return artifacts;
 }
