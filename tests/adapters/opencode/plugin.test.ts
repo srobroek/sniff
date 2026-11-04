@@ -115,9 +115,23 @@ describe("registration", () => {
     expect(host.prompts[1]?.skills).toEqual([{ id: "other" }, { id: "sniff" }]);
     expect(host.prompts[1]?.delivery).toBe("queue");
 
+    // A substituted default text has no spans, so kept attachments lose their mention offsets.
+    const span = { start: 0, end: 2, text: "  " };
+    await command.execute({
+      sessionID: "ses_cmd",
+      prompt: { text: "  ", files: [{ uri: "file:///a", mention: span }], agents: [{ name: "explore", mention: span }], skills: [{ id: "other", mention: span }] },
+      delivery: "steer",
+    });
+    expect(host.prompts[2]).toMatchObject({ files: [{ uri: "file:///a" }], agents: [{ name: "explore" }], skills: [{ id: "other" }, { id: "sniff" }] });
+    expect(JSON.stringify(host.prompts[2])).not.toContain("mention");
+
+    // The user's own text keeps its mentions.
+    await command.execute({ sessionID: "ses_cmd", prompt: { text: "@a.ts", files: [{ uri: "file:///a", mention: { start: 0, end: 5, text: "@a.ts" } }] }, delivery: "steer" });
+    expect(host.prompts[3]?.files).toEqual([{ uri: "file:///a", mention: { start: 0, end: 5, text: "@a.ts" } }]);
+
     await cleanup();
     await expect(command.execute({ sessionID: "ses_cmd", prompt: { text: "x" }, delivery: "steer" })).rejects.toThrow("unloaded");
-    expect(host.prompts).toHaveLength(2);
+    expect(host.prompts).toHaveLength(4);
   });
 
   test("registers the shipped skill without replacing a user's own skill", async () => {

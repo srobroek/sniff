@@ -44,16 +44,32 @@ type ToolResult = { readonly content: string; readonly metadata?: Record<string,
 export const SNIFF_COMMAND = "sniff";
 const SNIFF_COMMAND_DEFAULT = "Run a Sniff code-smell audit of this project. Start the adaptive intake and ask me for whatever the request leaves open.";
 
-type CommandPrompt = { readonly text?: string; readonly skills?: readonly { readonly id: string }[] } & Record<string, unknown>;
+type Attachment = { readonly mention?: unknown } & Record<string, unknown>;
+type CommandPrompt = { readonly text?: string; readonly files?: readonly Attachment[]; readonly agents?: readonly Attachment[]; readonly skills?: readonly ({ readonly id: string } & Attachment)[] } & Record<string, unknown>;
+
+function withoutMention<T extends Attachment>(attachment: T): T {
+  const { mention: _mention, ...rest } = attachment;
+  return rest as T;
+}
 
 /**
  * The `/sniff` prompt: the user's arguments, or a default request when there are none, with the
  * `sniff` skill attached so the turn starts from the skill's workflow instead of guessing at tools.
+ * A substituted default text has no spans, so every kept attachment loses its `mention` offsets.
  */
 export function sniffCommandPrompt(prompt: CommandPrompt, skillId: string): CommandPrompt {
-  const text = typeof prompt.text === "string" && prompt.text.trim() !== "" ? prompt.text : SNIFF_COMMAND_DEFAULT;
-  const skills = [...(prompt.skills ?? []).filter((entry) => entry.id !== skillId), { id: skillId }];
-  return { ...prompt, text, skills };
+  const substituted = typeof prompt.text !== "string" || prompt.text.trim() === "";
+  const keep = <T extends Attachment>(attachments: readonly T[] | undefined): T[] | undefined => (attachments === undefined ? undefined : substituted ? attachments.map(withoutMention) : [...attachments]);
+  const files = keep(prompt.files);
+  const agents = keep(prompt.agents);
+  const skills = [...(keep(prompt.skills) ?? []).filter((entry) => entry.id !== skillId), { id: skillId }];
+  return {
+    ...prompt,
+    text: substituted ? SNIFF_COMMAND_DEFAULT : (prompt.text as string),
+    ...(files ? { files } : {}),
+    ...(agents ? { agents } : {}),
+    skills,
+  };
 }
 
 export type SniffOpenCodeOptions = {
