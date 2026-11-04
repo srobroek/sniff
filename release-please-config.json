@@ -5,6 +5,7 @@
     ".": {
       "release-type": "node",
       "package-name": "@srobroek/sniff",
+      "bump-minor-pre-major": true,
       "extra-files": [
         ".omp-plugin/plugin.json",
         {
