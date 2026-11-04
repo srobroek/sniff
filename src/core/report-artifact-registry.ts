@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { canonicalJson } from "./canonical-json.ts";
 import type { ReportArtifactDescriptor, ReportArtifacts } from "./report.ts";
 
 export const REPORT_ARTIFACT_CHUNK_BYTES = 64 * 1024;
@@ -48,11 +49,6 @@ function retainedBytes(): number {
   return bytes;
 }
 
-function canonicalReceiptJson(artifacts: ReportArtifacts): string {
-  const receipt = Object.fromEntries(Object.entries(artifacts.receipt).sort(([left], [right]) => left.localeCompare(right)));
-  return `${JSON.stringify(receipt, null, 2)}\n`;
-}
-
 function contentsFor(artifacts: ReportArtifacts): Map<string, string> {
   const contents = new Map<string, string>([
     ["index.json", artifacts.indexJson],
@@ -60,7 +56,7 @@ function contentsFor(artifacts: ReportArtifacts): Map<string, string> {
     ["summary.md", artifacts.fullMarkdown],
     ["manifest.json", artifacts.manifestJson],
     ["coverage.json", artifacts.coverageJson],
-    ["receipt.json", canonicalReceiptJson(artifacts)],
+    ["receipt.json", canonicalJson(artifacts.receipt)],
   ]);
   for (const file of artifacts.fileArtifacts) contents.set(file.relativePath, file.json);
   return contents;

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, resolve, sep } from "node:path";
+import { canonicalJson, compareCodeUnits as compareText, stableJson } from "./canonical-json.ts";
 import { type OpenedReportDirectory, openReportDirectory, saveReportEntriesAt } from "./report-native-persistence.ts";
 import { assertReportInput, assertSniffReportSchema } from "./report-schema.ts";
 
@@ -154,31 +155,6 @@ export interface PublicReportArtifacts {
   descriptorCount: number;
   descriptorsTruncated: boolean;
   receipt: Pick<ValidationReceipt, "schemaVersion" | "reportId" | "findingCount" | "artifactCount">;
-}
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .filter(([, entry]) => entry !== undefined)
-        .sort(([left], [right]) => compareText(left, right))
-        .map(([key, entry]) => [key, canonicalValue(entry)]),
-    );
-  }
-  return value;
-}
-
-function stableJson(value: unknown): string {
-  return JSON.stringify(canonicalValue(value));
-}
-
-function canonicalJson(value: unknown): string {
-  return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
 }
 
 function sha256(value: string): string {

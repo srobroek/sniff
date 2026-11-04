@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, join } from "node:path";
+import { stableJson } from "./canonical-json.ts";
 import type { RunManifest } from "./intake.ts";
 import { canonicalReportTargetIdentity } from "./intake-use-case.ts";
 import {
@@ -93,15 +94,7 @@ function plannedDirectory(directory: string): PlannedDirectory {
 }
 
 function saveDigest(request: Omit<SaveAuthorizationRequest, "digest">): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(request, (_, value) =>
-        value && typeof value === "object" && !Array.isArray(value)
-          ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)))
-          : value,
-      ),
-    )
-    .digest("hex");
+  return createHash("sha256").update(stableJson(request)).digest("hex");
 }
 
 /**

@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { AnalyzerObservation } from "./analyzer-output.ts";
+import { canonicalJson, compareCodeUnits as compareText } from "./canonical-json.ts";
 
 export const ANALYZER_ARTIFACT_SCHEMA_VERSION = "1.0.0" as const;
 export const ANALYZER_ARTIFACT_CHUNK_BYTES = 64 * 1024;
@@ -95,22 +96,6 @@ interface RegisteredAnalyzer {
 }
 
 const analyzers = new Map<string, RegisteredAnalyzer>();
-
-function compareText(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-function canonicalValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([, entry]) => entry !== undefined).sort(([a], [b]) => compareText(a, b)).map(([key, entry]) => [key, canonicalValue(entry)]));
-  }
-  return value;
-}
-
-function canonicalJson(value: unknown): string {
-  return `${JSON.stringify(canonicalValue(value), null, 2)}\n`;
-}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");

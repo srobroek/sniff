@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { recipeTargetSeparator, SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
+import { stableJson } from "./canonical-json.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
@@ -64,14 +65,6 @@ export type AnalyzerRunAuthorization = {
 
 const activeLeases = new Map<string, LeaseRecord>();
 const terminalLeases = new Map<string, TerminalRecord>();
-
-function stableValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stableValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, stableValue(entry)]));
-  }
-  return value;
-}
 
 function rememberTerminal(capability: string, state: TerminalState, reason?: string): void {
   terminalLeases.set(capability, { state, ...(reason ? { reason } : {}) });
@@ -344,7 +337,7 @@ export function validateReportManifest(capability: string, manifestId: string, s
   const lease = activeLease(capability, manifestId);
   let serialized: string;
   try {
-    serialized = JSON.stringify(stableValue(supplied));
+    serialized = stableJson(supplied);
   } catch {
     throw new Error("sniff.intake manifest is not serializable");
   }

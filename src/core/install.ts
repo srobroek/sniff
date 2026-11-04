@@ -20,6 +20,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep 
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
 import { type AnalyzerCapture, type AnalyzerObservation, type AnalyzerParseResult, mergeAnalyzerResults, parseAnalyzerOutput } from "./analyzer-output.ts";
 import { recipeTargetSeparator } from "./analyzer-recipes.ts";
+import { stableJson } from "./canonical-json.ts";
 import {
   BUNDLES,
   type BundleName,
@@ -1459,14 +1460,6 @@ export type SniffInstallAuthorizationRequest = {
 	readonly digest: string;
 };
 
-function stableInstallValue(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(stableInstallValue);
-	if (value !== null && typeof value === "object") {
-		return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableInstallValue((value as Record<string, unknown>)[key])]));
-	}
-	return value;
-}
-
 /**
  * Diagnose the selected bundles and bind the resulting installation plan to a
  * SHA-256 digest. Every adapter confirms this request with the user before it
@@ -1491,6 +1484,6 @@ export async function sniffInstallAuthorizationRequest(opts: Omit<SniffInstallOp
 		toolkitCacheRoot: resolveSniffToolkitCacheRoot({ ...process.env, ...opts.env }, opts.runtime),
 		tools,
 	};
-	return { ...authorization, digest: createHash("sha256").update(JSON.stringify(stableInstallValue(authorization))).digest("hex") };
+	return { ...authorization, digest: createHash("sha256").update(stableJson(authorization)).digest("hex") };
 }
 
