@@ -284,7 +284,7 @@ function buildManifest(input: ManifestInput, authorization?: IntakeAuthorization
     analyzers: cloneSorted(analyzers),
     budget: structuredClone(input.budget ?? {}),
     defaults: cloneSorted(input.defaults ?? []),
-    gaps: cloneSorted([...(input.gaps ?? []), ...objectiveCoverageGaps(objectives, analyzers)]),
+    gaps: cloneSorted([...(input.gaps ?? []), ...(input.target.gaps ?? []), ...objectiveCoverageGaps(objectives, analyzers)]),
     authorization: { required: mode === "noninteractive", actor: authorization?.actor, reason: authorization?.reason, acceptedDigest: authorization?.acceptedDigest },
     confirmation: { required: mode === "interactive", actor: input.confirmation?.actor, acceptedDigest: input.confirmation?.acceptedDigest, digest: "" },
     route,

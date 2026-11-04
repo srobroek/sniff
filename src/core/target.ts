@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -28,8 +28,19 @@ export type TargetKind =
   | "pr"
   | "mr";
 
+/** Well-known SHA-1 empty tree: the base of a root commit and of a repository with no commits yet. */
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 export type HistoryWindow =
-  | { readonly kind: "refs"; readonly base: string; readonly head: string }
+  | {
+    readonly kind: "refs";
+    readonly base: string;
+    readonly head: string;
+    /** Captured selection: the exact commits the user confirmed, kept through materialization. */
+    readonly commits?: readonly string[];
+    /** Captured diff base (merge base, or the empty tree); the change set is `diffBase..head`. */
+    readonly diffBase?: string;
+  }
   | { readonly kind: "since-date"; readonly date: string; readonly head?: string }
   | { readonly kind: "last-commits"; readonly count: number; readonly head?: string }
   | { readonly kind: "since-release"; readonly release: string; readonly head?: string }
@@ -59,6 +70,13 @@ export type TargetChange = {
   readonly headPath?: string;
 };
 
+/** A known limit of the resolved target (same shape as an intake gap) that the plan and report must surface. */
+export type TargetGap = {
+  readonly field: string;
+  readonly reason: string;
+  readonly impact: "low" | "medium" | "high";
+};
+
 export type ResolvedTarget = {
   readonly kind: TargetKind;
   readonly label: string;
@@ -72,10 +90,27 @@ export type ResolvedTarget = {
   readonly release?: { readonly tag: string; readonly previousTag?: string; readonly previousRef?: string; readonly deltaFiles: readonly string[]; readonly snapshotFiles: readonly string[] };
   readonly history?: { readonly window: HistoryWindow; readonly capturedWindow?: HistoryWindow; readonly commits: readonly string[] };
   readonly materialization: "in-place" | "temporary-checkout";
+  /** Gaps in the file/change set, e.g. git could not produce the PR diff or disagrees with the provider's count. */
+  readonly gaps?: readonly TargetGap[];
+  /** Server refs that carry the head commit (`refs/pull/<n>/head`); used only when a SHA fetch is refused. */
+  readonly providerRefs?: readonly string[];
+  /** The provider's own changed-file count, kept to cross-check the git-derived change set. */
+  readonly providerChangedFiles?: number;
+  /** The repository has no commits yet; `baseRef` is the empty tree. */
+  readonly unborn?: true;
+};
+
+export type CheckoutInfo = {
+  /** `sha`: shallow fetch by SHA; `refs`: via provider refs; `full-fallback`: server refused unadvertised SHAs; `full`: ancestry was required. */
+  readonly fetch: "sha" | "refs" | "full-fallback" | "full";
+  /** Extra commits that could not be obtained. */
+  readonly missing: readonly string[];
+  /** Whether the requested `connect` commit shares a merge base with the checkout head. */
+  readonly connected: boolean;
 };
 
 export type ProviderTargetResolver = (request: TargetRequest, runner: ArgvRunner) => Promise<ResolvedTarget>;
-export type ProviderTargetMaterializer = (target: ResolvedTarget, runner: ArgvRunner) => Promise<ResolvedTarget>;
+export type ProviderTargetMaterializer = (target: ResolvedTarget, runner: ArgvRunner, checkout?: CheckoutInfo) => Promise<ResolvedTarget>;
 
 export type TargetFailureCode =
   | "invalid-target"
@@ -291,8 +326,33 @@ export function parseGitNameStatus(output: string): TargetChange[] {
 }
 
 async function changedEntries(runner: ArgvRunner, root: string, base: string, head: string): Promise<TargetChange[]> {
-  const output = await execute(runner, ["git", "diff", "--name-status", "--find-renames", "-z", `${base}...${head}`], root);
+  // The empty tree is not a commit, so it has no merge base: diff it directly.
+  const range = base === EMPTY_TREE ? [base, head] : [`${base}...${head}`];
+  const output = await execute(runner, ["git", "diff", "--name-status", "--find-renames", "-z", ...range], root);
   return parseGitNameStatus(output.stdout);
+}
+
+/** The empty tree object id of the repository (SHA-1 unless the repository says otherwise). */
+export async function emptyTreeId(runner: ArgvRunner, root: string): Promise<string> {
+  const value = (await execute(runner, ["git", "hash-object", "-t", "tree", "/dev/null"], root)).stdout.trim();
+  return isImmutableRef(value) ? value.toLowerCase() : EMPTY_TREE;
+}
+
+/**
+ * The first parent of a commit, or undefined for a true root commit. A missing parent is distinguished from
+ * command failures, and from a shallow-boundary commit whose parents are merely absent.
+ */
+export async function firstParent(runner: ArgvRunner, root: string, commit: string): Promise<string | undefined> {
+  const output = await execute(runner, ["git", "rev-list", "--parents", "-n", "1", commit], root);
+  const [self, parent] = output.stdout.trim().split(/\s+/);
+  if (!self || !isImmutableRef(self)) throw new TargetResolutionError("invalid-ref", "Could not read commit parents", { provider: "git" });
+  if (parent) return immutableRef(runner, root, parent);
+  const shallow = (await execute(runner, ["git", "rev-parse", "--git-path", "shallow"], root)).stdout.trim();
+  const shallowPath = isAbsolute(shallow) ? shallow : resolve(root, shallow);
+  if (existsSync(shallowPath) && readFileSync(shallowPath, "utf8").split(/\s+/).includes(self.toLowerCase())) {
+    throw new TargetResolutionError("command-failure", "Commit parent is unavailable in a shallow checkout", { provider: "git", details: self });
+  }
+  return undefined;
 }
 
 function analyzableChangeFiles(changes: readonly TargetChange[]): string[] {
@@ -338,6 +398,14 @@ async function resolveWorkingTree(root: string, runner: ArgvRunner): Promise<Res
   const status = await execute(runner, ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"], resolvedRoot);
   const changes = parseGitStatusPorcelain(status.stdout);
   const files = uniqueExistingFiles(resolvedRoot, changes.flatMap((change) => change.headPath ? [change.headPath] : []));
+  const unborn = await execute(runner, ["git", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"], resolvedRoot).then(() => false, (error: unknown) => {
+    // `--quiet` exits 1 without output only when HEAD names no commit yet; anything else is a real failure.
+    if (error instanceof TargetResolutionError && error.code === "command-failure" && error.details === "exit 1") return true;
+    throw error;
+  });
+  if (unborn) {
+    return { kind: "working-tree", label: "uncommitted changes", root: resolvedRoot, files, changes, baseRef: await emptyTreeId(runner, resolvedRoot), materialization: "in-place", unborn: true };
+  }
   const head = await immutableRef(runner, resolvedRoot, "HEAD");
   return { kind: "working-tree", label: "uncommitted changes", root: resolvedRoot, files, changes, baseRef: head, immutableRef: head, materialization: "in-place" };
 }
@@ -364,7 +432,7 @@ export async function resolveTarget(request: TargetRequest, runner: ArgvRunner =
     case "commit": {
       const root = ensureRoot(request.root);
       const head = await immutableRef(runner, root, request.commit);
-      const base = await immutableRef(runner, root, `${head}^`);
+      const base = (await firstParent(runner, root, head)) ?? (await emptyTreeId(runner, root));
       const changes = await changedEntries(runner, root, base, head);
       return { kind: "commit", label: `commit ${head}`, root, files: await snapshotFiles(runner, root, head), changes, baseRef: base, headRef: head, immutableRef: head, materialization: "temporary-checkout" };
     }
@@ -423,24 +491,99 @@ export function targetFingerprint(target: ResolvedTarget): string {
   return createHash("sha256").update(stable).digest("hex");
 }
 
-export type TemporaryCheckoutLease = {
+export type TemporaryCheckoutLease = CheckoutInfo & {
   readonly directory: string;
   readonly immutableRef: string;
   release(): void;
+};
+
+export type CheckoutOptions = {
+  /** How much history of the checked-out commit (and the extra commits) to fetch. Default: just the commit. */
+  readonly history?: "tip" | "full" | { readonly depth: number } | { readonly since: string };
+  /** Also fetch tags (e.g. for `git describe`). */
+  readonly tags?: boolean;
+  /** Further commits to fetch best-effort; failures are reported in `missing`, not thrown. */
+  readonly extraCommits?: readonly string[];
+  /** Deepen until the first extra commit shares a merge base with the checked-out commit. */
+  readonly connect?: boolean;
+  /** Server refs that carry the commit, tried when the server refuses to serve an unadvertised SHA. */
+  readonly refspecs?: readonly string[];
 };
 
 // Untrusted checkouts must not run the user's git hooks or LFS smudge filters.
 // Credential helpers stay available (no GIT_CONFIG_GLOBAL override) for private remotes.
 const UNTRUSTED_GIT_CONFIG = ["-c", "core.hooksPath=/dev/null"] as const;
 const UNTRUSTED_GIT_ENV: Readonly<Record<string, string>> = { GIT_LFS_SKIP_SMUDGE: "1" };
+const REFUSED_SHA_FETCH = /(?:not our ref|unadvertised|allow(?:Reachable|Any|Tip)SHA1InWant|does not allow request|couldn't find remote ref|no such remote ref|reference is not a tree|bad object)/i;
+
+async function hasCommit(runner: ArgvRunner, directory: string, sha: string): Promise<boolean> {
+  const result = await runner(["git", "-C", directory, "cat-file", "-e", `${sha}^{commit}`], { cwd: directory });
+  return result.code === 0;
+}
+
+function depthArguments(history: CheckoutOptions["history"]): string[] {
+  if (history === undefined || history === "tip") return ["--depth=1"];
+  if (history === "full") return [];
+  if ("depth" in history) return [`--depth=${Math.max(1, Math.floor(history.depth))}`];
+  return [`--shallow-since=${validateGitOperand(history.since, "History date")}`];
+}
+
+/**
+ * Fetch commits into a checkout: by SHA first, then through provider refs, and only then a full
+ * fetch of the branches. The mode that was needed is returned so the fallback is recorded.
+ */
+async function fetchCommits(
+  runner: ArgvRunner,
+  directory: string,
+  commits: readonly string[],
+  depth: readonly string[],
+  tags: boolean,
+  refspecs: readonly string[],
+): Promise<"sha" | "refs" | "full-fallback"> {
+  const base = ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--force", tags ? "--tags" : "--no-tags"];
+  const run = (args: readonly string[]) => execute(runner, [...base, ...args], directory, UNTRUSTED_GIT_ENV);
+  try {
+    await run([...depth, "origin", ...commits]);
+    return "sha";
+  } catch (error) {
+    const refused = error instanceof TargetResolutionError && error.code === "command-failure" && REFUSED_SHA_FETCH.test(error.details ?? "");
+    if (!refused) throw error;
+  }
+  if (refspecs.length > 0) {
+    try {
+      await run([...depth, "origin", ...refspecs.map((ref, index) => `+${validateGitOperand(ref, "Provider ref")}:refs/sniff/${index}`)]);
+      const present = await Promise.all(commits.map((commit) => hasCommit(runner, directory, commit)));
+      if (present.every(Boolean)) return "refs";
+    } catch {
+      // Fall through to the full fetch; a genuine failure repeats there.
+    }
+  }
+  await run(["origin", "+refs/heads/*:refs/remotes/origin/*", ...refspecs.map((ref, index) => `+${validateGitOperand(ref, "Provider ref")}:refs/sniff/${index}`)]);
+  return "full-fallback";
+}
+
+async function connectCommits(runner: ArgvRunner, directory: string, commits: readonly string[], tags: boolean, refspecs: readonly string[], head: string, other: string): Promise<boolean> {
+  const mergeBase = async () => (await runner(["git", "-C", directory, "merge-base", other, head], { cwd: directory })).code === 0;
+  if (await mergeBase()) return true;
+  for (const step of [50, 500, 5000, 2_147_483_647]) {
+    try {
+      await fetchCommits(runner, directory, commits, step === 2_147_483_647 ? ["--depth=2147483647"] : [`--deepen=${step}`], tags, refspecs);
+    } catch {
+      return false;
+    }
+    if (await mergeBase()) return true;
+  }
+  return false;
+}
 
 export async function createTemporaryCheckout(
   repository: string,
   ref: string,
   runner: ArgvRunner = runArgv,
-  fullHistory = false,
+  options: CheckoutOptions | boolean = {},
 ): Promise<TemporaryCheckoutLease> {
   if (!isImmutableRef(ref)) throw new TargetResolutionError("invalid-ref", "Temporary checkout requires a full commit SHA");
+  const settings: CheckoutOptions = typeof options === "boolean" ? (options ? { history: "full", tags: true } : {}) : options;
   const local = existsSync(resolve(repository));
   const source = local ? ensureRoot(repository) : validateRepository(repository);
   const directory = mkdtempSync(join(tmpdir(), "sniff-target-"));
@@ -451,18 +594,45 @@ export async function createTemporaryCheckout(
     rmSync(directory, { recursive: true, force: true });
   };
   try {
-    await execute(runner, ["git", ...UNTRUSTED_GIT_CONFIG, "clone", "--no-checkout", "--", source, directory], directory, UNTRUSTED_GIT_ENV);
-    if (!local && fullHistory) {
-      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--force", "--tags", "origin"], directory, UNTRUSTED_GIT_ENV);
-      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--force", "origin", ref], directory, UNTRUSTED_GIT_ENV);
-    } else if (!local) {
-      await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "fetch", "--depth=1", "origin", ref], directory, UNTRUSTED_GIT_ENV);
+    const sub = (...args: string[]) => execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, ...args], directory, UNTRUSTED_GIT_ENV);
+    // Start empty and fetch only the wanted commits, instead of cloning every branch's history.
+    await execute(runner, ["git", ...UNTRUSTED_GIT_CONFIG, "init", "-q", directory], directory, UNTRUSTED_GIT_ENV);
+    await sub("remote", "add", "origin", "--", source);
+    const extras = [...new Set((settings.extraCommits ?? []).map((commit) => (isImmutableRef(commit) ? commit.toLowerCase() : validateGitOperand(commit, "Git ref"))))].filter((commit) => commit !== ref.toLowerCase() && commit !== EMPTY_TREE);
+    const refspecs = settings.refspecs ?? [];
+    const tags = settings.tags === true;
+    const wanted = [ref.toLowerCase(), ...extras];
+    let depth = depthArguments(settings.history);
+    let fetch: CheckoutInfo["fetch"];
+    const since = settings.history && typeof settings.history === "object" && "since" in settings.history;
+    try {
+      fetch = await fetchCommits(runner, directory, wanted, depth, tags, refspecs);
+    } catch (error) {
+      // A date window with no commits is refused by the server; the tip alone is still the checkout.
+      if (!since || !(error instanceof TargetResolutionError) || !/no commits selected/i.test(error.details ?? "")) throw error;
+      depth = ["--depth=1"];
+      fetch = await fetchCommits(runner, directory, wanted, depth, tags, refspecs);
     }
-    await execute(runner, ["git", "-C", directory, ...UNTRUSTED_GIT_CONFIG, "checkout", "--detach", ref], directory, UNTRUSTED_GIT_ENV);
+    if (since && depth[0]?.startsWith("--shallow-since")) {
+      // --shallow-since cuts at the boundary; one more generation provides the parent of the oldest commit.
+      await fetchCommits(runner, directory, [ref.toLowerCase()], ["--deepen=1"], tags, refspecs);
+    }
+    if (!(await hasCommit(runner, directory, ref))) throw new TargetResolutionError("invalid-ref", "The requested commit could not be fetched", { provider: "git" });
+    const missing: string[] = [];
+    for (const extra of extras) if (!(await hasCommit(runner, directory, extra))) missing.push(extra);
+    let connected = true;
+    const first = extras[0];
+    if (settings.connect && first && !missing.includes(first)) {
+      connected = await connectCommits(runner, directory, wanted.filter((commit) => !missing.includes(commit)), tags, refspecs, ref.toLowerCase(), first);
+    } else if (settings.connect) {
+      connected = false;
+    }
+    await sub("checkout", "--detach", ref);
     const resolved = await execute(runner, ["git", "-C", directory, "rev-parse", "--verify", "HEAD^{commit}"], directory);
     const immutable = resolved.stdout.trim().toLowerCase();
     if (!isImmutableRef(immutable) || immutable !== ref.toLowerCase()) throw new TargetResolutionError("invalid-ref", "Checkout did not produce the requested immutable commit");
-    return { directory: ensureRoot(directory), immutableRef: immutable, release };
+    const mode = settings.history === "full" && fetch === "sha" ? "full" : fetch;
+    return { directory: ensureRoot(directory), immutableRef: immutable, release, fetch: mode, missing, connected };
   } catch (error) {
     release();
     throw error;
@@ -483,6 +653,31 @@ export async function withTemporaryCheckout<T>(
   }
 }
 
+/** Fetch only what the target needs: ancestry for history and release deltas, both ends for PR/MR diffs. */
+export function checkoutOptions(target: ResolvedTarget): CheckoutOptions {
+  if (target.kind === "pr" || target.kind === "mr") {
+    return { extraCommits: target.baseRef ? [target.baseRef] : [], connect: true, refspecs: target.providerRefs ?? [] };
+  }
+  if (target.kind === "release" && target.release?.previousRef) return { history: "full", extraCommits: [target.release.previousRef] };
+  if (target.kind !== "history" || !target.history) return {};
+  const window = target.history.capturedWindow ?? target.history.window;
+  switch (window.kind) {
+    case "refs":
+      // A captured selection only needs the two trees; an unresolved range needs its ancestry.
+      return window.commits && window.diffBase ? { extraCommits: [window.diffBase] } : { history: "full", extraCommits: [window.base] };
+    case "last-commits":
+      return { history: { depth: window.count + 1 } };
+    case "context-aware-default":
+      return { history: { depth: 2 } };
+    case "since-date":
+      return { history: { since: window.date } };
+    case "since-release":
+      return { history: "full", extraCommits: [window.release] };
+    case "previous-release":
+      return { history: "full", tags: true, extraCommits: window.release ? [window.release] : [] };
+  }
+}
+
 export type ResolvedTargetLease = {
   readonly target: ResolvedTarget;
   release(): void;
@@ -493,10 +688,11 @@ export async function resolveTargetLease(request: TargetRequest, runner: ArgvRun
   if (resolved.materialization === "in-place") return { target: validateResolvedTarget(resolved), release: () => undefined };
   const immutable = resolved.immutableRef ?? resolved.headRef;
   if (!immutable || !isImmutableRef(immutable)) throw new TargetResolutionError("invalid-ref", "Resolved target lacks a full commit SHA");
-  const checkout = await createTemporaryCheckout(resolved.repository ?? resolved.root, immutable, runner, resolved.kind === "history" || resolved.kind === "release");
+  const checkout = await createTemporaryCheckout(resolved.repository ?? resolved.root, immutable, runner, checkoutOptions(resolved));
   try {
     if (!materializer) throw new TargetResolutionError("invalid-target", "Provider target materialization is unavailable in this host");
-    const materialized = await materializer({ ...resolved, root: checkout.directory, immutableRef: checkout.immutableRef, headRef: checkout.immutableRef }, runner);
+    const { fetch, missing, connected } = checkout;
+    const materialized = await materializer({ ...resolved, root: checkout.directory, immutableRef: checkout.immutableRef, headRef: checkout.immutableRef }, runner, { fetch, missing, connected });
     return { target: validateResolvedTarget(materialized), release: checkout.release };
   } catch (error) {
     checkout.release();

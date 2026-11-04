@@ -139,8 +139,10 @@ function remoteRunner(repositoryUrl: string, providerKind: "git" | "github" | "g
       const resolved = ref === "base" ? base : ref === "v1" ? release : head;
       return { code: 0, stdout: `${resolved}\t${name}\n`, stderr: "" };
     }
-    if (argv.includes("clone")) checkout = argv.at(-1) ?? "";
+    if (argv.includes("init")) checkout = argv.at(-1) ?? "";
     if (argv.includes("checkout") && checkout) writeFileSync(join(checkout, "a.ts"), "export const remote = true;\n");
+    if (command.startsWith("git rev-list --parents")) return { code: 0, stdout: `${argv.at(-1)} ${base}\n`, stderr: "" };
+    if (command.startsWith("git merge-base")) return { code: 0, stdout: `${base}\n`, stderr: "" };
     if (command.endsWith("rev-parse --verify HEAD^{commit}")) return { code: 0, stdout: `${head}\n`, stderr: "" };
     if (command.includes("rev-parse --verify")) {
       const operand = argv.at(-1) ?? "";
@@ -384,7 +386,11 @@ describe("adaptive runtime boundaries", () => {
         expect(target.history?.window).toEqual(window);
         expect(target.headRef).toBe(fixture.head);
       }, fixture.runner);
-      expect(fixture.calls.some(({ argv }) => argv.join(" ").includes("fetch --force --tags origin"))).toBe(true);
+      const fetches = fixture.calls.map(({ argv }) => argv.join(" ")).filter((command) => command.includes(" fetch "));
+      // Only the previous-release window needs tags (git describe); no window clones the full history.
+      expect(fetches.some((command) => command.includes("--tags"))).toBe(window.kind === "previous-release");
+      expect(fetches.length).toBeGreaterThan(0);
+      expect(fixture.calls.some(({ argv }) => argv.includes("clone"))).toBe(false);
       expect(fixture.calls.some(({ argv }) => argv.join(" ").includes("rev-parse --verify feature"))).toBe(false);
     }
   });

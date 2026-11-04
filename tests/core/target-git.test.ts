@@ -107,12 +107,12 @@ describe("git filename handling", () => {
     const lease = await createTemporaryCheckout(root, head, runner);
     lease.release();
     expect(seen.length).toBeGreaterThanOrEqual(3);
-    for (const call of seen.filter((entry) => ["clone", "fetch", "checkout"].some((verb) => entry.argv.includes(verb)))) {
+    for (const call of seen.filter((entry) => ["init", "fetch", "checkout"].some((verb) => entry.argv.includes(verb)))) {
       expect(call.argv).toContain("core.hooksPath=/dev/null");
       expect(call.env?.GIT_LFS_SKIP_SMUDGE).toBe("1");
       expect(call.env?.GIT_CONFIG_GLOBAL).toBeUndefined();
     }
-    expect(seen.some((entry) => entry.argv.includes("clone"))).toBe(true);
+    expect(seen.some((entry) => entry.argv.includes("init"))).toBe(true);
     expect(seen.some((entry) => entry.argv.includes("checkout"))).toBe(true);
   });
 });

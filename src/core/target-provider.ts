@@ -4,6 +4,10 @@ import { resolve } from "node:path";
 import {
   type ArgvResult,
   type ArgvRunner,
+  type CheckoutInfo,
+  EMPTY_TREE,
+  emptyTreeId,
+  firstParent,
   type HistoryWindow,
   isImmutableRef,
   parseGitNameStatus,
@@ -14,6 +18,7 @@ import {
   runArgv,
   splitNul,
   type TargetChange,
+  type TargetGap,
   type TargetRequest,
   TargetResolutionError,
   validateGitOperand,
@@ -73,6 +78,13 @@ function objectValue(value: unknown, context: string): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+/** A plain non-negative integer count; GitLab's "1000+" overflow marker and anything else is not a usable count. */
+function countValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
+  return undefined;
 }
 
 function repositorySlug(repository: string): string {
@@ -171,20 +183,13 @@ async function resolveGitHubPullRequest(request: Extract<TargetRequest, { kind: 
   if (provider.provider !== "github") throw new TargetResolutionError("invalid-target", "A PR target must use a GitHub repository", { provider: "github" });
   const slug = repositorySlug(provider.repository);
   const number = validateNumericId(request.number, "Pull request number");
-  const details = await providerCommand(runner, provider, ["gh", "pr", "view", number, "--repo", slug, "--json", "headRefOid,baseRefOid,headRefName,baseRefName,files,url"]);
+  // The provider supplies only the immutable endpoints and metadata; the change set is derived from git at materialization.
+  const details = await providerCommand(runner, provider, ["gh", "pr", "view", number, "--repo", slug, "--json", "headRefOid,baseRefOid,headRefName,baseRefName,changedFiles,url"]);
   const metadata = objectValue(parseJson(details, "GitHub PR metadata"), "GitHub PR metadata");
   const head = parseCommit(metadata.headRefOid, "GitHub PR head");
   const base = parseCommit(metadata.baseRefOid, "GitHub PR base");
-  const entries = Array.isArray(metadata.files) ? metadata.files : [];
-  const changes = entries.flatMap((entry): TargetChange[] => {
-    const object = objectValue(entry, "GitHub PR file");
-    const path = stringValue(object.path);
-    if (!path) return [];
-    const kind = (stringValue(object.changeType) ?? stringValue(object.status))?.toLowerCase();
-    const status = kind === "added" || kind === "copied" ? "added" : kind === "deleted" || kind === "removed" ? "deleted" : kind === "renamed" ? "renamed" : kind === "modified" || kind === "changed" ? "modified" : "unknown";
-    return [{ path, status, ...(status === "added" ? {} : { basePath: path }), ...(status === "deleted" ? {} : { headPath: path }) }];
-  }).sort((left, right) => left.path.localeCompare(right.path));
-  return { kind: "pr", label: `GitHub PR #${number}`, root: resolve("."), files: changes.flatMap((change) => change.headPath ? [change.headPath] : []), changes, baseRef: base, headRef: head, immutableRef: head, repository: provider.repository, materialization: "temporary-checkout" };
+  const changedFiles = countValue(metadata.changedFiles);
+  return { kind: "pr", label: `GitHub PR #${number}`, root: resolve("."), files: [], baseRef: base, headRef: head, immutableRef: head, repository: provider.repository, providerRefs: [`refs/pull/${number}/head`], ...(changedFiles === undefined ? {} : { providerChangedFiles: changedFiles }), materialization: "temporary-checkout" };
 }
 
 async function resolveGitLabMergeRequest(request: Extract<TargetRequest, { kind: "mr" }>, runner: ArgvRunner): Promise<ResolvedTarget> {
@@ -197,20 +202,8 @@ async function resolveGitLabMergeRequest(request: Extract<TargetRequest, { kind:
   const refs = objectValue(metadata.diff_refs, "GitLab MR refs");
   const head = parseCommit(refs.head_sha ?? metadata.sha, "GitLab MR head");
   const base = parseCommit(refs.base_sha, "GitLab MR base");
-  const entries = Array.isArray(metadata.changes) ? metadata.changes : [];
-  const changes = entries.flatMap((entry): TargetChange[] => {
-    const object = objectValue(entry, "GitLab MR file");
-    const oldPath = stringValue(object.old_path);
-    const newPath = stringValue(object.new_path);
-    const deleted = object.deleted_file === true;
-    const added = object.new_file === true;
-    const renamed = object.renamed_file === true;
-    const path = deleted ? oldPath : (newPath ?? oldPath);
-    if (!path) return [];
-    const status = deleted ? "deleted" : added ? "added" : renamed ? "renamed" : "modified";
-    return [{ path, status, ...(oldPath && !added ? { basePath: oldPath } : {}), ...(newPath && !deleted ? { headPath: newPath } : {}) }];
-  }).sort((left, right) => left.path.localeCompare(right.path));
-  return { kind: "mr", label: `GitLab MR !${iid}`, root: resolve("."), files: changes.flatMap((change) => change.headPath ? [change.headPath] : []), changes, baseRef: base, headRef: head, immutableRef: head, repository: provider.repository, materialization: "temporary-checkout" };
+  const changedFiles = countValue(metadata.changes_count);
+  return { kind: "mr", label: `GitLab MR !${iid}`, root: resolve("."), files: [], baseRef: base, headRef: head, immutableRef: head, repository: provider.repository, providerRefs: [`refs/merge-requests/${iid}/head`], ...(changedFiles === undefined ? {} : { providerChangedFiles: changedFiles }), materialization: "temporary-checkout" };
 }
 
 async function dereferenceGitHubTag(provider: ProviderDetection, slug: string, tag: string, runner: ArgvRunner): Promise<string> {
@@ -398,8 +391,16 @@ function commitRows(result: ArgvResult): string[] {
   return commits.map((commit) => commit.toLowerCase());
 }
 
+/** Three-dot change set `base...head`; the empty tree has no merge base and is diffed directly. */
 async function historyDiff(root: string, base: string, head: string, runner: ArgvRunner): Promise<TargetChange[]> {
-  const result = await runGit(runner, root, ["diff", "--name-status", "--find-renames", "-z", `${base}...${head}`], "History diff failed");
+  const range = base === EMPTY_TREE ? [base, head] : [`${base}...${head}`];
+  const result = await runGit(runner, root, ["diff", "--name-status", "--find-renames", "-z", ...range], "History diff failed");
+  return parseGitNameStatus(result.stdout);
+}
+
+/** Two-dot change set between a captured diff base (merge base or empty tree) and head: needs only the two trees. */
+async function treeDiff(root: string, diffBase: string, head: string, runner: ArgvRunner): Promise<TargetChange[]> {
+  const result = await runGit(runner, root, ["diff", "--name-status", "--find-renames", "-z", diffBase, head], "History diff failed");
   return parseGitNameStatus(result.stdout);
 }
 
@@ -407,25 +408,41 @@ async function logRange(root: string, args: readonly string[], runner: ArgvRunne
   return commitRows(await runGit(runner, root, ["log", "--format=%H", ...args], "History lookup failed"));
 }
 
+async function emptyTree(root: string, runner: ArgvRunner): Promise<string> {
+  return emptyTreeId(runner, root);
+}
+
+/** The base for a window starting at its oldest commit: that commit's first parent, or the empty tree for a root commit. */
 async function baseBeforeOldest(root: string, commits: readonly string[], head: string, runner: ArgvRunner): Promise<string> {
   const oldest = commits.at(-1) ?? head;
-  try {
-    return await localCommit(root, `${oldest}^`, runner);
-  } catch (error) {
-    if (error instanceof TargetResolutionError && error.code !== "missing-cli") return oldest;
-    throw error;
-  }
+  return (await firstParent(runner, root, oldest)) ?? (await emptyTree(root, runner));
+}
+
+async function mergeBase(root: string, base: string, head: string, runner: ArgvRunner): Promise<string> {
+  const result = await runGit(runner, root, ["merge-base", base, head], "History merge base lookup failed");
+  return parseCommit(result.stdout.trim().split(/\s+/)[0], "History merge base");
 }
 
 export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, runner: ArgvRunner): Promise<ResolvedTarget> {
   let head: string;
   let base: string;
   let commits: string[];
+  // The change set is `diffBase..head`. Windows that start at their oldest commit have an ancestor base;
+  // ref ranges diff from the merge base so a diverged base contributes nothing.
+  let diffBase: string | undefined;
   switch (window.kind) {
     case "refs":
-      base = await localCommit(root, window.base, runner);
-      head = await localCommit(root, window.head, runner);
-      commits = await logRange(root, [`${base}..${head}`], runner);
+      if (window.commits && window.diffBase) {
+        head = await localCommit(root, window.head, runner);
+        // A captured selection is kept exactly as confirmed; it is not recomputed from the range.
+        base = window.base === EMPTY_TREE ? EMPTY_TREE : parseCommit(window.base, "History base");
+        diffBase = window.diffBase === EMPTY_TREE ? EMPTY_TREE : parseCommit(window.diffBase, "History diff base");
+        commits = window.commits.map((commit) => parseCommit(commit, "History commit"));
+      } else {
+        base = await localCommit(root, window.base, runner);
+        head = await localCommit(root, window.head, runner);
+        commits = await logRange(root, [`${base}..${head}`], runner);
+      }
       break;
     case "since-date":
       {
@@ -435,12 +452,14 @@ export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, 
       }
       // An empty window has no files: base = head rather than the parent of the latest commit.
       base = commits.length === 0 ? head : await baseBeforeOldest(root, commits, head, runner);
+      diffBase = base;
       break;
     case "last-commits":
       if (!Number.isSafeInteger(window.count) || window.count < 1 || window.count > 100_000) throw new TargetResolutionError("invalid-target", "History commit count must be between 1 and 100000");
       head = await localCommit(root, window.head ?? "HEAD", runner);
       commits = await logRange(root, ["-n", String(window.count), head], runner);
       base = await baseBeforeOldest(root, commits, head, runner);
+      diffBase = base;
       break;
     case "since-release":
       base = await localCommit(root, window.release, runner);
@@ -464,9 +483,11 @@ export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, 
       head = await localCommit(root, window.head ?? "HEAD", runner);
       commits = await logRange(root, ["-n", "1", head], runner);
       base = await baseBeforeOldest(root, commits, head, runner);
+      diffBase = base;
       break;
   }
-  const changes = await historyDiff(root, base, head, runner);
+  if (!diffBase) diffBase = base === EMPTY_TREE ? base : await mergeBase(root, base, head, runner);
+  const changes = await treeDiff(root, diffBase, head, runner);
   const files = [...new Set(changes.flatMap((change) => change.headPath ? [change.headPath] : []))].sort();
   return {
     kind: "history",
@@ -477,12 +498,45 @@ export async function resolveHistoryAtRoot(root: string, window: HistoryWindow, 
     baseRef: base,
     headRef: head,
     immutableRef: head,
-    history: { window, capturedWindow: { kind: "refs", base, head }, commits },
+    history: { window, capturedWindow: { kind: "refs", base, head, commits, diffBase }, commits },
     materialization: "temporary-checkout",
   };
 }
 
-export async function materializeProviderTarget(target: ResolvedTarget, runner: ArgvRunner): Promise<ResolvedTarget> {
+/**
+ * Derive a PR/MR change set from git. The provider only supplied the immutable endpoints; its file
+ * list is capped or absent, so it is never used. When git cannot produce the diff, or disagrees with
+ * the provider's own count, that is recorded as a gap instead of silently shrinking the target.
+ */
+async function materializeChangeRequest(target: ResolvedTarget, runner: ArgvRunner, checkout?: CheckoutInfo): Promise<ResolvedTarget> {
+  const base = target.baseRef;
+  const head = target.immutableRef;
+  const gaps: TargetGap[] = [...(target.gaps ?? [])];
+  const gap = (reason: string) => gaps.push({ field: "files", reason, impact: "high" });
+  let changes: TargetChange[] = [];
+  if (!base || !head) {
+    gap("The provider did not supply both a base and a head commit, so the change set could not be computed from git.");
+  } else if (checkout?.missing.includes(base)) {
+    gap(`Base commit ${base} could not be fetched (${checkout.fetch}), so the change set could not be computed from git.`);
+  } else if (checkout && !checkout.connected) {
+    gap(`Base commit ${base} shares no fetchable merge base with head ${head}, so the change set could not be computed from git.`);
+  } else {
+    try {
+      const mergeBaseSha = await mergeBase(target.root, base, head, runner);
+      changes = await treeDiff(target.root, mergeBaseSha, head, runner);
+    } catch (error) {
+      gap(`git could not diff ${base} against ${head}: ${error instanceof TargetResolutionError ? (error.details ?? error.message) : String(error)}`);
+    }
+    if (gaps.length === (target.gaps?.length ?? 0) && target.providerChangedFiles !== undefined && target.providerChangedFiles !== changes.length) {
+      gap(`git reports ${changes.length} changed files but the provider reports ${target.providerChangedFiles}; the git result is used.`);
+    }
+  }
+  const files = [...new Set(changes.flatMap((change) => change.headPath ? [change.headPath] : []))].sort((left, right) => left.localeCompare(right));
+  return { ...target, files, changes, ...(gaps.length > 0 ? { gaps } : {}) };
+}
+
+export async function materializeProviderTarget(target: ResolvedTarget, runner: ArgvRunner, checkout?: CheckoutInfo): Promise<ResolvedTarget> {
+  if (target.kind === "pr" || target.kind === "mr") return materializeChangeRequest(target, runner, checkout);
   if (target.kind === "history" && target.history) {
     const window = target.history.capturedWindow ?? target.history.window;
     const history = await resolveHistoryAtRoot(target.root, window, runner);
