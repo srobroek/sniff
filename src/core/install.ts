@@ -39,7 +39,7 @@ import {
   registerActiveProcess,
   unregisterActiveProcess,
 } from "./run-registry.ts";
-import { type CapturedHistoryWindow, EMPTY_TREE, type HistoryWindow, isCapturedWindow } from "./target.ts";
+import { type CapturedHistoryWindow, EMPTY_TREE, type HistoryWindow, historySinceInstant, isCapturedWindow } from "./target.ts";
 
 const PROBE_TIMEOUT_MS = 1_500;
 const INSTALL_TIMEOUT_MS = 300_000;
@@ -1133,7 +1133,7 @@ function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | C
     }
   } else if (window) {
     logOpts = window.kind === "refs" ? range(window.base, window.head)
-      : window.kind === "since-date" ? `--since=${window.date}${window.head ? ` ${window.head}` : ""}`
+      : window.kind === "since-date" ? `--since=${historySinceInstant(window.date)}${window.head ? ` ${window.head}` : ""}`
         : window.kind === "last-commits" ? `-${window.count}${window.head ? ` ${window.head}` : ""}`
           : window.kind === "since-release" ? range(window.release, window.head ?? "HEAD")
             : window.kind === "previous-release" ? range(window.release ?? "HEAD~1", window.head ?? "HEAD") : "";
