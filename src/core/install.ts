@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
 	accessSync,
 	closeSync,
@@ -7,6 +7,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	openSync,
+	readFileSync,
 	readSync,
 	realpathSync,
 	renameSync,
@@ -28,7 +29,7 @@ import {
 } from "./catalog.ts";
 import { ExclusiveFileLock } from "./file-lock.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
-import { type SpawnedProcess, type StreamIncompleteness, spawnInOwnedGroup, TERMINATION_GRACE_MS, terminateAndAwait, terminateProcess } from "./process-control.ts";
+import { processAlive, type SpawnedProcess, type StreamIncompleteness, spawnInOwnedGroup, TERMINATION_GRACE_MS, terminateAndAwait, terminateProcess } from "./process-control.ts";
 import type { SniffRunOwner } from "./run-owner.ts";
 import {
   type AnalyzerRunAuthorization,
@@ -922,11 +923,80 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
+ * Migration guard for installers that still run Sniff v0.3.2, which serialize on a `.lock`
+ * directory and know nothing of `.install.lock`. While a new installer holds the flock it also holds
+ * that directory, with v0.3.2's exact protocol and owner record, so an old installer waits for it
+ * and a new one waits for a live old one. New installers already serialize on the flock, so they
+ * never race each other here; the old protocol's own check-then-remove takeover race between two
+ * v0.3.2 installers is unchanged.
+ *
+ * Follow-up: remove this guard, and `.lock` handling with it, once v0.3.2 is no longer in use.
+ */
+const LEGACY_TOOLKIT_LOCK_STALE_MS = 20 * 60_000;
+
+/** v0.3.2's owner record; `protocol` marks one a new installer wrote, which old readers ignore. */
+type LegacyToolkitLockOwner = { readonly pid: number; readonly token: string; readonly startedAt: number; readonly protocol?: "flock" };
+
+function readLegacyToolkitLockOwner(ownerPath: string): LegacyToolkitLockOwner | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(readFileSync(ownerPath)).toString("utf8")) as Partial<LegacyToolkitLockOwner>;
+    if (typeof parsed.pid !== "number" || typeof parsed.token !== "string" || typeof parsed.startedAt !== "number") return null;
+    return { pid: parsed.pid, token: parsed.token, startedAt: parsed.startedAt, ...(parsed.protocol === "flock" ? { protocol: "flock" as const } : {}) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Takes the legacy `.lock` directory as v0.3.2 does: mkdir, then the owner record; a held one is
+ * stolen only when older than the bound with its owner process gone, else waited for, abortably and
+ * until `deadline`. A record a new installer wrote is stale outright: writing it needed the flock
+ * the caller now holds, and new installers release this directory before the flock, so its writer
+ * died. Returns the release, which removes the directory only while it still holds this owner.
+ */
+async function acquireLegacyToolkitLock(directory: string, bundle: BundleName, deadline: number, signal?: AbortSignal): Promise<() => void> {
+  const lockPath = join(directory, ".lock");
+  const ownerPath = join(lockPath, "owner.json");
+  const owner: LegacyToolkitLockOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), startedAt: Date.now(), protocol: "flock" };
+  for (;;) {
+    if (signal?.aborted) throw new Error("operation aborted");
+    try {
+      mkdirSync(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const held = readLegacyToolkitLockOwner(ownerPath);
+      const heldSince = held?.startedAt ?? (existsSync(lockPath) ? statSync(lockPath).mtimeMs : null);
+      const abandoned = held?.protocol === "flock"
+        || (heldSince !== null && Date.now() - heldSince > LEGACY_TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid)));
+      if (abandoned) {
+        rmSync(lockPath, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
+      await abortableDelay(TOOLKIT_LOCK_POLL_MS, signal);
+      continue;
+    }
+    try {
+      writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
+      break;
+    } catch (error) {
+      // An ownerless lock directory would block every later old installer, so never leave one behind.
+      rmSync(lockPath, { recursive: true, force: true });
+      throw error;
+    }
+  }
+  return () => {
+    if (readLegacyToolkitLockOwner(ownerPath)?.token === owner.token) rmSync(lockPath, { recursive: true, force: true });
+  };
+}
+
+/**
  * Serializes installers of one toolkit, across processes and within this one, with an exclusive
  * OS advisory lock on the toolkit's lock file. Acquisition is a single atomic kernel operation and
  * the kernel releases the lock when its holder exits or dies, so there is no owner record, no
  * staleness heuristic and no takeover that could displace a live owner. Waiting polls the lock and
- * stops on `signal`.
+ * stops on `signal`. During the v0.3.2 migration the holder also takes the legacy directory lock,
+ * and releases the two in reverse order.
  */
 export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number; readonly signal?: AbortSignal } = {}): Promise<T> {
   const directory = toolkitDirectory(bundle, env, runtime);
@@ -941,10 +1011,21 @@ export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnviron
     if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
     await abortableDelay(TOOLKIT_LOCK_POLL_MS, options.signal);
   }
+  let releaseLegacy: () => void;
+  try {
+    releaseLegacy = await acquireLegacyToolkitLock(directory, bundle, deadline, options.signal);
+  } catch (error) {
+    lock.release();
+    throw error;
+  }
   try {
     return await fn();
   } finally {
-    lock.release();
+    try {
+      releaseLegacy();
+    } finally {
+      lock.release();
+    }
   }
 }
 
