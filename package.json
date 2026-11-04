@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/sniff",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Portable code-smell auditing for OMP, Claude Code, Codex, and OpenCode.",
   "private": true,
   "scripts": {

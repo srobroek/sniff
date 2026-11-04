@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.0](https://github.com/srobroek/sniff/compare/sniff-v0.3.2...sniff-v0.4.0) (2026-11-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* **intake:** interactive:false intake no longer approves its own plan. The MCP server needs form elicitation and the OMP extension needs a UI to confirm it, unless the operator sets SNIFF_UNATTENDED_INTAKE=1 in the server's environment. Headless scripts that relied on automatic approval must set it.
+
+### Features
+
+* add a native OpenCode V2 plugin adapter ([#46](https://github.com/srobroek/sniff/issues/46)) ([6a13597](https://github.com/srobroek/sniff/commit/6a135972b6a0d10c6da4060f322a38cf3cad1ecb))
+* **opencode:** add a /sniff command that starts an audit with the skill loaded ([#55](https://github.com/srobroek/sniff/issues/55)) ([3440da9](https://github.com/srobroek/sniff/commit/3440da99e0893ce8f48d282ec5a8e354a13ca750))
+
+
+### Bug Fixes
+
+* **core:** scope runs and artifacts to their owner, validate reports once, and save them durably ([#52](https://github.com/srobroek/sniff/issues/52)) ([2e69968](https://github.com/srobroek/sniff/commit/2e699684c405ac0b14dea7f22909d2e08e05dd2b))
+* harden analyzer execution, report persistence, and run leases ([#49](https://github.com/srobroek/sniff/issues/49)) ([6e7d076](https://github.com/srobroek/sniff/commit/6e7d07640ede080b6fee417bd1cc62d392ff11f8))
+* **intake:** require approval for unattended intake and let objectives choose analyzers ([#50](https://github.com/srobroek/sniff/issues/50)) ([44f5ef4](https://github.com/srobroek/sniff/commit/44f5ef435417d6b7a7b5a8fabfa45aaff1fac370))
+* **process:** keep analyzer process groups owned and serialize toolkit installs with a kernel lock ([#53](https://github.com/srobroek/sniff/issues/53)) ([71a90b8](https://github.com/srobroek/sniff/commit/71a90b8339bf907fd90c1d74e0ddfc508d569221))
+* resolve target files exactly and keep the MCP server within its protocol ([#48](https://github.com/srobroek/sniff/issues/48)) ([2855cd3](https://github.com/srobroek/sniff/commit/2855cd30dac53c08fd45f03a8fb860744103a15c))
+* **target:** derive PR and MR files from git, fetch minimal checkouts, and keep history windows exact ([#51](https://github.com/srobroek/sniff/issues/51)) ([cbfd23c](https://github.com/srobroek/sniff/commit/cbfd23ce14c0a8ca28cb184de0a2dbaba12689b8))
+* **target:** read since-date windows as an explicit UTC instant ([#54](https://github.com/srobroek/sniff/issues/54)) ([d9d9ccb](https://github.com/srobroek/sniff/commit/d9d9ccb1e506524cf146b4b50e40133ef70bd2dc))
+
 ## [0.3.2](https://github.com/srobroek/sniff/compare/sniff-v0.3.1...sniff-v0.3.2) (2026-10-08)
 
 
