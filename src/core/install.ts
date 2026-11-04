@@ -922,7 +922,93 @@ function readToolkitLockOwner(ownerPath: string): ToolkitLockOwner | null {
   }
 }
 
-export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number } = {}): Promise<T> {
+/** A lock as one waiter saw it; the owner token, or for an ownerless directory its identity, names it. */
+type ObservedToolkitLock = { readonly token: string | null; readonly ino: number; readonly mtimeMs: number; readonly stale: boolean };
+
+/** Reads the lock directory at `lockPath`, or null once it is gone. */
+function observeToolkitLock(lockPath: string): ObservedToolkitLock | null {
+  let identity: { readonly ino: number; readonly mtimeMs: number };
+  try {
+    identity = statSync(lockPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const held = readToolkitLockOwner(join(lockPath, "owner.json"));
+  // Only a lock whose owner process is gone may be stolen; a slow live owner keeps its lock.
+  const stale = Date.now() - (held?.startedAt ?? identity.mtimeMs) > TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid));
+  return { token: held?.token ?? null, ino: identity.ino, mtimeMs: identity.mtimeMs, stale };
+}
+
+function sameToolkitLock(left: ObservedToolkitLock, right: ObservedToolkitLock): boolean {
+  if (left.token !== null || right.token !== null) return left.token === right.token;
+  return left.ino === right.ino && left.mtimeMs === right.mtimeMs;
+}
+
+function uniqueSibling(path: string, purpose: string): string {
+  return `${path}.${purpose}-${process.pid}-${randomBytes(8).toString("hex")}`;
+}
+
+/**
+ * Acquires the lock in one step: the owner record is written into a private directory that is then
+ * renamed onto the lock path, so a lock directory is never seen without its owner. A rename onto a
+ * held, non-empty lock fails, which is the only way two acquirers can meet.
+ */
+function tryAcquireToolkitLock(lockPath: string, owner: ToolkitLockOwner): boolean {
+  const staging = uniqueSibling(lockPath, "acquire");
+  mkdirSync(staging, { mode: 0o700 });
+  try {
+    writeFileSync(join(staging, "owner.json"), JSON.stringify(owner), { mode: 0o600 });
+    renameSync(staging, lockPath);
+    return true;
+  } catch (error) {
+    rmSync(staging, { recursive: true, force: true });
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ENOTEMPTY") return false;
+    throw error;
+  }
+}
+
+/**
+ * Removes the stale lock this waiter observed, never a lock that changed hands since. The owner is
+ * re-checked immediately before the lock is renamed to a unique name; only the waiter whose rename
+ * succeeds removes it, and every other waiter finds nothing to move. If a fresh acquisition slipped
+ * in between the re-check and the rename, the moved lock is not the observed one and is put back.
+ */
+function takeOverStaleToolkitLock(lockPath: string, observed: ObservedToolkitLock): void {
+  const current = observeToolkitLock(lockPath);
+  if (!current?.stale || !sameToolkitLock(current, observed)) return;
+  const moved = uniqueSibling(lockPath, "stale");
+  try {
+    renameSync(lockPath, moved);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const taken = observeToolkitLock(moved);
+  if (taken && !sameToolkitLock(taken, observed)) {
+    try {
+      renameSync(moved, lockPath);
+      return;
+    } catch {
+      // The lock path was acquired again meanwhile; the displaced lock can no longer be restored.
+    }
+  }
+  rmSync(moved, { recursive: true, force: true });
+}
+
+function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  const delay = Promise.withResolvers<void>();
+  const onAbort = () => delay.resolve();
+  const timer = setTimeout(delay.resolve, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return delay.promise.finally(() => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  });
+}
+
+export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnvironment, runtime: SniffInstallRuntime, fn: () => Promise<T>, options: { readonly waitMs?: number; readonly signal?: AbortSignal } = {}): Promise<T> {
   const directory = toolkitDirectory(bundle, env, runtime);
   mkdirSync(directory, { recursive: true });
   const lockPath = join(directory, ".lock");
@@ -930,32 +1016,16 @@ export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnviron
   const owner: ToolkitLockOwner = { pid: process.pid, token: randomBytes(16).toString("hex"), startedAt: Date.now() };
   const deadline = Date.now() + (options.waitMs ?? TOOLKIT_LOCK_STALE_MS);
   for (;;) {
-    try {
-      mkdirSync(lockPath);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      // Only a lock whose owner process is gone may be stolen; a slow live owner keeps its lock.
-      const held = readToolkitLockOwner(ownerPath);
-      const heldSince = held?.startedAt ?? (existsSync(lockPath) ? statSync(lockPath).mtimeMs : null);
-      const abandoned = heldSince !== null && Date.now() - heldSince > TOOLKIT_LOCK_STALE_MS && !(held && processAlive(held.pid));
-      if (abandoned) {
-        rmSync(lockPath, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
-      const poll = Promise.withResolvers<void>();
-      setTimeout(poll.resolve, TOOLKIT_LOCK_POLL_MS);
-      await poll.promise;
+    if (options.signal?.aborted) throw new Error("operation aborted");
+    if (tryAcquireToolkitLock(lockPath, owner)) break;
+    const observed = observeToolkitLock(lockPath);
+    if (observed?.stale) {
+      takeOverStaleToolkitLock(lockPath, observed);
       continue;
     }
-    try {
-      writeFileSync(ownerPath, JSON.stringify(owner), { mode: 0o600 });
-      break;
-    } catch (error) {
-      // An ownerless lock directory would block every later installer, so never leave one behind.
-      rmSync(lockPath, { recursive: true, force: true });
-      throw error;
-    }
+    if (observed === null) continue;
+    if (Date.now() >= deadline) throw new Error(`Sniff toolkit bundle ${bundle} is locked by another process`);
+    await abortableDelay(TOOLKIT_LOCK_POLL_MS, options.signal);
   }
   try {
     return await fn();
@@ -964,7 +1034,6 @@ export async function withToolkitLock<T>(bundle: BundleName, env: ProcessEnviron
     if (readToolkitLockOwner(ownerPath)?.token === owner.token) rmSync(lockPath, { recursive: true, force: true });
   }
 }
-
 
 async function installMiseBundle(
   bundle: BundleName,
@@ -978,7 +1047,7 @@ async function installMiseBundle(
   prepareVerification?: () => Promise<void>,
 ): Promise<MiseBundleInstallResult> {
   if (dryRun) return installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification);
-  return withToolkitLock(bundle, env, runtime, () => installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification));
+  return withToolkitLock(bundle, env, runtime, () => installMiseBundleUnlocked(bundle, records, probeCwd, dryRun, env, runtime, lines, signal, prepareVerification), { signal });
 }
 
 function probeLabel(result: SniffToolResult): string {
