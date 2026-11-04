@@ -28,7 +28,8 @@ export interface ReportArtifactReadResult {
 
 type RegisteredReport = {
   readonly reportId: string;
-  readonly contents: ReadonlyMap<string, string>;
+  /** UTF-8 bytes encoded once at registration, so paging never re-encodes the artifact. */
+  readonly contents: ReadonlyMap<string, Buffer>;
   readonly descriptors: ReadonlyMap<string, ReportArtifactDescriptor>;
   readonly bytes: number;
   readonly createdAt: number;
@@ -68,13 +69,16 @@ export function registerReportArtifacts(artifacts: ReportArtifacts, now = Date.n
   purgeExpired(now);
   const capability = randomBytes(32).toString("base64url");
   const descriptors = new Map(artifacts.descriptors.map((descriptor) => [descriptor.relativePath, descriptor] as const));
-  const contents = contentsFor(artifacts);
+  const sources = contentsFor(artifacts);
+  const contents = new Map<string, Buffer>();
   let bytes = 0;
   for (const descriptor of artifacts.descriptors) {
-    const content = contents.get(descriptor.relativePath);
-    if (content === undefined) throw new Error(`Missing report artifact content: ${descriptor.relativePath}`);
-    if (Buffer.byteLength(content) !== descriptor.bytes) throw new Error(`Report artifact byte count does not match descriptor: ${descriptor.relativePath}`);
+    const source = sources.get(descriptor.relativePath);
+    if (source === undefined) throw new Error(`Missing report artifact content: ${descriptor.relativePath}`);
+    const content = Buffer.from(source, "utf8");
+    if (content.byteLength !== descriptor.bytes) throw new Error(`Report artifact byte count does not match descriptor: ${descriptor.relativePath}`);
     if (createHash("sha256").update(content).digest("hex") !== descriptor.sha256) throw new Error(`Report artifact digest does not match descriptor: ${descriptor.relativePath}`);
+    contents.set(descriptor.relativePath, content);
     bytes += descriptor.bytes;
   }
   if (bytes > MAX_REPORT_ARTIFACT_REGISTRY_BYTES) throw new Error("Report artifacts exceed registry byte budget");
@@ -91,41 +95,21 @@ function isContinuationByte(value: number): boolean {
   return (value & 0xc0) === 0x80;
 }
 
-function readBoundary(buffer: Buffer, offset: number): ReportArtifactReadResult {
-  const end = buffer.length;
-  const chunk = buffer.subarray(offset, end);
-  return {
-    reportId: "",
-    relativePath: "",
-    content: chunk.toString("utf8"),
-    offset,
-    nextOffset: end,
-    eof: true,
-    bytes: chunk.byteLength,
-    totalBytes: end,
-    sha256: createHash("sha256").update(buffer).digest("hex"),
-  };
-}
-
 export function readReportArtifact(options: ReportArtifactReadOptions, now = Date.now()): ReportArtifactReadResult {
   purgeExpired(now);
   const entry = reports.get(options.capability);
   if (!entry) throw new Error("Unknown Sniff report artifact capability");
   if (entry.reportId !== options.reportId) throw new Error("Sniff report artifact capability does not match report ID");
   const descriptor = entry.descriptors.get(options.relativePath);
-  const source = entry.contents.get(options.relativePath);
-  if (!descriptor || source === undefined) throw new Error(`Unknown Sniff report artifact: ${options.relativePath}`);
+  const buffer = entry.contents.get(options.relativePath);
+  if (!descriptor || buffer === undefined) throw new Error(`Unknown Sniff report artifact: ${options.relativePath}`);
   entry.expiresAt = Math.min(entry.createdAt + REPORT_ARTIFACT_MAX_AGE_MS, now + REPORT_ARTIFACT_IDLE_TTL_MS);
 
   const offset = options.offset ?? 0;
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Sniff report artifact offset must be a non-negative integer");
-  const buffer = Buffer.from(source, "utf8");
   if (offset > buffer.length) throw new Error("Sniff report artifact offset is beyond the artifact");
   if (offset < buffer.length && isContinuationByte(buffer[offset] ?? 0)) throw new Error("Sniff report artifact offset must be a UTF-8 boundary");
-  const digest = descriptor.sha256;
-  if (offset === buffer.length) {
-    return { ...readBoundary(buffer, offset), reportId: entry.reportId, relativePath: descriptor.relativePath, sha256: digest };
-  }
+  // An offset at the end yields the empty EOF page through the same path as any other page.
   let end = Math.min(buffer.length, offset + REPORT_ARTIFACT_CHUNK_BYTES);
   while (end < buffer.length && isContinuationByte(buffer[end] ?? 0)) end -= 1;
   const chunk = buffer.subarray(offset, end);
@@ -138,7 +122,7 @@ export function readReportArtifact(options: ReportArtifactReadOptions, now = Dat
     eof: end === buffer.length,
     bytes: chunk.byteLength,
     totalBytes: buffer.byteLength,
-    sha256: digest,
+    sha256: descriptor.sha256,
   };
 }
 

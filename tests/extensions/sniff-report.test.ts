@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -652,6 +652,37 @@ describe("structured Sniff reports", () => {
     expect(pages).toBeGreaterThan(0);
     expect(content).toContain('"findings"');
     expect(createHash("sha256").update(content).digest("hex")).toBe(descriptor.sha256);
+  });
+
+  test("pages a report artifact without re-encoding it on every read", () => {
+    const findings = Array.from({ length: 2_000 }, (_, index) => finding({
+      stableKey: `test:encode-${index}`,
+      title: `界 Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const capability = registerReportArtifacts(artifacts);
+    const encode = spyOn(Buffer, "from");
+    let pages = 0;
+    let content = "";
+    try {
+      for (let offset = 0; ; ) {
+        const page = readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json", offset });
+        content += page.content;
+        pages += 1;
+        if (page.eof) {
+          const boundary = readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json", offset: page.nextOffset });
+          expect(boundary).toMatchObject({ content: "", bytes: 0, eof: true, offset: page.nextOffset, nextOffset: page.nextOffset, totalBytes: page.totalBytes, sha256: page.sha256 });
+          break;
+        }
+        offset = page.nextOffset;
+      }
+      expect(pages).toBeGreaterThan(1);
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
+    expect(content).toBe(artifacts.json);
   });
 
   test("evicts the oldest reports once retained bytes exceed the registry budget", () => {
