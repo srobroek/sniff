@@ -160,6 +160,7 @@ describe("approval policy", () => {
       objectives: [],
       exclusions: [],
       analyzers: [],
+      gaps: [],
       budget: {},
       trust: "untrusted-remote",
       materialization: "in-place",

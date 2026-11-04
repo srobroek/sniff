@@ -52,6 +52,16 @@ export type SniffIntakeConfirmationSummary = {
 	readonly objectiveCount: number;
 	readonly exclusionCount: number;
 	readonly analyzerCount: number;
+	/** Every manifest gap: requested coverage that is unmet or unknown, with its reason. */
+	readonly gaps: CanonicalConfirmationRequest["gaps"];
+	/** Analyzers that were not selected, with the reason (for example, not needed by the selected objectives). */
+	readonly skippedAnalyzers: readonly {
+		readonly name: string;
+		readonly tool: string;
+		readonly recipe: string;
+		readonly disposition: "skipped" | "unavailable";
+		readonly reason: string;
+	}[];
 	readonly selectedAnalyzers: readonly {
 		readonly name: string;
 		readonly tool: string;
@@ -106,6 +116,12 @@ export function publicConfirmationSummary(request: CanonicalConfirmationRequest)
 		objectiveCount: request.objectives.length,
 		exclusionCount: request.exclusions.length,
 		analyzerCount: request.analyzers.length,
+		gaps: request.gaps,
+		skippedAnalyzers: request.analyzers.flatMap((analyzer) =>
+			analyzer.disposition === "selected"
+				? []
+				: [{ name: analyzer.name, tool: analyzer.tool, recipe: analyzer.recipe, disposition: analyzer.disposition, reason: analyzer.reason }],
+		),
 		selectedAnalyzers: request.analyzers.flatMap((analyzer) =>
 			analyzer.disposition === "selected"
 				? [{ name: analyzer.name, tool: analyzer.tool, recipe: analyzer.recipe, disposition: "selected" as const }]

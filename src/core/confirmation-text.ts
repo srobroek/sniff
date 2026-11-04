@@ -47,6 +47,7 @@ export function intakeConfirmationText(request: CanonicalConfirmationRequest, op
     `Objectives: ${JSON.stringify(request.objectives)}`,
     `Exclusions: ${JSON.stringify(request.exclusions)}`,
     `Analyzers/dispositions: ${analyzers || "<none>"}`,
+    `Gaps: ${request.gaps.length === 0 ? "<none>" : request.gaps.map((gap) => `${visible(gap.field)} (${gap.impact}): ${visible(gap.reason)}`).join("; ")}`,
     `Budgets: ${JSON.stringify(request.budget)}`,
     `Materialization: ${request.materialization}`,
     `Plan digest: ${request.digest}`,

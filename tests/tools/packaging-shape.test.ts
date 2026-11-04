@@ -335,6 +335,8 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 
 		const intake = tools.get("sniff_intake");
 		if (!intake) throw new Error("sniff_intake was not registered");
+		const previousUnattended = process.env.SNIFF_UNATTENDED_INTAKE;
+		process.env.SNIFF_UNATTENDED_INTAKE = "1";
 		const intakeOutput = await intake.execute(
 			"intake",
 			{
@@ -349,6 +351,8 @@ test("Copied OMP package imports one bundled extension and completes a leased li
 			undefined,
 			context,
 		);
+		if (previousUnattended === undefined) delete process.env.SNIFF_UNATTENDED_INTAKE;
+		else process.env.SNIFF_UNATTENDED_INTAKE = previousUnattended;
 		const intakeDetails = object(intakeOutput.details, "sniff_intake details");
 		expect(intakeDetails.ok).toBe(true);
 		const intakeResult = object(intakeDetails.result, "sniff_intake result");

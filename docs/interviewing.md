@@ -18,6 +18,8 @@ The core models five frontier axes:
 
 Analyzer family and tier follow from the confirmed target, objectives, trust route, and availability.
 
+Objectives narrow the analyzers first. Each analyzer recipe declares the objective groups it serves in `src/core/analyzer-recipes.json`. A recipe that serves none of the selected groups is recorded as `skipped` with that reason, before trust, scope, and availability are considered. Selecting all six groups, which is the default, keeps every recipe. A selected group that no runnable recipe serves (today `performance-and-efficiency`, `change-and-release-risk`, and `tests-delivery-and-tooling`, or any group whose recipes scope or trust skipped) is recorded as an `objectives` gap in the manifest. The approval text and intake summary list these gaps and the skipped-recipe reasons, and the report shows each gap as unmet requested coverage. For example, `structure-and-maintainability` alone selects `lizard:complexity` and `opengrep:hardcoded-values`, and `bounded-security-smells` alone selects `gitleaks:tracked-history` and `opengrep:hardcoded-values`.
+
 The five choices form the adaptive frontier. Sniff asks the highest-impact unresolved question. It waits for the answer. Sniff asks the next question. Analyzer selection follows the confirmed choices.
 
 ## Request patterns
@@ -49,9 +51,15 @@ The interactive host asks questions.
 
 ## Interactive and noninteractive intake
 
-Adapters with elicitation support use it for confirmation. OpenCode uses a permission prompt instead, for interactive and noninteractive intake alike, so `interactive: false` never approves a plan on its own.
+`interactive: false` skips the adaptive interview. It never approves the resolved plan. By default a person confirms that plan the same way as in interactive intake:
 
-Authorized noninteractive intake supplies `target` and `intent` through host authorization. The trusted host records the authorization receipt. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking frontier questions.
+- MCP (Claude Code, Codex) uses form elicitation. Without elicitation, intake returns `confirmation_required` and issues no lease.
+- OMP uses `ui.confirm`. Without a UI, intake refuses.
+- OpenCode uses a permission prompt, for interactive and noninteractive intake alike. Its `confirm: false` option plus `sniff_confirm_intake` permission rules are the operator's way to configure unattended runs. See [OpenCode](opencode.md).
+
+The operator can opt in to unattended intake for MCP and OMP by setting `SNIFF_UNATTENDED_INTAKE` to `1`, `true`, or `yes` in the server's environment. Any other value or no value leaves it off. Tool arguments cannot enable it. With the opt-in, the host authorizes the exact plan digest itself and the manifest records a host actor with the reason that the operator enabled `SNIFF_UNATTENDED_INTAKE`. Installation and report saving still need a person's confirmation and refuse headless sessions.
+
+Noninteractive intake supplies `target` and `intent`. The caller cannot supply authorization fields. Sniff records defaults and gaps instead of asking frontier questions.
 
 Without an objective choice, noninteractive intake selects all six groups.
 

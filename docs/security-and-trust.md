@@ -23,6 +23,21 @@ Every remote target uses the untrusted route. The default route has these rules:
 
 Sniff enforces config-free offline recipes for remote targets. It does not create an operating-system sandbox or network boundary.
 
+## Unattended intake
+
+A model argument never stands in for approval. `interactive: false` skips the interview, but the resolved plan still needs a person's confirmation: MCP form elicitation or OMP `ui.confirm`. Without that channel, intake issues no lease and names `SNIFF_UNATTENDED_INTAKE=1` in its refusal.
+
+Only the operator can lift this, by setting `SNIFF_UNATTENDED_INTAKE=1` (or `true`, `yes`) in the environment of the MCP server or OMP process. Sniff reads it from the server's environment and never from tool arguments. The manifest then records a host or headless actor and a reason that names the opt-in.
+
+Set it where the server process gets its environment:
+
+- Claude Code: export it before starting `claude`, or add it to the `env` map of the `sniff` entry in the MCP configuration (`"env": { "SNIFF_UNATTENDED_INTAKE": "1" }`).
+- Codex: export it before starting `codex`, or add `SNIFF_UNATTENDED_INTAKE = "1"` under `[mcp_servers.sniff.env]` in `~/.codex/config.toml`.
+- OMP: export it before starting `omp`.
+- OpenCode does not read it. Use the plugin option `confirm: false` and `sniff_confirm_intake` permission rules.
+
+Installing tools and saving reports are unaffected. Both refuse headless sessions even with the opt-in.
+
 ## Capability boundary
 
 Intake issues an unguessable capability for one manifest. The capability binds these values:

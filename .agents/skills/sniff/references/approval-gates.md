@@ -23,7 +23,7 @@ Target resolution, stack detection, configuration reads, and read-only availabil
 
 2. **Install set.** After stack detection, use `sniff_install_tools` `probe` and target references to present every viable analyzer. Default-on tools start selected; opt-in tools start unselected with their reason. Wait before install.
 
-For a **non-interactive** run, a delegated brief can name the target and objectives, but it cannot replace the host confirmation boundary: `sniff_intake` obtains authorization from the host and rejects caller-supplied authorization. Use only the recipes intake selects, record missing tools as gaps, and never install tools; headless sessions cannot install. Missing scope remains blocked; unavailability is not consent.
+For a **non-interactive** run, a delegated brief can name the target and objectives, but it cannot replace the host confirmation boundary: `sniff_intake` obtains a person's confirmation from the host (or the operator's `SNIFF_UNATTENDED_INTAKE=1` opt-in) and rejects caller-supplied authorization. If intake reports `confirmation_required`, tell the user; do not retry with different arguments. Use only the recipes intake selects, record missing tools as gaps, and never install tools; headless sessions cannot install. Missing scope remains blocked; unavailability is not consent.
 
 ## Skill directory and target directory
 

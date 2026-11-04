@@ -1,8 +1,9 @@
 import { extname } from "node:path";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId } from "./analyzer-recipes.ts";
+import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe, type SniffAnalyzerRecipeId, type SniffAnalyzerTier } from "./analyzer-recipes.ts";
+import type { ObjectiveGroup } from "./objectives.ts";
 import type { ResolvedTarget } from "./target.ts";
 
-export type SecurityAnalyzerTier = "project-native" | "lightweight-static" | "deep-static";
+export type SecurityAnalyzerTier = SniffAnalyzerTier;
 export type TargetTrust = "trusted-local" | "untrusted-remote";
 
 export type SecurityAnalyzerDisposition = {
@@ -28,6 +29,8 @@ export type AnalyzerSelectionContext = {
   readonly trust?: TargetTrust;
   readonly target?: ResolvedTarget;
   readonly scopeMode?: "quick" | "full" | "plan-only";
+  /** The selected objective groups; a recipe that serves none of them is skipped. Omitted means every group. */
+  readonly objectives?: readonly ObjectiveGroup[];
 };
 
 export class SecurityScopeError extends Error {
@@ -45,7 +48,6 @@ type AnalyzerCatalogEntry = {
   readonly recipe: SniffAnalyzerRecipeId;
   readonly tier: SecurityAnalyzerTier;
   readonly remoteSafe: boolean;
-  readonly defaultEnabled: boolean;
 };
 
 function recipeFor(name: SniffAnalyzerRecipeId): SniffAnalyzerRecipe {
@@ -54,11 +56,10 @@ function recipeFor(name: SniffAnalyzerRecipeId): SniffAnalyzerRecipe {
   return recipe;
 }
 
-export const SECURITY_ANALYZER_CATALOG = {
-  "lizard:complexity": { tool: recipeFor("lizard:complexity").tool, recipe: "lizard:complexity", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "opengrep:hardcoded-values": { tool: recipeFor("opengrep:hardcoded-values").tool, recipe: "opengrep:hardcoded-values", tier: "lightweight-static", remoteSafe: true, defaultEnabled: true },
-  "gitleaks:tracked-history": { tool: recipeFor("gitleaks:tracked-history").tool, recipe: "gitleaks:tracked-history", tier: "lightweight-static", remoteSafe: false, defaultEnabled: true },
-} as const satisfies Record<SniffAnalyzerRecipeId, AnalyzerCatalogEntry>;
+// Tool, tier, and remote safety live in the recipe data only; this view just indexes them.
+export const SECURITY_ANALYZER_CATALOG = Object.fromEntries(
+  Object.values(SNIFF_ANALYZER_RECIPES).map((recipe) => [recipe.id, { tool: recipe.tool, recipe: recipe.id, tier: recipe.tier, remoteSafe: recipe.remoteSafe }]),
+) as { readonly [K in SniffAnalyzerRecipeId]: AnalyzerCatalogEntry };
 
 const FORBIDDEN_ALIAS: Record<string, string> = {
   dast: "DAST",
@@ -74,9 +75,19 @@ const FORBIDDEN_ALIAS: Record<string, string> = {
   threatcampaigns: "threat campaigns",
 };
 
-const DEFAULT_PROJECT_NATIVE = [] as const;
-const DEFAULT_LIGHTWEIGHT_STATIC = ["lizard:complexity", "opengrep:hardcoded-values", "gitleaks:tracked-history"] as const;
-const DEFAULT_DEEP_STATIC = [] as const;
+function defaultRecipes(tier: SecurityAnalyzerTier): SniffAnalyzerRecipeId[] {
+  return Object.values(SNIFF_ANALYZER_RECIPES)
+    .filter((recipe) => recipe.tier === tier && recipe.defaultEnabled)
+    .map((recipe) => recipe.id as SniffAnalyzerRecipeId);
+}
+
+/** Why the selected objectives leave this recipe out, or undefined when it serves one of them. */
+function objectiveExclusion(name: SniffAnalyzerRecipeId, objectives: readonly ObjectiveGroup[] | undefined): string | undefined {
+  if (!objectives) return undefined;
+  const serves = recipeFor(name).objectives;
+  if (serves.some((group) => objectives.includes(group))) return undefined;
+  return `Not needed by the selected objectives; this recipe serves ${serves.join(", ")}.`;
+}
 
 function normalizedAlias(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -116,22 +127,25 @@ export function selectSecurityAnalyzers(request: SecurityRequest = {}, context: 
   }
   const unavailableNames = (request.unavailable ?? []).map((name) => validateAnalyzerName(name));
   const unavailable = new Set(unavailableNames);
-  const projectNative = checkedNames(request.projectNative ?? DEFAULT_PROJECT_NATIVE, "project-native");
-  const lightweight = checkedNames(request.lightweightStatic ?? DEFAULT_LIGHTWEIGHT_STATIC, "lightweight-static");
-  const deep = checkedNames(request.deepStaticAnalyzers ?? DEFAULT_DEEP_STATIC, "deep-static");
+  const projectNative = checkedNames(request.projectNative ?? defaultRecipes("project-native"), "project-native");
+  const lightweight = checkedNames(request.lightweightStatic ?? defaultRecipes("lightweight-static"), "lightweight-static");
+  const deep = checkedNames(request.deepStaticAnalyzers ?? defaultRecipes("deep-static"), "deep-static");
   const trust = context.trust ?? "trusted-local";
   const dispositions: SecurityAnalyzerDisposition[] = [];
 
   for (const name of projectNative) {
     const absent = unavailable.has(name);
-    const selected = trust === "trusted-local" && !absent;
+    const unserved = objectiveExclusion(name, context.objectives);
+    const selected = !unserved && trust === "trusted-local" && !absent;
     dispositions.push({
       name,
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "project-native",
-      disposition: absent ? "unavailable" : selected ? "selected" : "skipped",
-      reason: absent
+      disposition: unserved ? "skipped" : absent ? "unavailable" : selected ? "selected" : "skipped",
+      reason: unserved
+        ? unserved
+        : absent
         ? "Analyzer is unavailable in the target environment."
         : selected
           ? "Trusted local targets may use repository configuration."
@@ -140,6 +154,7 @@ export function selectSecurityAnalyzers(request: SecurityRequest = {}, context: 
   }
   for (const name of lightweight) {
     const absent = unavailable.has(name);
+    const unserved = objectiveExclusion(name, context.objectives);
     const incompatible = scopeCompatibility(name, context.target);
     const remoteBlocked = trust === "untrusted-remote" && !SECURITY_ANALYZER_CATALOG[name].remoteSafe;
     const scopeBlocked = context.scopeMode === "plan-only" ? "Plan-only mode does not execute analyzers." : context.scopeMode === "quick" && name === "gitleaks:tracked-history" ? "Quick mode omits bounded-history coverage." : undefined;
@@ -148,22 +163,23 @@ export function selectSecurityAnalyzers(request: SecurityRequest = {}, context: 
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "lightweight-static",
-      disposition: absent ? "unavailable" : scopeBlocked || incompatible || remoteBlocked ? "skipped" : "selected",
-      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ?? incompatible ?? (remoteBlocked ? "Untrusted remote targets cannot use target-controlled analyzer configuration." : "Config-free offline static coverage is enabled."),
+      disposition: unserved ? "skipped" : absent ? "unavailable" : scopeBlocked || incompatible || remoteBlocked ? "skipped" : "selected",
+      reason: unserved ?? (absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ?? incompatible ?? (remoteBlocked ? "Untrusted remote targets cannot use target-controlled analyzer configuration." : "Config-free offline static coverage is enabled.")),
     });
   }
   for (const name of deep) {
     const absent = unavailable.has(name);
+    const unserved = objectiveExclusion(name, context.objectives);
     const remoteBlocked = trust === "untrusted-remote" && !SECURITY_ANALYZER_CATALOG[name].remoteSafe;
     const scopeBlocked = context.scopeMode === "plan-only" ? "Plan-only mode does not execute analyzers." : undefined;
-    const selected = request.deepStatic === true && !absent && !remoteBlocked && !scopeBlocked;
+    const selected = !unserved && request.deepStatic === true && !absent && !remoteBlocked && !scopeBlocked;
     dispositions.push({
       name,
       tool: SECURITY_ANALYZER_CATALOG[name].tool,
       recipe: SECURITY_ANALYZER_CATALOG[name].recipe,
       tier: "deep-static",
-      disposition: absent ? "unavailable" : selected ? "selected" : "skipped",
-      reason: absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ? scopeBlocked : remoteBlocked ? "Untrusted remote targets require a separate sandboxed code-execution grant." : selected ? "Explicit deep-static opt-in was recorded for a trusted target." : "Deep static analysis requires explicit opt-in.",
+      disposition: unserved ? "skipped" : absent ? "unavailable" : selected ? "selected" : "skipped",
+      reason: unserved ?? (absent ? "Analyzer is unavailable in the target environment." : scopeBlocked ? scopeBlocked : remoteBlocked ? "Untrusted remote targets require a separate sandboxed code-execution grant." : selected ? "Explicit deep-static opt-in was recorded for a trusted target." : "Deep static analysis requires explicit opt-in."),
     });
   }
   return dispositions.sort((left, right) => left.tier.localeCompare(right.tier) || left.name.localeCompare(right.name));

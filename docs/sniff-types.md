@@ -29,6 +29,8 @@ Intent chooses the intake outcome. It does not choose the target. It does not ch
 
 Without an objective choice, authorized noninteractive intake selects all six groups. Sniff records unselected groups as skipped.
 
+Objectives also select analyzers. Each recipe lists the groups it serves, and a recipe that serves no selected group is recorded as `skipped` with the reason that the selected objectives do not need it. The default of all six groups selects every recipe.
+
 ## Target kinds
 
 `TargetKind` contains fourteen intake target values. Each target resolves to an exact file set. Immutable Git targets also receive an immutable commit identity.
@@ -103,15 +105,15 @@ Sniff records each analyzer as selected, skipped, or unavailable. It rejects fuz
 
 `SNIFF_ANALYZER_RECIPES` is the execution catalog. Recipe IDs differ from installer bundle names.
 
-- `lizard:complexity`: tool `lizard`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
-- `opengrep:hardcoded-values`: tool `opengrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free.
-- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; the recipe runs locally and reads target configuration.
+- `lizard:complexity`: tool `lizard`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free; serves `structure-and-maintainability` and `correctness-and-resilience`.
+- `opengrep:hardcoded-values`: tool `opengrep`; tier `lightweight-static`; scope `scoped-files`; remote-safe and config-free; serves `structure-and-maintainability` and `bounded-security-smells`.
+- `gitleaks:tracked-history`: tool `gitleaks`; tier `lightweight-static`; scope `repository-wide`; the recipe runs locally and reads target configuration; serves `bounded-security-smells`.
 
 When cyclomatic complexity exceeds 10, function length exceeds 50, or parameter count exceeds 5, Lizard emits an observation.
 
 The `opengrep` recipe uses pinned OpenGrep v1.30.0. With explicit `sniff_install_tools` approval, Sniff downloads the platform asset and verifies its SHA-256 digest before caching it. Provisioning and probing use a host-owned neutral directory. They do not execute target code. A later analyzer run uses the fixed, config-free recipe against authorized files.
 
-The security catalog uses these three recipe IDs. Each recipe is default-enabled. A capability authorizes a selected recipe once for the confirmed target.
+The security catalog is derived from these three recipes: tier, remote safety, default enablement, and objective groups all come from the recipe data in `analyzer-recipes.json`. Each recipe is default-enabled. A capability authorizes a selected recipe once for the confirmed target.
 
 ## Installer bundles
 

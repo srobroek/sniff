@@ -69,7 +69,7 @@ OpenCode's default policy allows every action, so by default the plugin turns th
 
 Choosing **Allow always** does not skip later prompts, because each plan is different. A client that auto-accepts permissions, such as `opencode run --auto` or a TUI set to auto-accept, also accepts these prompts.
 
-For unattended runs where configured rules alone should decide, set the plugin's `confirm` option to `false` and allow the actions you accept:
+OpenCode does not read `SNIFF_UNATTENDED_INTAKE`; its `confirm: false` option plus permission rules are the equivalent. For unattended runs where configured rules alone should decide, set the plugin's `confirm` option to `false` and allow the actions you accept:
 
 ```jsonc
 {

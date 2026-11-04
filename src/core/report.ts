@@ -336,6 +336,15 @@ function fileArtifactNameMap(report: SniffReport): Map<string, string> {
   return map;
 }
 
+// A gap the manifest records is requested coverage that did not happen, not "not applicable".
+function manifestGapRows(report: SniffReport): string[] {
+  const gaps = (report.extensions["sniff.intake"] as { readonly gaps?: unknown } | undefined)?.gaps;
+  if (!Array.isArray(gaps)) return [];
+  return gaps.flatMap((gap: { readonly field?: unknown; readonly reason?: unknown }) =>
+    typeof gap?.field === "string" && typeof gap.reason === "string" ? [`| ${escapeMarkdown(gap.field)} | — | — | gap | ${escapeMarkdown(gap.reason)} |`] : [],
+  );
+}
+
 function renderMarkdown(report: SniffReport, bounded: boolean): string {
   validateSniffReport(report);
   const files = fileArtifactNameMap(report);
@@ -345,6 +354,7 @@ function renderMarkdown(report: SniffReport, bounded: boolean): string {
   const coverageRows = report.coverage.map(
     (entry) => `| ${escapeMarkdown(entry.dimension)} | ${escapeMarkdown(entry.tool)} | ${entry.analysisClass} | ${entry.status} | ${escapeMarkdown(`${entry.notes}${entry.version ? ` (version ${entry.version})` : ""}`)} |`,
   );
+  coverageRows.push(...manifestGapRows(report));
   const findingRows = retained.map((finding, index) => {
     const mapping = finding.smell && finding.refactoring
       ? `[${escapeMarkdown(finding.smell.name)}](${finding.smell.url}) → [${escapeMarkdown(finding.refactoring.name)}](${finding.refactoring.url})`
