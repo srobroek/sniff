@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,12 +20,21 @@ import {
 } from "../../src/core/report.ts";
 import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
+import { createSniffRunOwner, type SniffRunOwner } from "../../src/core/run-owner.ts";
 import { cancelRunLease, issueRunLease } from "../../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../../src/core/target.ts";
 
 const temporaryDirectories: string[] = [];
 
-afterEach(() => {
+// Each test's leases belong to its own owner, disposed after it, so a lease a test leaves live
+// (a failed save keeps it for a retry) never counts against another test's lease cap.
+let runOwner: SniffRunOwner;
+beforeEach(() => {
+  runOwner = createSniffRunOwner({ label: "sniff-report test" });
+});
+
+afterEach(async () => {
+  await runOwner.dispose();
   for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
@@ -94,8 +103,9 @@ function authorizedReport(input: ReportInput = reportInput()): Parameters<typeof
     intent: "audit",
     scopeMode: input.target.scopeMode,
   });
-  const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined });
+  const lease = issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined }, { owner: runOwner });
   return {
+    owner: runOwner,
     capability: lease.capability,
     manifestId: lease.manifestId,
     report: { ...input, target: { ...canonicalReportTargetIdentity(manifest.resolvedTarget, manifest.scopeMode), languages: input.target.languages }, findings, extensions: { ...input.extensions, "sniff.intake": structuredClone(manifest) } },
@@ -124,7 +134,7 @@ function registeredReportTools(): Map<string, RegisteredReportTool> {
     zod: { object: () => schema, string: () => schema, number: () => schema },
     registerTool: (definition: RegisteredReportTool) => { captured.set(definition.name, definition); },
   };
-  sniffReportTool(pi as never);
+  sniffReportTool(pi as never, runOwner);
   return captured;
 }
 
@@ -526,7 +536,7 @@ describe("structured Sniff reports", () => {
       return { acceptedDigest: save.digest };
     } } });
     await requested.promise;
-    await cancelRunLease(request.capability, request.manifestId);
+    await cancelRunLease(request.capability, request.manifestId, request.owner);
     approval.resolve();
     await expect(pending).rejects.toThrow("already cancelled");
     expect(existsSync(destination)).toBe(false);

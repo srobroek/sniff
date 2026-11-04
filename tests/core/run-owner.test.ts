@@ -9,7 +9,7 @@ import { canonicalReportTargetIdentity, runSniffIntakeTool } from "../../src/cor
 import { buildSniffReport, createReportArtifacts, type ReportInput } from "../../src/core/report.ts";
 import { MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, readReportArtifact, registerReportArtifacts } from "../../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
-import { createSniffRunOwner, MAX_LIVE_LEASES_PER_OWNER, type SniffRunOwner } from "../../src/core/run-owner.ts";
+import { createSniffRunOwner, defaultSniffRunOwner, MAX_LIVE_LEASES_PER_OWNER, type SniffRunOwner } from "../../src/core/run-owner.ts";
 import {
   abandonAnalyzerReservation,
   assertRunReport,
@@ -218,6 +218,25 @@ describe("per-owner budgets", () => {
     expect(lease(other).capability).toBeString();
     await cancelRunLease(runs[0]?.capability ?? "", runs[0]?.manifestId ?? "", full);
     expect(lease(full).capability).toBeString();
+  });
+
+  test("the process owner that ownerless calls share is capped too, and frees capacity as runs end", async () => {
+    // Start from a fresh process owner so runs another file left behind cannot skew the count,
+    // and dispose it afterwards so this test leaves none behind either.
+    await defaultSniffRunOwner().dispose();
+    const root = targetRoot();
+    const manifest = createRunManifest({ target: validateResolvedTarget({ kind: "files", label: "a.ts", root, files: ["a.ts"], materialization: "in-place" }), intent: "audit", scopeMode: "full" });
+    const issue = () => issueRunLease(manifest, { target: manifest.resolvedTarget, release: () => undefined });
+    try {
+      const runs = Array.from({ length: MAX_LIVE_LEASES_PER_OWNER }, issue);
+      expect(errorOf(issue)).toContain(`at most ${MAX_LIVE_LEASES_PER_OWNER} live Sniff runs`);
+      // An explicit owner is unaffected by the full process owner.
+      expect(lease(owner("explicit")).capability).toBeString();
+      await cancelRunLease(runs[0]?.capability ?? "", runs[0]?.manifestId ?? "");
+      expect(issue().capability).toBeString();
+    } finally {
+      await defaultSniffRunOwner().dispose();
+    }
   });
 
   test("intake refuses an owner at its lease cap before resolving any target", async () => {

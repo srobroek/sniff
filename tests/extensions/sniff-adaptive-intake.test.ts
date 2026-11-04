@@ -11,6 +11,7 @@ import {
   decisionFrontier,
 } from "../../src/core/intake.ts";
 import { canonicalReportTargetIdentity, publicConfirmationSummary, publicSniffIntakeResult, runSniffIntakeTool } from "../../src/core/intake-use-case.ts";
+import { createSniffRunOwner } from "../../src/core/run-owner.ts";
 import { SecurityScopeError, selectSecurityAnalyzers } from "../../src/core/security.ts";
 import {
   type ArgvResult,
@@ -475,18 +476,24 @@ describe("extension reachability", () => {
     temporary.push(root);
     mkdirSync(join(root, "src"));
     writeFileSync(join(root, "src", "a.ts"), "export {};\n");
-    const incomplete = await runSniffIntakeTool({ input: {} });
-    expect(incomplete.interview.questions.map(({ id }) => id)).toEqual(["target"]);
-    const complete = await runSniffIntakeTool({
-      input: {
-        target: { kind: "files", root, paths: ["src/a.ts"] },
-        intent: "audit",
-        scopeMode: "full",
-        objectives: ["correctness-and-resilience"],
-        budget: { maxMinutes: 5 },
-      },
-    }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
-    expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, scopeMode: "full", confirmation: { required: true, actor: "test-user" } });
+    // The issued lease belongs to this test's owner, so disposing it leaves no run behind.
+    const owner = createSniffRunOwner({ label: "adaptive-intake test" });
+    try {
+      const incomplete = await runSniffIntakeTool({ input: {} }, { owner });
+      expect(incomplete.interview.questions.map(({ id }) => id)).toEqual(["target"]);
+      const complete = await runSniffIntakeTool({
+        input: {
+          target: { kind: "files", root, paths: ["src/a.ts"] },
+          intent: "audit",
+          scopeMode: "full",
+          objectives: ["correctness-and-resilience"],
+          budget: { maxMinutes: 5 },
+        },
+      }, { owner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test-user" }) });
+      expect(complete.manifest).toMatchObject({ resolvedTarget: { files: ["src/a.ts"] }, scopeMode: "full", confirmation: { required: true, actor: "test-user" } });
+    } finally {
+      await owner.dispose();
+    }
   });
 });
 

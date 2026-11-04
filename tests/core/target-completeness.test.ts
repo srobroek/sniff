@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,6 +8,7 @@ import { canonicalReportTargetIdentity, runSniffIntakeTool } from "../../src/cor
 import { OBJECTIVE_GROUPS } from "../../src/core/objectives.ts";
 import { renderCompleteSniffMarkdown } from "../../src/core/report.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
+import { createSniffRunOwner, type SniffRunOwner } from "../../src/core/run-owner.ts";
 import { cancelRunLease } from "../../src/core/run-registry.ts";
 import {
   type ArgvResult,
@@ -21,7 +22,13 @@ import {
 import { materializeProviderTarget, resolveHistoryAtRoot, resolveProviderTarget, resolveTargetLease, withResolvedTarget } from "../../src/core/target-provider.ts";
 
 const temporary: string[] = [];
-afterEach(() => {
+// Each test's runs belong to its own owner, disposed after it, so none outlives its test.
+let runOwner: SniffRunOwner;
+beforeEach(() => {
+  runOwner = createSniffRunOwner({ label: "target-completeness test" });
+});
+afterEach(async () => {
+  await runOwner.dispose();
   for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true });
 });
 
@@ -373,7 +380,7 @@ describe("history-walking analyzers see the ancestry they need", () => {
     r.commit({ "app.ts": "v2\n" }, "remove the secret");
     return r;
   }
-  const intake = (root: string, scopeMode: "full" | "quick", objectives: string[] = ["bounded-security-smells"]) => runSniffIntakeTool({ input: { target: { kind: "whole-repo", root }, intent: "audit", scopeMode, objectives, budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
+  const intake = (root: string, scopeMode: "full" | "quick", objectives: string[] = ["bounded-security-smells"]) => runSniffIntakeTool({ input: { target: { kind: "whole-repo", root }, intent: "audit", scopeMode, objectives, budget: { maxMinutes: 5 } } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
 
   test("whole-repo with gitleaks selected keeps a secret removed before HEAD visible in the checkout", async () => {
     const r = secretRepo();
@@ -384,7 +391,7 @@ describe("history-walking analyzers see the ancestry they need", () => {
       expect(Bun.spawnSync(["git", "-C", checkout, "log", "--all", "--format=%H", "-S", "sk_live_REMOVED_SECRET"]).stdout.toString().trim()).not.toBe("");
       expect(count(checkout, "HEAD")).toBe(3);
     } finally {
-      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     }
   }, 30_000);
 
@@ -395,18 +402,18 @@ describe("history-walking analyzers see the ancestry they need", () => {
       expect(result.manifest?.analyzers.find((analyzer) => analyzer.name === "gitleaks:tracked-history")?.disposition).toBe("skipped");
       expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(1);
     } finally {
-      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     }
   }, 30_000);
 
   test("an all-objectives audit selects gitleaks and fetches full history", async () => {
     const r = secretRepo();
-    const result = await runSniffIntakeTool({ input: { target: { kind: "whole-repo", root: r.root }, intent: "audit", scopeMode: "full", objectives: [...OBJECTIVE_GROUPS], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
+    const result = await runSniffIntakeTool({ input: { target: { kind: "whole-repo", root: r.root }, intent: "audit", scopeMode: "full", objectives: [...OBJECTIVE_GROUPS], budget: { maxMinutes: 5 } } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) });
     try {
       expect(result.manifest?.analyzers.find((analyzer) => analyzer.name === "gitleaks:tracked-history")?.disposition).toBe("selected");
       expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(3);
     } finally {
-      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     }
   }, 30_000);
 
@@ -417,7 +424,7 @@ describe("history-walking analyzers see the ancestry they need", () => {
       expect(result.manifest?.analyzers.some((analyzer) => analyzer.name === "gitleaks:tracked-history" && analyzer.disposition === "selected")).toBe(false);
       expect(count(result.manifest?.resolvedTarget.root ?? "", "HEAD")).toBe(1);
     } finally {
-      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId);
+      if (result.lease) cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
     }
   }, 30_000);
 
@@ -506,7 +513,7 @@ describe("captured selections are host-owned", () => {
     await expect(resolveProviderTarget({ kind: "history", rootOrRepository: r.root, window: forged }, runner)).rejects.toMatchObject({ code: "invalid-target" });
     await expect(resolveProviderTarget({ kind: "history", rootOrRepository: "https://example.com/o/r.git", window: forged }, runner)).rejects.toMatchObject({ code: "invalid-target" });
     await expect(resolveHistoryAtRoot(r.root, forged, runner)).rejects.toMatchObject({ code: "invalid-target" });
-    await expect(runSniffIntakeTool({ input: { target: { kind: "history", rootOrRepository: r.root, window: forged }, intent: "audit", scopeMode: "full", objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } } }, { confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) })).rejects.toMatchObject({ code: "invalid-target" });
+    await expect(runSniffIntakeTool({ input: { target: { kind: "history", rootOrRepository: r.root, window: forged }, intent: "audit", scopeMode: "full", objectives: ["correctness-and-resilience"], budget: { maxMinutes: 5 } } }, { owner: runOwner, confirmInteractive: async (request) => ({ acceptedDigest: request.digest, actor: "test" }) })).rejects.toMatchObject({ code: "invalid-target" });
   }, 30_000);
 
   test("a captured selection is validated against the repository at materialization", async () => {
@@ -538,6 +545,7 @@ describe("target gaps reach the public summary, approval text and report", () =>
       objectives: ["correctness-and-resilience"],
       budget: { maxMinutes: 5 },
     } }, {
+      owner: runOwner,
       runner: githubRunner(fixture, { changedFiles: 100 }),
       confirmInteractive: async (request) => {
         approval = intakeConfirmationText(request);
@@ -555,13 +563,14 @@ describe("target gaps reach the public summary, approval text and report", () =>
       // Rendered report.
       const reportTarget = canonicalReportTargetIdentity(result.manifest.resolvedTarget, result.manifest.scopeMode);
       const { artifacts } = await runSniffReportTool({
+        owner: runOwner,
         capability: result.lease.capability,
         manifestId: result.lease.manifestId,
         report: { generatedAt: "2026-09-11T00:00:00Z", target: { ...reportTarget, languages: ["TypeScript"] }, headline: "No retained findings.", findings: [], coverage: [], suppressionCount: 0, systemicPatterns: [], extensions: { "sniff.intake": structuredClone(result.manifest) } },
       });
       expect(renderCompleteSniffMarkdown(artifacts.report)).toContain("| target | — | — | gap | Change set incomplete: git reports 153 changed files but the provider reports 100");
     } catch (error) {
-      cancelRunLease(result.lease.capability, result.lease.manifestId);
+      cancelRunLease(result.lease.capability, result.lease.manifestId, runOwner);
       throw error;
     }
   }, 30_000);
