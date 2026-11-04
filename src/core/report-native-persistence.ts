@@ -1,6 +1,6 @@
 import { dlopen, FFIType, read } from "bun:ffi";
 import { randomBytes } from "node:crypto";
-import { closeSync, fchmodSync, readdirSync, rmSync, statSync, writeSync } from "node:fs";
+import { closeSync, fchmodSync, constants as fsConstants, readdirSync, rmSync, statSync, writeSync } from "node:fs";
 import { parse, resolve, sep } from "node:path";
 
 export type ReportSaveEntry = readonly [relativePath: string, content: string];
@@ -34,39 +34,76 @@ type PlatformConstants = {
   readonly enotdir: number;
 };
 
-const constantsByPlatform: Record<string, PlatformConstants> = {
-  darwin: {
-    directoryFlags: 0x0100_0000 | 0x0010_0000 | 0x0000_0100,
-    createExclusiveFlags: 0x0000_0001 | 0x0000_0200 | 0x0000_0800 | 0x0100_0000 | 0x0000_0100,
-    removeDirectoryFlag: 0x0000_0080,
-    publishNoReplaceFlag: 0x0000_0004,
-    mode: 0o700,
-    enoent: 2,
-    eexist: 17,
-    eloop: 62,
-    enotdir: 20,
-  },
-  linux: {
-    directoryFlags: 0x0001_0000 | 0x0008_0000 | 0x0002_0000,
-    createExclusiveFlags: 0x0000_0001 | 0x0000_0040 | 0x0000_0080 | 0x0008_0000 | 0x0002_0000,
-    removeDirectoryFlag: 0x0000_0200,
-    publishNoReplaceFlag: 0x0000_0001,
-    mode: 0o700,
-    enoent: 2,
-    eexist: 17,
-    eloop: 40,
-    enotdir: 20,
-  },
+/** The open(2) flags the no-symlink walk depends on; their values differ by OS and, on Linux, by CPU architecture. */
+export type OpenFlags = {
+  readonly O_WRONLY: number;
+  readonly O_CREAT: number;
+  readonly O_EXCL: number;
+  readonly O_DIRECTORY: number;
+  readonly O_NOFOLLOW: number;
+  readonly O_CLOEXEC: number;
 };
 
-export function platformConstants(platformName: string = process.platform): PlatformConstants {
-  const constants = constantsByPlatform[platformName];
-  if (!constants) throw new Error("Sniff report persistence requires Darwin or Linux");
-  return constants;
+const OPEN_FLAG_NAMES = ["O_WRONLY", "O_CREAT", "O_EXCL", "O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC"] as const;
+
+const DARWIN_OPEN_FLAGS: OpenFlags = { O_WRONLY: 0x1, O_CREAT: 0x200, O_EXCL: 0x800, O_DIRECTORY: 0x10_0000, O_NOFOLLOW: 0x100, O_CLOEXEC: 0x100_0000 };
+/** asm-generic values, shared by x86-64 and riscv64. */
+const LINUX_GENERIC_OPEN_FLAGS: OpenFlags = { O_WRONLY: 0x1, O_CREAT: 0x40, O_EXCL: 0x80, O_DIRECTORY: 0x1_0000, O_NOFOLLOW: 0x2_0000, O_CLOEXEC: 0x8_0000 };
+/** 32- and 64-bit Arm swap O_DIRECTORY/O_NOFOLLOW with O_DIRECT's generic slots. */
+const LINUX_ARM_OPEN_FLAGS: OpenFlags = { ...LINUX_GENERIC_OPEN_FLAGS, O_DIRECTORY: 0x4000, O_NOFOLLOW: 0x8000 };
+
+const openFlagsByTarget: Readonly<Record<string, Readonly<Record<string, OpenFlags>>>> = {
+  darwin: { arm64: DARWIN_OPEN_FLAGS, x64: DARWIN_OPEN_FLAGS },
+  linux: { x64: LINUX_GENERIC_OPEN_FLAGS, riscv64: LINUX_GENERIC_OPEN_FLAGS, arm64: LINUX_ARM_OPEN_FLAGS, arm: LINUX_ARM_OPEN_FLAGS },
+};
+
+const otherConstantsByPlatform: Readonly<Record<string, Omit<PlatformConstants, "directoryFlags" | "createExclusiveFlags">>> = {
+  darwin: { removeDirectoryFlag: 0x0000_0080, publishNoReplaceFlag: 0x0000_0004, mode: 0o700, enoent: 2, eexist: 17, eloop: 62, enotdir: 20 },
+  linux: { removeDirectoryFlag: 0x0000_0200, publishNoReplaceFlag: 0x0000_0001, mode: 0o700, enoent: 2, eexist: 17, eloop: 40, enotdir: 20 },
+};
+
+/** The flags the running runtime exposes through `fs.constants`; only meaningful for the host's own platform and arch. */
+function runtimeOpenFlags(platformName: string, archName: string): Partial<OpenFlags> {
+  if (platformName !== process.platform || archName !== process.arch) return {};
+  const runtime = fsConstants as Partial<Record<(typeof OPEN_FLAG_NAMES)[number], number>>;
+  const flags: Partial<Record<(typeof OPEN_FLAG_NAMES)[number], number>> = {};
+  for (const name of OPEN_FLAG_NAMES) {
+    const value = runtime[name];
+    if (typeof value === "number" && Number.isInteger(value)) flags[name] = value;
+  }
+  return flags;
 }
 
-export function reportPersistenceSupported(platformName: string = process.platform): boolean {
-  return constantsByPlatform[platformName] !== undefined;
+/**
+ * Selects persistence constants for a platform and CPU architecture. Flags the runtime exposes
+ * through `fs.constants` win; the per-arch table fills the rest (Bun omits O_CLOEXEC, for one).
+ * An unknown platform or architecture fails closed rather than guessing flag bits.
+ */
+export function platformConstants(
+  platformName: string = process.platform,
+  archName: string = process.arch,
+  runtimeFlags: Partial<OpenFlags> = runtimeOpenFlags(platformName, archName),
+): PlatformConstants {
+  const other = otherConstantsByPlatform[platformName];
+  const table = openFlagsByTarget[platformName];
+  if (!other || !table) throw new Error("Sniff report persistence requires Darwin or Linux");
+  const known = Object.hasOwn(table, archName) ? table[archName] : undefined;
+  if (!known) throw new Error(`Sniff report persistence does not support the ${platformName}/${archName} architecture`);
+  const flags: OpenFlags = { ...known, ...runtimeFlags };
+  return {
+    ...other,
+    directoryFlags: flags.O_DIRECTORY | flags.O_CLOEXEC | flags.O_NOFOLLOW,
+    createExclusiveFlags: flags.O_WRONLY | flags.O_CREAT | flags.O_EXCL | flags.O_CLOEXEC | flags.O_NOFOLLOW,
+  };
+}
+
+export function reportPersistenceSupported(platformName: string = process.platform, archName: string = process.arch): boolean {
+  try {
+    platformConstants(platformName, archName);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 let nativeSymbols: NativeSymbols | undefined;

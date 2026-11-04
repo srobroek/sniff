@@ -1,4 +1,5 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test, vi } from "bun:test";
+import * as fs from "node:fs";
 import {
   chmodSync,
   existsSync,
@@ -15,12 +16,13 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import sniffInstallTool from "../../extensions/sniff-install-tool.ts";
 import { clearAnalyzerArtifactRegistryForTests, createAnalyzerArtifacts, registerAnalyzerArtifacts } from "../../src/core/analyzer-artifact-registry.ts";
-import { ANALYZER_MAX_OBSERVATIONS, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
+import { ANALYZER_MAX_OBSERVATIONS, mergeAnalyzerResults, parseAnalyzerOutput, parseGitleaksOutput, parseLizardOutput, parseSarifOutput } from "../../src/core/analyzer-output.ts";
 import { SNIFF_ANALYZER_RECIPES } from "../../src/core/analyzer-recipes.ts";
 import { OPENGREP_FILE_EXTENSIONS, TOOLS } from "../../src/core/catalog.ts";
 import type { CommandResult, SniffInstallRuntime } from "../../src/core/install.ts";
-import { renderMiseToolkit, runSniffInstall } from "../../src/core/install.ts";
+import { readBounded, renderMiseToolkit, runCommand, runSniffInstall } from "../../src/core/install.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, parseOpenGrepOutput } from "../../src/core/opengrep.ts";
+import { processAlive, TERMINATION_GRACE_MS } from "../../src/core/process-control.ts";
 import { SECURITY_ANALYZER_CATALOG } from "../../src/core/security.ts";
 
 const temps: string[] = [];
@@ -250,7 +252,64 @@ describe("bounded analyzer output projections", () => {
 		const bounded = parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...rows].join("\n"), root);
 		expect(bounded.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
 		expect(bounded.capture.incomplete).toBe(true);
-		expect(bounded.capture.reason).toContain("2,000");
+		expect(bounded.capture.reason).toContain(ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US"));
+	});
+
+	test("reports a descendant-held pipe as an incomplete capture with an accurate reason", () => {
+		const root = tempDir("sniff-analyzer-held-pipe-");
+		const outputs: Array<[string, string]> = [
+			["lizard:complexity", "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n"],
+			["gitleaks:tracked-history", "[]"],
+			["opengrep:hardcoded-values", '{"results":[]}'],
+		];
+		for (const [recipeId, stdout] of outputs) {
+			const recipe = SNIFF_ANALYZER_RECIPES[recipeId as keyof typeof SNIFF_ANALYZER_RECIPES];
+			const complete = parseAnalyzerOutput(recipe.tool, recipeId, stdout, root);
+			expect(complete.capture.incomplete).toBe(false);
+			const held = parseAnalyzerOutput(recipe.tool, recipeId, stdout, root, false, "descendant-held-pipe");
+			expect({ recipeId, incomplete: held.capture.incomplete, truncated: held.capture.truncated }).toEqual({ recipeId, incomplete: true, truncated: false });
+			expect(held.capture.reason).toContain("held open by a descendant process");
+			expect(held.capture.reason).not.toContain("exceeded");
+		}
+	});
+
+	test("bounds a sharded run by the same observation cap as a single run", () => {
+		const root = tempDir("sniff-analyzer-merge-");
+		const shard = (offset: number, count: number) => parseOpenGrepOutput(JSON.stringify({ results: Array.from({ length: count }, (_, index) => ({ check_id: "r", path: `src/${offset + index}`, start: { line: 1, col: 1 }, extra: { message: "m", severity: "I" } })) }), root);
+		const half = Math.ceil(2_501 / 2);
+		const merged = mergeAnalyzerResults([shard(0, half), shard(half, 2_501 - half)]);
+		const single = shard(0, 2_501);
+		expect(single.capture.incomplete).toBe(false);
+		expect(merged.observations).toHaveLength(single.observations.length);
+		expect(merged.capture.incomplete).toBe(false);
+		const full = { observations: Array.from({ length: ANALYZER_MAX_OBSERVATIONS }, (_, index) => ({ ruleId: "r", path: `src/${index}`, start: { line: 1, column: 1 }, message: "m", severity: "I" })), capture: { bytes: 0, truncated: false, digest: "", incomplete: false } };
+		const overflow = mergeAnalyzerResults([full, { ...full, observations: full.observations.slice(0, 1) }]);
+		expect(overflow.observations).toHaveLength(ANALYZER_MAX_OBSERVATIONS);
+		expect(overflow.capture.incomplete).toBe(true);
+	});
+
+	test("resolves each distinct finding path once per parse", () => {
+		const root = realpathSync(tempDir("sniff-analyzer-realpath-"));
+		mkdirSync(join(root, "src"), { recursive: true });
+		writeFileSync(join(root, "src", "main.ts"), "export {};\n");
+		const count = 500;
+		const parsers: Array<[string, () => { observations: readonly unknown[] }]> = [
+			["lizard", () => parseLizardOutput(["NLOC,CCN,token,PARAM,length,location,file,function,long_name", ...Array.from({ length: count }, (_, index) => `1,11,1,0,1,${index + 1}-${index + 1},src/main.ts,fn${index},fn${index}`)].join("\n"), root)],
+			["gitleaks", () => parseGitleaksOutput(JSON.stringify(Array.from({ length: count }, (_, index) => ({ RuleID: "r", File: "src/main.ts", StartLine: index + 1 }))), root)],
+			["sarif", () => parseSarifOutput(JSON.stringify({ runs: [{ results: Array.from({ length: count }, (_, index) => ({ ruleId: "r", message: { text: "m" }, locations: [{ physicalLocation: { artifactLocation: { uri: "src/main.ts" }, region: { startLine: index + 1 } } }] })) }] }), root)],
+			["opengrep", () => parseOpenGrepOutput(JSON.stringify({ results: Array.from({ length: count }, (_, index) => ({ check_id: "r", path: "src/main.ts", start: { line: index + 1, col: 1 }, extra: { message: "m", severity: "I" } })) }), root)],
+		];
+		for (const [name, parse] of parsers) {
+			const realpath = vi.spyOn(fs, "realpathSync");
+			try {
+				const parsed = parse();
+				expect({ name, observations: parsed.observations.length }).toEqual({ name, observations: count });
+				// One call canonicalizes the root and one the single distinct path, however many observations share it.
+				expect({ name, boundedCalls: realpath.mock.calls.length <= 2 }).toEqual({ name, boundedCalls: true });
+			} finally {
+				realpath.mockRestore();
+			}
+		}
 	});
 });
 
@@ -307,6 +366,180 @@ describe("probe timeouts", () => {
 			statuses.push(result.tools.find((tool) => tool.tool === "opengrep")?.status ?? "");
 		}
 		expect(statuses).toEqual(["unrunnable", "unrunnable"]);
+	});
+});
+
+describe("bounded command execution", () => {
+	/**
+	 * Forks a sleeper that inherits stdout. The sleeper enters its own session (`setsid`) or stays
+	 * in the parent's process group ignoring SIGTERM (`trap`), then atomically writes its PID to the
+	 * ready file. The parent waits for that file before it prints the PID and either exits or sleeps,
+	 * so the sleeper is ready before anything under test can stop the parent.
+	 */
+	const SLEEPER = [
+		"use POSIX;",
+		"my ($ready, $mode, $then) = @ARGV;",
+		"my $pid = fork(); die \"fork failed\" unless defined $pid;",
+		"if ($pid == 0) {",
+		"  if ($mode eq \"setsid\") { POSIX::setsid(); } else { $SIG{TERM} = \"IGNORE\"; }",
+		"  open(my $fh, \">\", \"$ready.tmp\") or die; print $fh $$; close($fh); rename(\"$ready.tmp\", $ready) or die;",
+		"  sleep 30; exit 0;",
+		"}",
+		"for (1 .. 1000) { last if -e $ready; select(undef, undef, undef, 0.01); }",
+		"print \"$pid\\n\"; STDOUT->flush();",
+		"exit 0 if $then eq \"exit\";",
+		"sleep 30;",
+	].join("\n");
+	const sleepers: number[] = [];
+	afterAll(() => {
+		for (const pid of sleepers) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {
+				// Already gone.
+			}
+		}
+	});
+
+	function sleeperCommand(mode: "setsid" | "trap", then: "exit" | "sleep"): { argv: string[]; ready: string } {
+		const ready = join(tempDir("sniff-sleeper-"), "ready");
+		return { argv: ["perl", "-e", SLEEPER, ready, mode, then], ready };
+	}
+
+	/** Waits for the sleeper's ready file and returns its PID, registered for cleanup only once proven a real foreign PID. */
+	async function sleeperPid(ready: string): Promise<number> {
+		const deadline = Date.now() + 10_000;
+		while (!existsSync(ready)) {
+			if (Date.now() > deadline) throw new Error("sleeper never became ready");
+			await Bun.sleep(10);
+		}
+		const text = readFileSync(ready, "utf8").trim();
+		const pid = Number(text);
+		if (!/^[1-9]\d*$/.test(text) || !Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) throw new Error(`sleeper reported an invalid PID: ${JSON.stringify(text)}`);
+		sleepers.push(pid);
+		return pid;
+	}
+
+	test("returns once the child exits even while a setsid descendant holds stdout open", async () => {
+		const { argv, ready } = sleeperCommand("setsid", "exit");
+		const startedAt = Date.now();
+		const result = await runCommand(argv, tmpdir(), process.env, 20_000);
+		const elapsed = Date.now() - startedAt;
+		const sleeper = await sleeperPid(ready);
+		expect(result.stdout.trim()).toBe(String(sleeper));
+		expect(processAlive(sleeper)).toBe(true);
+		expect(elapsed).toBeLessThan(5_000);
+		expect(result.exitCode).toBe(0);
+		expect(result.timedOut).toBe(false);
+		// A held pipe is an incomplete capture, not a byte-limit overflow.
+		expect(result.stdoutTruncated).toBe(false);
+		expect(result.stdoutIncomplete).toBe("descendant-held-pipe");
+	});
+
+	test("returns after a stop even while a setsid descendant holds stdout open", async () => {
+		const { argv, ready } = sleeperCommand("setsid", "sleep");
+		const controller = new AbortController();
+		const pending = runCommand(argv, tmpdir(), process.env, 20_000, controller.signal);
+		const sleeper = await sleeperPid(ready);
+		const stoppedAt = Date.now();
+		controller.abort();
+		const result = await pending;
+		expect(Date.now() - stoppedAt).toBeLessThan(5_000);
+		expect(result.error).toBe("operation aborted");
+		expect(result.stdoutTruncated).toBe(false);
+		expect(result.stdoutIncomplete).toBe("descendant-held-pipe");
+		// The escaped sleeper is outside the process group by definition; it is recorded, not killed.
+		expect(processAlive(sleeper)).toBe(true);
+	});
+
+	test("SIGKILLs a same-group descendant that ignores SIGTERM after a timeout kills its parent", async () => {
+		const { argv, ready } = sleeperCommand("trap", "sleep");
+		const pending = runCommand(argv, tmpdir(), process.env, 1_000);
+		const descendant = await sleeperPid(ready);
+		const result = await pending;
+		expect(result.timedOut).toBe(true);
+		const deadline = Date.now() + 2_000;
+		while (processAlive(descendant) && Date.now() < deadline) await Bun.sleep(20);
+		expect(processAlive(descendant)).toBe(false);
+	});
+
+	test("SIGKILLs a same-group descendant still holding stdout after its parent exits", async () => {
+		const { argv, ready } = sleeperCommand("trap", "exit");
+		const result = await runCommand(argv, tmpdir(), process.env, 20_000);
+		const descendant = await sleeperPid(ready);
+		expect(result.exitCode).toBe(0);
+		const deadline = Date.now() + 2_000;
+		while (processAlive(descendant) && Date.now() < deadline) await Bun.sleep(20);
+		expect(processAlive(descendant)).toBe(false);
+	});
+
+	test("installs one cancellation handler per reader however many chunks it reads", async () => {
+		const chunkCount = 2_000;
+		let pulled = 0;
+		const abandon = Promise.withResolvers<void>();
+		const stream = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (pulled < chunkCount) {
+					pulled += 1;
+					controller.enqueue(new Uint8Array(64).fill(0x61));
+					return;
+				}
+				// Every chunk is read, past the byte limit; the stream then stays open like a held pipe.
+				setTimeout(abandon.resolve, 0);
+				return new Promise<void>(() => undefined);
+			},
+		});
+		const race = spyOn(Promise, "race");
+		const subscribe = spyOn(abandon.promise, "then");
+		try {
+			const result = await readBounded(stream, 1_024, abandon.promise);
+			expect(result).toMatchObject({ truncated: true, abandoned: true });
+			expect(result.text).toHaveLength(1_024);
+			expect(pulled).toBe(chunkCount);
+			// One subscription on the abandonment and no per-chunk race subscriptions.
+			expect(subscribe).toHaveBeenCalledTimes(1);
+			expect(race).not.toHaveBeenCalled();
+		} finally {
+			race.mockRestore();
+			subscribe.mockRestore();
+		}
+	});
+
+	test("keeps complete output when the child closes its streams", async () => {
+		const result = await runCommand(["sh", "-c", "printf complete; printf err >&2"], tmpdir(), process.env, 5_000);
+		expect(result).toMatchObject({ exitCode: 0, stdout: "complete", stderr: "err", stdoutTruncated: false, stderrTruncated: false, timedOut: false });
+		expect(result.stdoutIncomplete).toBeUndefined();
+		expect(result.stderrIncomplete).toBeUndefined();
+	});
+
+	test("terminates once when a timeout is followed by an abort", async () => {
+		const controller = new AbortController();
+		const signals: Array<string | number | undefined> = [];
+		let childPid = 0;
+		const realKill = process.kill.bind(process);
+		const kill = vi.spyOn(process, "kill").mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
+			// Signal 0 is the liveness probe that decides whether SIGKILL is still needed.
+			if (Math.abs(pid) === childPid && signal !== 0) signals.push(signal);
+			return realKill(pid, signal);
+		}) as typeof process.kill);
+		try {
+			const pending = runCommand(["sh", "-c", 'trap "" TERM; sleep 5'], tmpdir(), process.env, 30, controller.signal, undefined, (spawned) => {
+				childPid = spawned.pid;
+			});
+			setTimeout(() => controller.abort(), 60);
+			const result = await pending;
+			expect(result.timedOut).toBe(true);
+			await Bun.sleep(TERMINATION_GRACE_MS * 3);
+			// Under load SIGTERM can land before the trap is installed; the group then exits and the
+			// escalation correctly skips SIGKILL. Either way the abort adds no second escalation.
+			expect(signals[0]).toBe("SIGTERM");
+			expect(signals.filter((signal) => signal === "SIGTERM")).toHaveLength(1);
+			expect(signals.filter((signal) => signal === "SIGKILL").length).toBeLessThanOrEqual(1);
+			expect(signals.every((signal) => signal === "SIGTERM" || signal === "SIGKILL")).toBe(true);
+			expect(() => realKill(-childPid, 0)).toThrow();
+		} finally {
+			kill.mockRestore();
+		}
 	});
 });
 
@@ -544,6 +777,29 @@ describe("runSniffInstall", () => {
 		expect(existsSync(marker)).toBe(false);
 	});
 
+	test("an abort during probe, diagnose, or install reports aborted and forwards the signal to every probe", async () => {
+		for (const mode of ["probe", "diagnose", "install"] as const) {
+			const controller = new AbortController();
+			const signals: Array<AbortSignal | undefined> = [];
+			const runtime = fakeRuntime({
+				run: async (argv, _cwd, _env, timeoutMs, signal) => {
+					signals.push(signal);
+					if (signals.length === 1) {
+						controller.abort();
+						return commandResult(argv, timeoutMs);
+					}
+					return signal?.aborted ? commandResult(argv, timeoutMs, { exitCode: null, error: "operation aborted" }) : commandResult(argv, timeoutMs);
+				},
+			});
+			const result = await runSniffInstall({ mode, bundles: ["core", "dup"], runtime, signal: controller.signal });
+			expect(result.ok).toBe(false);
+			expect(result.report).toContain("operation aborted");
+			expect(signals.length).toBeGreaterThan(0);
+			expect(signals.every((signal) => signal === controller.signal)).toBe(true);
+			// No further tool is inspected once the abort is observed between tools.
+			expect(result.tools.length).toBeLessThanOrEqual(TOOLS.core.length);
+		}
+	});
 	test("already-aborted install cancels before spawning a manager", async () => {
 		const controller = new AbortController();
 		controller.abort();

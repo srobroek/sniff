@@ -66,3 +66,11 @@ export type SniffAnalyzerRecipeId = keyof typeof rawRecipes;
 export const SNIFF_ANALYZER_RECIPES = Object.fromEntries(Object.entries(recipes).map(([key, value]) => [key, loadRecipe(key, value)])) as {
 	readonly [K in SniffAnalyzerRecipeId]: SniffAnalyzerRecipe;
 };
+
+/**
+ * The argv that ends option parsing before target operands. A recipe that names no separator
+ * gets `--`, so a target file named like an option (`-a.py`) can never inject a flag.
+ */
+export function recipeTargetSeparator(recipe: Pick<SniffAnalyzerRecipe, "targetSeparator">): string[] {
+	return [...(recipe.targetSeparator ?? ["--"])];
+}

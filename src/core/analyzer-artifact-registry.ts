@@ -85,7 +85,8 @@ export interface AnalyzerArtifactReadResult {
 
 interface RegisteredAnalyzer {
   readonly analyzerResultId: string;
-  readonly contents: ReadonlyMap<string, string>;
+  /** UTF-8 bytes encoded once at registration, so paging never re-encodes the artifact. */
+  readonly contents: ReadonlyMap<string, Buffer>;
   readonly descriptors: ReadonlyMap<string, AnalyzerArtifactDescriptor>;
   readonly sourcePaths: ReadonlyMap<string, string>;
   readonly bytes: number;
@@ -165,16 +166,19 @@ function retainedBytes(): number {
 export function registerAnalyzerArtifacts(artifacts: AnalyzerArtifacts, now = Date.now()): string {
   purgeExpired(now);
   const capability = randomBytes(32).toString("base64url");
-  const contents = new Map<string, string>([["index.json", artifacts.indexJson]]);
+  const sources = new Map<string, string>([["index.json", artifacts.indexJson]]);
+  const contents = new Map<string, Buffer>();
   const descriptors = new Map<string, AnalyzerArtifactDescriptor>();
   const sourcePaths = new Map<string, string>();
-  for (const artifact of artifacts.sourceArtifacts) contents.set(artifact.relativePath, artifact.json);
+  for (const artifact of artifacts.sourceArtifacts) sources.set(artifact.relativePath, artifact.json);
   let bytes = 0;
   for (const descriptor of artifacts.descriptors) {
-    const content = contents.get(descriptor.relativePath);
-    if (content === undefined) throw new Error(`Missing analyzer artifact content: ${descriptor.relativePath}`);
-    if (Buffer.byteLength(content) !== descriptor.bytes) throw new Error(`Analyzer artifact byte count does not match descriptor: ${descriptor.relativePath}`);
-    if (sha256(content) !== descriptor.sha256) throw new Error(`Analyzer artifact digest does not match descriptor: ${descriptor.relativePath}`);
+    const source = sources.get(descriptor.relativePath);
+    if (source === undefined) throw new Error(`Missing analyzer artifact content: ${descriptor.relativePath}`);
+    const content = Buffer.from(source, "utf8");
+    if (content.byteLength !== descriptor.bytes) throw new Error(`Analyzer artifact byte count does not match descriptor: ${descriptor.relativePath}`);
+    if (createHash("sha256").update(content).digest("hex") !== descriptor.sha256) throw new Error(`Analyzer artifact digest does not match descriptor: ${descriptor.relativePath}`);
+    contents.set(descriptor.relativePath, content);
     bytes += descriptor.bytes;
     descriptors.set(descriptor.relativePath, descriptor);
     if (descriptor.sourcePath) sourcePaths.set(descriptor.sourcePath, descriptor.relativePath);
@@ -200,11 +204,10 @@ export function readAnalyzerArtifact(options: AnalyzerArtifactReadOptions, now =
   const relativePath = options.relativePath ?? entry.sourcePaths.get(options.sourcePath ?? "");
   if (!relativePath) throw new Error(`Unknown Sniff analyzer source path: ${options.sourcePath}`);
   const descriptor = entry.descriptors.get(relativePath);
-  const source = entry.contents.get(relativePath);
-  if (!descriptor || source === undefined) throw new Error(`Unknown Sniff analyzer artifact: ${relativePath}`);
+  const buffer = entry.contents.get(relativePath);
+  if (!descriptor || buffer === undefined) throw new Error(`Unknown Sniff analyzer artifact: ${relativePath}`);
   const offset = options.offset ?? 0;
   if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("Sniff analyzer artifact offset must be a non-negative integer");
-  const buffer = Buffer.from(source, "utf8");
   if (offset > buffer.length) throw new Error("Sniff analyzer artifact offset is beyond the artifact");
   if (offset < buffer.length && isContinuationByte(buffer[offset] ?? 0)) throw new Error("Sniff analyzer artifact offset must be a UTF-8 boundary");
   entry.expiresAt = Math.min(entry.createdAt + ANALYZER_ARTIFACT_MAX_AGE_MS, now + ANALYZER_ARTIFACT_TTL_MS);

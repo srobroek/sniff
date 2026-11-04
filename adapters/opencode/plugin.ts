@@ -333,7 +333,8 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
           const savedPaths = result.publicArtifacts.descriptors.flatMap((descriptor) => (descriptor.savedPath ? [descriptor.savedPath] : []));
           return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths } };
         } finally {
-          // A malformed report keeps its lease for a corrected retry; every other outcome ends it.
+          // Any failure before an artifact is written (validation, output directory, denied approval)
+          // keeps the lease for a corrected retry; only rendered or saved artifacts end it.
           // Liveness uses the recorded manifest ID: a call with a wrong ID must not drop ownership.
           const manifestId = owned.get(params.capability);
           if (manifestId !== undefined && !leaseIsLive(params.capability, manifestId)) owned.delete(params.capability);

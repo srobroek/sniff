@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
-import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
+import { recipeTargetSeparator, SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipe } from "./analyzer-recipes.ts";
 import { canonicalManifestJson, type RunManifest } from "./intake.ts";
 import { type SpawnedProcess, terminateAndAwait } from "./process-control.ts";
 import { type ResolvedTarget, type ResolvedTargetLease, targetFingerprint, validateResolvedTarget } from "./target.ts";
@@ -35,6 +35,8 @@ type LeaseRecord = {
   readonly releaseTarget: () => void;
   readonly reservations: Map<string, AnalyzerReservation>;
   readonly activeProcesses: Map<number, SpawnedProcess>;
+  /** The one in-flight report attempt; a second concurrent attempt on the same lease is rejected. */
+  reportClaim?: string;
   pendingRelease?: Promise<void>;
   expiryTimer?: NodeJS.Timeout;
 };
@@ -181,7 +183,7 @@ function authorizationFor(record: LeaseRecord, analyzer: string, reservationId: 
     reservationId,
     target,
     recipe,
-    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...(recipe.targetSeparator ?? ["--"]), ...operands] : [])],
+    argv: [...recipe.args, ...(recipe.scope === "scoped-files" ? [...recipeTargetSeparator(recipe), ...operands] : [])],
     operands,
     ...(record.manifest.budget.maxFiles !== undefined ? { maxFiles: record.manifest.budget.maxFiles } : {}),
     acceptedExitCodes: recipe.acceptedExitCodes,
@@ -196,33 +198,44 @@ export function issueRunLease(
   targetLease: ResolvedTargetLease,
   options: { readonly ttlMs?: number; readonly sandboxGrant?: string; readonly now?: () => number } = {},
 ): RunLeaseReceipt {
-  const canonicalManifest = canonicalManifestJson(manifest);
-  const target = validateResolvedTarget(targetLease.target);
-  if (canonicalManifestJson({ ...manifest, resolvedTarget: target }) !== canonicalManifest) {
-    targetLease.release();
-    throw new Error("Run manifest target does not match the materialized lease target");
-  }
-  const capability = randomBytes(32).toString("base64url");
   const now = options.now ?? Date.now;
-  const issuedAt = now();
-  const expiresAt = issuedAt + (options.ttlMs ?? LEASE_TTL_MS);
-  const home = mkdtempSync(join(tmpdir(), "sniff-run-home-"));
-  const record: LeaseRecord = {
-    capability,
-    manifestId: manifest.manifestId,
-    manifest,
-    canonicalManifest,
-    target,
-    targetIdentity: targetFingerprint(target),
-    issuedAt,
-    expiresAt,
-    now,
-    home,
-    ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
-    releaseTarget: targetLease.release,
-    reservations: new Map(),
-    activeProcesses: new Map(),
-  };
+  let home: string | undefined;
+  let record: LeaseRecord;
+  try {
+    const canonicalManifest = canonicalManifestJson(manifest);
+    const target = validateResolvedTarget(targetLease.target);
+    if (canonicalManifestJson({ ...manifest, resolvedTarget: target }) !== canonicalManifest) {
+      throw new Error("Run manifest target does not match the materialized lease target");
+    }
+    const issuedAt = now();
+    home = mkdtempSync(join(tmpdir(), "sniff-run-home-"));
+    record = {
+      capability: randomBytes(32).toString("base64url"),
+      manifestId: manifest.manifestId,
+      manifest,
+      canonicalManifest,
+      target,
+      targetIdentity: targetFingerprint(target),
+      issuedAt,
+      expiresAt: issuedAt + (options.ttlMs ?? LEASE_TTL_MS),
+      now,
+      home,
+      ...(options.sandboxGrant ? { sandboxGrant: options.sandboxGrant } : {}),
+      releaseTarget: targetLease.release,
+      reservations: new Map(),
+      activeProcesses: new Map(),
+    };
+  } catch (error) {
+    // Until the lease is registered nothing else owns the target or home, so every failure releases both.
+    if (home !== undefined) rmSync(home, { recursive: true, force: true });
+    try {
+      targetLease.release();
+    } catch {
+      // Preserve the issuance failure.
+    }
+    throw error;
+  }
+  const { capability, expiresAt } = record;
   activeLeases.set(capability, record);
   record.expiryTimer = setTimeout(() => {
     // Expiry is best-effort cleanup and must never crash the extension host.
@@ -301,6 +314,29 @@ export function completeAnalyzerReservation(capability: string, manifestId: stri
   reservation.state = "completed";
 }
 
+/**
+ * Takes the lease's one-shot reporting state before a report attempt awaits anything, so a second
+ * attempt with the same capability cannot race the first into producing two reports.
+ */
+export function beginRunReport(capability: string, manifestId: string): string {
+  const record = activeLease(capability, manifestId);
+  if (record.reportClaim !== undefined) throw new Error("A Sniff report is already in progress for this run capability");
+  const claim = randomBytes(16).toString("base64url");
+  record.reportClaim = claim;
+  return claim;
+}
+
+/** Throws unless the lease is still live and the report attempt still holds its claim, e.g. after a cancel while awaiting approval. */
+export function assertRunReport(capability: string, manifestId: string, claim: string): void {
+  if (activeLease(capability, manifestId).reportClaim !== claim) throw new Error("Sniff report attempt no longer holds this run capability");
+}
+
+/** Ends a report attempt that wrote nothing, keeping the lease for a corrected retry. */
+export function endRunReport(capability: string, manifestId: string, claim: string): void {
+  const record = activeLeases.get(capability);
+  if (record?.manifestId === manifestId && record.reportClaim === claim) record.reportClaim = undefined;
+}
+
 export function readRunManifest(capability: string, manifestId: string): RunManifest {
 	return activeLease(capability, manifestId).manifest;
 }
@@ -339,15 +375,12 @@ export function finalizeRunLease(capability: string, manifestId: string): Promis
   return record?.manifestId === manifestId ? releaseRecord(record, "released") : Promise.resolve();
 }
 
+/**
+ * Releases every active lease. Shutdown cleanup is best-effort: the promise settles only once every
+ * lease's children exited and its cleanup ran, and one failed release never cuts the others short.
+ */
 export function releaseAllRunLeases(reason: string): Promise<void> {
   const bounded = boundedReason(reason);
-  const pending: Promise<void>[] = [];
-  for (const record of [...activeLeases.values()]) {
-    try {
-      pending.push(releaseRecord(record, "cancelled", bounded));
-    } catch {
-      // Shutdown cleanup is best-effort; continue releasing every active lease.
-    }
-  }
-  return Promise.all(pending).then(() => undefined);
+  const pending = [...activeLeases.values()].map((record) => releaseRecord(record, "cancelled", bounded));
+  return Promise.allSettled(pending).then(() => undefined);
 }

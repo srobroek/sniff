@@ -7,6 +7,12 @@ export type SpawnedProcess = {
   readonly kill?: (signal: "SIGTERM" | "SIGKILL") => void;
 };
 
+/**
+ * Why a captured output stream is incomplete without having overflowed its byte limit:
+ * a descendant kept the pipe open after the child exited, so capture stopped before EOF.
+ */
+export type StreamIncompleteness = "descendant-held-pipe";
+
 /** Grace period between SIGTERM and SIGKILL for an analyzer process group. */
 export const TERMINATION_GRACE_MS = 100;
 

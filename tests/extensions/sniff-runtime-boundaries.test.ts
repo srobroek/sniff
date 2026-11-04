@@ -208,6 +208,52 @@ describe("adaptive runtime boundaries", () => {
     expect(() => releaseAllRunLeases("second shutdown")).not.toThrow();
   });
 
+  test("releases the materialized target whenever lease issuance fails", () => {
+    const root = mkdtempSync(join(tmpdir(), "sniff-issue-failure-"));
+    temporary.push(root);
+    writeFileSync(join(root, "a.ts"), "export {};\n");
+    const manifest = createRunManifest({ target: validateResolvedTarget({ kind: "files", label: "a.ts", root, files: ["a.ts"], materialization: "in-place" }), intent: "audit", scopeMode: "full" });
+    let releases = 0;
+    const release = () => {
+      releases += 1;
+    };
+    expect(() => issueRunLease(manifest, { target: { ...manifest.resolvedTarget, root: join(root, "missing") }, release })).toThrow();
+    expect(releases).toBe(1);
+    const previous = process.env.TMPDIR;
+    process.env.TMPDIR = join(root, "no-such-tmpdir");
+    try {
+      expect(() => issueRunLease(manifest, { target: manifest.resolvedTarget, release })).toThrow();
+    } finally {
+      if (previous === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous;
+    }
+    expect(releases).toBe(2);
+  });
+
+  test("shutdown waits for every lease even when another lease's release fails", async () => {
+    const failing = localLease({ onRelease: () => { throw new Error("release exploded"); } });
+    const busy = localLease();
+    const exit = Promise.withResolvers<number>();
+    const kill = vi.spyOn(process, "kill").mockImplementation((() => true) as typeof process.kill);
+    try {
+      registerActiveProcess(busy.lease.capability, busy.lease.manifestId, { pid: 98_765, exited: exit.promise });
+      let settled = false;
+      const shutdown = releaseAllRunLeases("SIGTERM: adapter shutdown").finally(() => {
+        settled = true;
+      });
+      await Bun.sleep(20);
+      expect(failing.releases()).toBe(1);
+      expect(settled).toBe(false);
+      expect(busy.releases()).toBe(0);
+      exit.resolve(0);
+      await expect(shutdown).resolves.toBeUndefined();
+      expect(busy.releases()).toBe(1);
+    } finally {
+      kill.mockRestore();
+      exit.resolve(0);
+    }
+  });
+
   test("registered headless intake applies host-authorized defaults and direct calls fail closed", async () => {
     const { root } = repository();
     type ToolOutput = { details: { ok: boolean; result?: SniffIntakePublicResult; error?: string } };
@@ -471,6 +517,15 @@ describe("adaptive runtime boundaries", () => {
     expect(separator).toBeGreaterThan(-1);
     expect(operand).toBeGreaterThan(separator);
     cancelRunLease(scoped.lease.capability, scoped.lease.manifestId);
+  });
+  test("keeps the operand separator in every shard of a sharded scoped-files run", async () => {
+    const sharded = localLease({ files: ["-a.py", "b.py"], budget: { maxFiles: 1 } });
+    const calls: AnalyzerCall[] = [];
+    const result = await runSniffAnalyzer({ capability: sharded.lease.capability, manifestId: sharded.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime(calls) });
+    expect(result.outcome).not.toBe("not-run");
+    const shards = calls.filter((call) => call.argv.includes("--csv"));
+    expect(shards.map((call) => call.argv.slice(-2))).toEqual([["--", "-a.py"], ["--", "b.py"]]);
+    await cancelRunLease(sharded.lease.capability, sharded.lease.manifestId);
   });
   test("authorizes gitleaks for local whole-repo targets only", async () => {
     const wholeRepo = localLease({ kind: "whole-repo" });
@@ -757,6 +812,66 @@ describe("adaptive runtime boundaries", () => {
     expect(rejectedResult.report).toContain("exit 2");
     expect(rejectedCalls.filter((call) => call.argv.includes("--csv"))).toHaveLength(1);
     await cancelRunLease(rejectedLease.lease.capability, rejectedLease.lease.manifestId);
+  });
+
+  test("classifies a crashed analyzer as a rejected exit and quotes a bounded stderr tail", async () => {
+    const crashed = localLease();
+    const base = analyzerRuntime([]);
+    const noise = "x".repeat(10_000);
+    const runtime = analyzerRuntime([], {
+      resolveCommand: base.resolveCommand,
+      run: async (argv, _cwd, _env, timeoutMs) => argv.includes("--csv")
+        ? { argv, exitCode: 2, stdout: "", stderr: `${noise}\nTraceback: lizard crashed with boom\n`, stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }
+        : { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs },
+    });
+    const result = await runSniffAnalyzer({ capability: crashed.lease.capability, manifestId: crashed.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    expect(result).toMatchObject({ ok: false, outcome: "rejected-exit" });
+    expect(result.report).toContain("exit 2 is outside");
+    expect(result.report).toContain("lizard crashed with boom");
+    expect(Buffer.byteLength(result.report)).toBeLessThan(2_048 + 512);
+    await cancelRunLease(crashed.lease.capability, crashed.lease.manifestId);
+  });
+
+  test("reports a descendant-held output pipe as incomplete output with an accurate reason", async () => {
+    const held = localLease();
+    const base = analyzerRuntime([]);
+    const runtime = analyzerRuntime([], {
+      resolveCommand: base.resolveCommand,
+      run: async (argv, _cwd, _env, timeoutMs) => argv.includes("--csv")
+        ? { argv, exitCode: 0, stdout: "NLOC,CCN,token,PARAM,length,location,file,function,long_name\n", stderr: "", stdoutTruncated: false, stderrTruncated: false, stdoutIncomplete: "descendant-held-pipe", outputLimitBytes: 1_048_576, timedOut: false, timeoutMs }
+        : { argv, exitCode: 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: false, timeoutMs },
+    });
+    const result = await runSniffAnalyzer({ capability: held.lease.capability, manifestId: held.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    expect(result).toMatchObject({ ok: false, outcome: "incomplete-output" });
+    expect(result.capture).toMatchObject({ incomplete: true, truncated: false });
+    expect(result.report).toContain("held open by a descendant process");
+    expect(result.report).not.toContain("exceeded");
+    await cancelRunLease(held.lease.capability, held.lease.manifestId);
+  });
+
+  test("words a timeout from the effective deadline", async () => {
+    const budgeted = localLease({ budget: { maxMinutes: 1 } });
+    const base = analyzerRuntime([]);
+    const runtime = analyzerRuntime([], {
+      resolveCommand: base.resolveCommand,
+      run: async (argv, _cwd, _env, timeoutMs) => ({ argv, exitCode: argv.includes("--csv") ? null : 0, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes: 1_048_576, timedOut: argv.includes("--csv"), timeoutMs }),
+    });
+    const result = await runSniffAnalyzer({ capability: budgeted.lease.capability, manifestId: budgeted.lease.manifestId, analyzer: "lizard:complexity", runtime });
+    expect(result).toMatchObject({ ok: false, outcome: "not-run" });
+    expect(result.report).toContain("maxMinutes");
+    expect(result.report).not.toContain("15 minute wall clock");
+    await cancelRunLease(budgeted.lease.capability, budgeted.lease.manifestId);
+  });
+
+  test("abandons the reservation when preflight throws so the analyzer can be retried", async () => {
+    const retry = localLease();
+    const throwing = analyzerRuntime([], { readLauncher: () => { throw new Error("launcher read exploded"); } });
+    const failed = await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: throwing });
+    expect(failed).toMatchObject({ ok: false, outcome: "not-run", preflight: null });
+    expect(failed.report).toContain("launcher read exploded");
+    const retried = await runSniffAnalyzer({ capability: retry.lease.capability, manifestId: retry.lease.manifestId, analyzer: "lizard:complexity", runtime: analyzerRuntime([]) });
+    expect(retried.ok).toBe(true);
+    await cancelRunLease(retry.lease.capability, retry.lease.manifestId);
   });
 
   test("draws every shard from one analyzer wall clock", async () => {

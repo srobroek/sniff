@@ -19,6 +19,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { type AnalyzerArtifactDescriptor, type AnalyzerObservationPreview, createAnalyzerArtifacts, projectAnalyzerObservations, publicAnalyzerDescriptors, registerAnalyzerArtifacts } from "./analyzer-artifact-registry.ts";
 import { type AnalyzerCapture, type AnalyzerObservation, type AnalyzerParseResult, mergeAnalyzerResults, parseAnalyzerOutput } from "./analyzer-output.ts";
+import { recipeTargetSeparator } from "./analyzer-recipes.ts";
 import {
   BUNDLES,
   type BundleName,
@@ -26,7 +27,7 @@ import {
   type ToolRec,
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
-import { processAlive, type SpawnedProcess, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
+import { processAlive, type SpawnedProcess, type StreamIncompleteness, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
 import {
   type AnalyzerRunAuthorization,
   abandonAnalyzerReservation,
@@ -64,8 +65,12 @@ export type CommandResult = {
 	exitCode: number | null;
 	stdout: string;
 	stderr: string;
+	/** The stream exceeded the byte limit and was cut at it. */
 	stdoutTruncated: boolean;
 	stderrTruncated: boolean;
+	/** The stream never reached EOF for a reason other than the byte limit. */
+	stdoutIncomplete?: StreamIncompleteness;
+	stderrIncomplete?: StreamIncompleteness;
 	outputLimitBytes: number;
 	timedOut: boolean;
 	signalCode?: string;
@@ -110,12 +115,29 @@ export type SniffInstallResult = {
 };
 
 
-async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES): Promise<{ text: string; truncated: boolean }> {
-	if (!stream) return { text: "", truncated: false };
+/** How long output may keep draining once the child exited; an escaped descendant can hold a pipe open indefinitely. */
+export const OUTPUT_DRAIN_MS = 250;
+
+/**
+ * Reads one output stream up to the byte limit. Once `abandon` settles before EOF, the reader is
+ * cancelled and the result is marked abandoned: the stream never closed, so the capture may be
+ * incomplete. Exactly one cancellation handler is installed per reader, so pending reactions never
+ * grow with the number of chunks read, retained or discarded.
+ */
+export async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, abandon?: Promise<void>): Promise<{ text: string; truncated: boolean; abandoned: boolean }> {
+	if (!stream) return { text: "", truncated: false, abandoned: false };
 	const reader = stream.getReader();
 	const chunks: Uint8Array[] = [];
 	let retained = 0;
 	let truncated = false;
+	let abandoned = false;
+	let finished = false;
+	abandon?.then(() => {
+		if (finished) return;
+		abandoned = true;
+		// Cancelling settles the pending read as done, which ends the loop below.
+		reader.cancel().catch(() => undefined);
+	});
 	try {
 		for (;;) {
 			const next = await reader.read();
@@ -128,8 +150,16 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 			}
 			if (retained >= outputLimitBytes && chunk.byteLength > 0) truncated = true;
 		}
+	} catch (error) {
+		// A read that a cancellation rejected is the abandonment itself, not a failure.
+		if (!abandoned) throw error;
 	} finally {
-		reader.releaseLock();
+		finished = true;
+		try {
+			reader.releaseLock();
+		} catch {
+			// A cancelled reader may still own a settling read.
+		}
 	}
 	const output = new Uint8Array(retained);
 	let offset = 0;
@@ -137,12 +167,12 @@ async function readBounded(stream: ReadableStream<Uint8Array> | null, outputLimi
 		output.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return { text: Buffer.from(output).toString("utf8"), truncated };
+	return { text: Buffer.from(output).toString("utf8"), truncated, abandoned };
 }
 
 
 
-async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult> {
+export async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, timeoutMs: number, signal?: AbortSignal, outputLimitBytes = COMMAND_OUTPUT_LIMIT_BYTES, onSpawn?: (spawned: SpawnedProcess) => void): Promise<CommandResult> {
 	if (signal?.aborted) {
 		return { argv, exitCode: null, stdout: "", stderr: "", stdoutTruncated: false, stderrTruncated: false, outputLimitBytes, timedOut: false, error: "operation aborted", timeoutMs };
 	}
@@ -150,23 +180,79 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 	onSpawn?.({ pid: proc.pid, exited: proc.exited, kill: (killSignal) => proc.kill(killSignal) });
 	let timedOut = false;
 	let aborted = false;
+	let reaped = false;
 	let forceKill: ReturnType<typeof setTimeout> | undefined;
+	let drainTimer: ReturnType<typeof setTimeout> | undefined;
+	let escalation: Promise<void> | undefined;
+	const drain = Promise.withResolvers<void>();
+	const groupAlive = (): boolean => {
+		try {
+			process.kill(-proc.pid, 0);
+			return true;
+		} catch (error) {
+			return (error as NodeJS.ErrnoException).code === "EPERM";
+		}
+	};
+	/**
+	 * Terminates the child's whole process group once: SIGTERM, then SIGKILL after the grace period.
+	 * Escalation is tracked apart from the leader's exit, so a same-group descendant that ignores
+	 * SIGTERM is still killed after the leader died. The group ID cannot be reused while any member
+	 * lives; a group found empty is never signalled. A descendant that called setsid left the group
+	 * and is out of reach by design; its held pipe is recorded as an abandoned capture instead.
+	 * Residual risk: between the last member exiting and a probe, the kernel could hand the numeric
+	 * ID to a new group, which requires the PID space to wrap within the grace window. An owned
+	 * supervisor that holds the group open would close this; the earlier unprobed signalling had the
+	 * same window, only longer.
+	 */
+	const terminateGroup = (): Promise<void> => {
+		if (escalation) return escalation;
+		if (reaped && !groupAlive()) {
+			escalation = Promise.resolve();
+			return escalation;
+		}
+		const escalated = Promise.withResolvers<void>();
+		escalation = escalated.promise;
+		terminateProcess(proc, "SIGTERM");
+		forceKill = setTimeout(() => {
+			if (!reaped || groupAlive()) terminateProcess(proc, "SIGKILL");
+			escalated.resolve();
+		}, TERMINATION_GRACE_MS);
+		return escalation;
+	};
+	// A timeout followed by an abort reuses the one escalation; it never schedules a second SIGKILL.
 	const stop = (reason: "timeout" | "abort") => {
+		if (reaped) {
+			// The child already exited; stop draining output a descendant may hold open.
+			drain.resolve();
+			return;
+		}
 		if (reason === "timeout") timedOut = true;
 		if (reason === "abort") aborted = true;
-		terminateProcess(proc, "SIGTERM");
-		forceKill = setTimeout(() => terminateProcess(proc, "SIGKILL"), TERMINATION_GRACE_MS);
+		clearTimeout(timeout);
+		void terminateGroup();
 	};
 	const timeout = setTimeout(() => stop("timeout"), timeoutMs);
 	const onAbort = () => stop("abort");
 	signal?.addEventListener("abort", onAbort, { once: true });
+	const exited = proc.exited.then((code) => {
+		reaped = true;
+		clearTimeout(timeout);
+		drainTimer = setTimeout(drain.resolve, OUTPUT_DRAIN_MS);
+		return code;
+	});
 	const [stdout, stderr, exitCode] = await Promise.all([
-		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes),
-		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes),
-		proc.exited,
+		readBounded(proc.stdout as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+		readBounded(proc.stderr as ReadableStream<Uint8Array>, outputLimitBytes, drain.promise),
+		exited,
 	]);
 	clearTimeout(timeout);
-	if (forceKill) clearTimeout(forceKill);
+	clearTimeout(drainTimer);
+	drain.resolve();
+	// A stream still open after the drain window means a descendant holds it; any still in the group is ours to end.
+	if (stdout.abandoned || stderr.abandoned) void terminateGroup();
+	// Once termination started, finish TERM→grace→KILL before returning so no group member outlives the call.
+	if (escalation) await escalation;
+	clearTimeout(forceKill);
 	signal?.removeEventListener("abort", onAbort);
 	return {
 		argv,
@@ -175,6 +261,8 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 		stderr: stderr.text,
 		stdoutTruncated: stdout.truncated,
 		stderrTruncated: stderr.truncated,
+		...(stdout.abandoned ? { stdoutIncomplete: "descendant-held-pipe" as const } : {}),
+		...(stderr.abandoned ? { stderrIncomplete: "descendant-held-pipe" as const } : {}),
 		outputLimitBytes,
 		timedOut,
 		error: aborted ? "operation aborted" : undefined,
@@ -182,6 +270,14 @@ async function runCommand(argv: string[], cwd: string, env: ProcessEnvironment, 
 		timeoutMs,
 	};
 }
+/** Install-log notes for a command whose captured output is bounded or incomplete. */
+function outputCaptureNotes(result: CommandResult): string[] {
+	const notes: string[] = [];
+	if (result.stdoutTruncated || result.stderrTruncated) notes.push(`      (output truncated at ${result.outputLimitBytes} bytes per stream)`);
+	if (result.stdoutIncomplete || result.stderrIncomplete) notes.push("      (output incomplete: a descendant process held the stream open after the command exited)");
+	return notes;
+}
+
 function resolveCommand(
 	bin: string,
 	cwd: string,
@@ -538,7 +634,7 @@ async function ensureRustToolchain(
 		const installed = await runtime.run(argv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
 		if (installed.stdout.trim()) lines.push(installed.stdout.trimEnd());
 		if (installed.stderr.trim()) lines.push(installed.stderr.trimEnd());
-		if (installed.stdoutTruncated || installed.stderrTruncated) lines.push(`      (output truncated at ${installed.outputLimitBytes} bytes per stream)`);
+		lines.push(...outputCaptureNotes(installed));
 		if (installed.exitCode !== 0 || installed.timedOut || installed.error) return installed;
 	}
 	if (!makeDefault || installedLine?.includes("default")) return null;
@@ -547,7 +643,7 @@ async function ensureRustToolchain(
 	const selected = await runtime.run(defaultArgv, directory, bootstrapEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (selected.stdout.trim()) lines.push(selected.stdout.trimEnd());
 	if (selected.stderr.trim()) lines.push(selected.stderr.trimEnd());
-	if (selected.stdoutTruncated || selected.stderrTruncated) lines.push(`      (output truncated at ${selected.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(selected));
 	return selected.exitCode !== 0 || selected.timedOut || selected.error ? selected : null;
 }
 
@@ -572,7 +668,7 @@ async function installUnmanagedTool(
 		return result;
 	}
 	const installEnvironment = environmentForTool(bundle, rec, environment, env, runtime);
-	const initial = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime);
+	const initial = await inspectTool(bundle, rec, true, probeCwd, installEnvironment, runtime, undefined, signal);
 	if (initial.status === "usable") {
 		lines.push(`  = ${rec.name} already installed (${initial.resolvedPath})`);
 		return initial;
@@ -590,7 +686,7 @@ async function installUnmanagedTool(
 		try {
 			const provisioned = await runtime.provisionOpenGrep({ cacheDir: env.SNIFF_OPENGREP_CACHE_DIR, signal });
 			lines.push(`  + OpenGrep ${provisioned.reused ? "reused verified cache" : "downloaded and cached"} (${provisioned.path})`);
-			const verifiedResult = await inspectTool(bundle, rec, true, probeCwd, env, runtime);
+			const verifiedResult = await inspectTool(bundle, rec, true, probeCwd, env, runtime, undefined, signal);
 			if (verifiedResult.status === "usable") return verifiedResult;
 			return failedInstallResult(verifiedResult, "installation-failed", undefined, verifiedResult.remediation || "OpenGrep cache verification failed");
 		} catch (error) {
@@ -623,7 +719,7 @@ async function installUnmanagedTool(
 	const install = await runtime.run(argv, probeCwd, installEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
-	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(install));
 	if (install.exitCode !== 0 || install.timedOut || install.error) {
 		const status = classifyInstallFailure(install);
 		lines.push(`      (${status}${install.exitCode === null ? "" : ` — exit ${install.exitCode}`})`);
@@ -688,7 +784,7 @@ async function prepareRustTargetToolchain(
 	const prepared = await runtime.run(argv, probeCwd, cargoEnvironment, INSTALL_TIMEOUT_MS, signal);
 	if (prepared.stdout.trim()) lines.push(prepared.stdout.trimEnd());
 	if (prepared.stderr.trim()) lines.push(prepared.stderr.trimEnd());
-	if (prepared.stdoutTruncated || prepared.stderrTruncated) lines.push(`      (output truncated at ${prepared.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(prepared));
 	if (prepared.exitCode !== 0 || prepared.timedOut || prepared.error) {
 		return {
 			status: classifyInstallFailure(prepared),
@@ -719,7 +815,7 @@ async function installMiseBundleUnlocked(
 	const initialEnvironment = await toolkitEnvironment(bundle, env, runtime, signal);
 	const initial: SniffToolResult[] = [];
 	for (const rec of records) {
-		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime));
+		initial.push(await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, initialEnvironment, env, runtime), runtime, undefined, signal));
 	}
   if (!dryRun && initial.every((result) => result.status === "usable") && existsSync(toolkitConfigPath(bundle, env, runtime))) return { results: initial };
 	const directory = toolkitDirectory(bundle, env, runtime);
@@ -761,7 +857,7 @@ async function installMiseBundleUnlocked(
 	const install = await runtime.run(["mise", "install"], directory, miseEnvironment, miseInstallTimeoutMs, signal);
 	if (install.stdout.trim()) lines.push(install.stdout.trimEnd());
 	if (install.stderr.trim()) lines.push(install.stderr.trimEnd());
-	if (install.stdoutTruncated || install.stderrTruncated) lines.push(`      (output truncated at ${install.outputLimitBytes} bytes per stream)`);
+	lines.push(...outputCaptureNotes(install));
 	const installStatus = install.exitCode !== 0 || install.timedOut || install.error
 		? classifyInstallFailure(install)
 		: undefined;
@@ -1023,6 +1119,18 @@ function gitleaksHistoryBound(args: readonly string[], window: HistoryWindow | u
   return logOpts ? { args: [...args, "--log-opts", logOpts], bounded: true } : { args: [...args], bounded: false };
 }
 
+/** Maximum UTF-8 bytes of analyzer stderr quoted in a failed run's report. */
+export const ANALYZER_STDERR_TAIL_BYTES = 2_048;
+
+function boundedStderrTail(stderr: string): string {
+	const trimmed = stderr.trim();
+	const bytes = Buffer.from(trimmed, "utf8");
+	if (bytes.byteLength <= ANALYZER_STDERR_TAIL_BYTES) return trimmed;
+	let start = bytes.byteLength - ANALYZER_STDERR_TAIL_BYTES;
+	while (start < bytes.byteLength && ((bytes[start] ?? 0) & 0xc0) === 0x80) start += 1;
+	return `…${bytes.subarray(start).toString("utf8")}`;
+}
+
 export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<SniffAnalyzerRunResult> {
 	let authorization: AnalyzerRunAuthorization;
 	try {
@@ -1049,18 +1157,27 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		abandon();
 		return { ok: false, report: "sniff analyzer policy contains an invalid exit contract", preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
-	const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
-	const toolkitScoped = usesToolkitEnvironment(catalog.rec);
-	const toolkit = toolkitScoped
-		? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
-		: { env: baseEnvironment, source: "process" as const };
-	if (toolkit.error) {
+	let env: ProcessEnvironment;
+	let preflight: SniffToolResult;
+	try {
+		const baseEnvironment = analyzerEnvironment(authorization.home, runtime);
+		const toolkitScoped = usesToolkitEnvironment(catalog.rec);
+		const toolkit = toolkitScoped
+			? await toolkitEnvironment(catalog.bundle, baseEnvironment, runtime, opts.signal, process.env.HOME)
+			: { env: baseEnvironment, source: "process" as const };
+		if (toolkit.error) {
+			abandon();
+			const unavailable = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
+			return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${unavailable.status}; ${unavailable.remediation}`, preflight: unavailable, acceptedExitCodes, outcome: "not-run" };
+		}
+		env = environmentForTool(catalog.bundle, catalog.rec, toolkit, baseEnvironment, runtime);
+		preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
+	} catch (error) {
+		// Nothing was spawned yet: a throwing preflight must not strand the one-shot reservation.
 		abandon();
-		const preflight = toolkitUnavailableResult(catalog.bundle, catalog.rec, true, toolkit.error);
-		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
+		const message = error instanceof Error ? error.message : String(error);
+		return { ok: false, report: `sniff analyzer preflight failed for ${authorization.recipe.tool}: ${message}`, preflight: null, acceptedExitCodes, outcome: "not-run" };
 	}
-	const env = environmentForTool(catalog.bundle, catalog.rec, toolkit, baseEnvironment, runtime);
-	const preflight = await inspectTool(catalog.bundle, catalog.rec, true, authorization.target.root, env, runtime, (path) => hostAnalyzerExecutable(path, authorization.target.root), opts.signal, true);
 	if (preflight.status !== "usable" || !preflight.resolvedPath) {
 		abandon();
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
@@ -1076,7 +1193,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
   const history = authorization.recipe.tool === "gitleaks"
     ? gitleaksHistoryBound(authorization.recipe.args, authorization.target.history?.capturedWindow ?? authorization.target.history?.window)
     : undefined;
-  const separator = "targetSeparator" in authorization.recipe ? [...(authorization.recipe.targetSeparator ?? [])] : ["--"];
+  const separator = recipeTargetSeparator(authorization.recipe);
   const batchSize = Math.max(1, authorization.maxFiles ?? DEFAULT_ANALYZER_SHARD_SIZE);
   const argvBatches: string[][] = authorization.recipe.scope === "scoped-files" && authorization.operands.length > batchSize
     ? Array.from({ length: Math.ceil(authorization.operands.length / batchSize) }, (_, index): string[] => [executable, ...(catalog.rec.runPrefix ?? []), ...authorization.recipe.args, ...separator, ...authorization.operands.slice(index * batchSize, (index + 1) * batchSize)])
@@ -1105,7 +1222,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
       // Each shard is evaluated and parsed alone so no shard can mask another's exit or truncation.
       batches.push({
         result,
-        parsed: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated),
+        parsed: parseAnalyzerOutput(authorization.recipe.tool, authorization.recipe.id, result.stdout, authorization.target.root, result.stdoutTruncated, result.stdoutIncomplete),
       });
       if (result.timedOut || result.error || result.exitCode === null || !acceptedExitCodes.includes(result.exitCode)) break;
     } catch (error) {
@@ -1132,27 +1249,34 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
     && (batches.length === argvBatches.length || rejected !== undefined);
   const incomplete = parsed?.capture.incomplete ?? false;
   const accepted = completed && !incomplete && rejected === undefined;
+  // A rejected exit outranks parse completeness: a crashed analyzer rarely leaves parseable output.
   const outcome: SniffAnalyzerOutcome = !completed
     ? "not-run"
-    : incomplete
-      ? "incomplete-output"
-      : accepted
-        ? exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings"
-        : "rejected-exit";
+    : rejected
+      ? "rejected-exit"
+      : incomplete
+        ? "incomplete-output"
+        : exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings";
   const artifacts = accepted && parsed ? createAnalyzerArtifacts(authorization.recipe.id, parsed.observations) : undefined;
   const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
   const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
   const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
   const historyNote = history && !history.bounded ? " (unbounded history scan)" : "";
+  const timeoutReason = authorization.remainingBudgetMs < ANALYZER_TIMEOUT_MS
+    ? `analyzer exhausted the run's remaining ${Math.max(1, Math.round(authorization.remainingBudgetMs / 1_000))}s budget (manifest maxMinutes or lease lifetime)`
+    : `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock`;
+  const deciding = rejected ?? batches.at(-1);
+  const stderrTail = accepted || !deciding ? "" : boundedStderrTail(deciding.result.stderr);
+  const diagnostics = stderrTail ? `; stderr tail: ${stderrTail}` : "";
   return {
     ok: accepted,
     report: !completed
-      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? runError ?? (timedOut ? `analyzer exceeded the ${ANALYZER_TIMEOUT_MS / 60_000} minute wall clock` : "no exit status")}`
-      : incomplete
-        ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}`
-        : accepted
-          ? `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${exitCode})${historyNote}`
-          : `sniff analyzer rejected ${opts.analyzer}: exit ${exitCode} is outside [${acceptedExitCodes.join(", ")}]`,
+      ? `sniff analyzer could not run ${opts.analyzer}: ${completionError ?? runError ?? (timedOut ? timeoutReason : "no exit status")}${diagnostics}`
+      : rejected
+        ? `sniff analyzer rejected ${opts.analyzer}: exit ${exitCode} is outside [${acceptedExitCodes.join(", ")}]${diagnostics}`
+        : incomplete
+          ? `sniff analyzer output was incomplete for ${opts.analyzer}: ${parsed?.capture.reason ?? "bounded capture exceeded"}${diagnostics}`
+          : `sniff analyzer ran ${opts.analyzer} with its issued fixed recipe (exit ${exitCode})${historyNote}`,
     preflight,
     acceptedExitCodes,
     outcome,
@@ -1172,17 +1296,25 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	const installCwd = runtime.neutralCwd ?? tmpdir();
 	const lines: string[] = [];
 	const tools: SniffToolResult[] = [];
+	// A tool inspected after an abort fails fast as unrunnable; the run as a whole reports the abort instead.
+	const aborted = (): boolean => opts.signal?.aborted === true;
+	const abortedResult = (): SniffInstallResult => ({ ok: false, report: [...lines, "", "operation aborted"].join("\n"), tools });
 	if (mode === "probe") {
 		lines.push("sniff tool probe (all tools optional; missing ones are skipped, not fatal)");
 		for (const bundle of BUNDLES) {
+			if (aborted()) return abortedResult();
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			const bundleResults: SniffToolResult[] = [];
 			for (const rec of TOOLS[bundle]) {
+				if (aborted()) {
+					tools.push(...bundleResults);
+					return abortedResult();
+				}
 				const toolkitScoped = usesToolkitEnvironment(rec);
 				bundleResults.push(environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, false, environment.error)
-					: await inspectTool(bundle, rec, false, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime));
+					: await inspectTool(bundle, rec, false, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime, undefined, opts.signal));
 			}
 			tools.push(...bundleResults);
 			for (const result of bundleResults) lines.push(probeLabel(result));
@@ -1190,6 +1322,7 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 			for (const result of bundleResults) counts.set(result.status, (counts.get(result.status) ?? 0) + 1);
 			lines.push(`  (${[...counts].map(([status, count]) => `${count} ${status}`).join(", ")})`);
 		}
+		if (aborted()) return abortedResult();
 		lines.push("", "Install a bundle with: sniff_install_tools mode=install bundles=[<bundle>]");
 		return { ok: true, report: lines.join("\n"), tools };
 	}
@@ -1209,23 +1342,27 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 	if (mode === "diagnose") {
 		lines.push("sniff bundle diagnostics (inventory only; does not authorize analyzer execution)");
 		for (const bundle of selected) {
+			if (aborted()) return abortedResult();
 			lines.push("", `[${bundle}]`);
 			const environment = await toolkitEnvironment(bundle, env, runtime, opts.signal);
 			for (const rec of TOOLS[bundle]) {
+				if (aborted()) return abortedResult();
 				const toolkitScoped = usesToolkitEnvironment(rec);
 				const result = environment.error && toolkitScoped
 					? toolkitUnavailableResult(bundle, rec, true, environment.error)
-					: await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime);
+					: await inspectTool(bundle, rec, true, probeCwd, environmentForTool(bundle, rec, environment, env, runtime), runtime, undefined, opts.signal);
 				tools.push(result);
 				lines.push(`  ${result.status.padEnd(22)} ${result.tool} path=${result.resolvedPath ?? "<unresolved>"}${result.status === "usable" ? "" : ` — ${result.remediation}`}`);
 			}
 		}
+		if (aborted()) return abortedResult();
 		const failures = tools.filter((result) => result.status !== "usable");
 		lines.push("", `diagnose: ${tools.length - failures.length} usable, ${failures.length} unavailable catalog entry/entries; use sniff_run_analyzer for authoritative per-run preflight`);
 		return { ok: failures.length === 0, report: lines.join("\n"), tools };
 	}
 	if (opts.dryRun) lines.push("(dry run — no changes will be made)");
 	for (const bundle of selected) {
+		if (aborted()) return abortedResult();
 		lines.push("", `[${bundle}]`);
 		const records = TOOLS[bundle];
 		const unmanagedByTool = new Map<string, SniffToolResult>();
@@ -1269,9 +1406,12 @@ export async function runSniffInstall(opts: SniffInstallOptions): Promise<SniffI
 		}
 		const managedByTool = new Map(managedResults.map((result) => [result.tool, result]));
 		for (const rec of records) {
-			tools.push(managedByTool.get(rec.name) ?? unmanagedByTool.get(rec.name) ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
+			const settled = managedByTool.get(rec.name) ?? unmanagedByTool.get(rec.name);
+			if (!settled && aborted()) return abortedResult();
+			tools.push(settled ?? await installUnmanagedTool(bundle, rec, probeCwd, installCwd, Boolean(opts.dryRun), env, runtime, lines, opts.signal));
 		}
 	}
+	if (aborted()) return abortedResult();
 	const failures = tools.filter((result) => result.status !== "usable");
 	if (opts.dryRun) {
 		lines.push("", "Dry run complete; no tool state changed.");

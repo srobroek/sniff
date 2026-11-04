@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +20,7 @@ import {
 } from "../../src/core/report.ts";
 import { MAX_REPORT_ARTIFACT_REGISTRY_BYTES, MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES, REPORT_ARTIFACT_IDLE_TTL_MS, REPORT_ARTIFACT_MAX_AGE_MS, readReportArtifact, registerReportArtifacts } from "../../src/core/report-artifact-registry.ts";
 import { runSniffReportTool } from "../../src/core/report-use-case.ts";
-import { issueRunLease } from "../../src/core/run-registry.ts";
+import { cancelRunLease, issueRunLease } from "../../src/core/run-registry.ts";
 import { validateResolvedTarget } from "../../src/core/target.ts";
 
 const temporaryDirectories: string[] = [];
@@ -150,6 +150,13 @@ describe("structured Sniff reports", () => {
     expect(first.findings[0]?.id).toBe(second.findings[0]?.id);
     expect(first.reportId).not.toBe(second.reportId);
     expect(first.reportId).toBe(later.reportId);
+  });
+
+  test("normalizes repeated leading ./ segments idempotently", () => {
+    const report = buildSniffReport(reportInput([finding({ location: { path: "././src/parser.ts", line: 42, anchor: "parseRequest" } })]));
+    expect(report.findings[0]?.location.path).toBe("src/parser.ts");
+    expect(report.findings[0]?.id).toBe(deterministicFindingId(finding()));
+    expect(deterministicFindingId(finding({ location: { path: ".\\./src/parser.ts", line: 42, anchor: "parseRequest" } }))).toBe(deterministicFindingId(finding()));
   });
 
   test("keeps evidence confidence independent from impact", () => {
@@ -460,6 +467,70 @@ describe("structured Sniff reports", () => {
   test("tool save mode rejects an absent output path", async () => {
     await expect(runSniffReportTool({ ...authorizedReport(), mode: "save" })).rejects.toThrow("mode=save requires path");
   });
+
+  test("keeps the run lease for a corrected retry after any save failure that wrote nothing", async () => {
+    const approve = { authorizeSave: async (request: { digest: string }) => ({ acceptedDigest: request.digest, actor: "test-authority" }) };
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-retry-"));
+    const outside = mkdtempSync(join(tmpdir(), "sniff-report-retry-outside-"));
+    temporaryDirectories.push(parent, outside);
+    symlinkSync(outside, join(parent, "linked"));
+    const raced = join(parent, "raced");
+    const failures: Array<[string, Partial<Parameters<typeof runSniffReportTool>[0]>]> = [
+      ["mode=save requires path", { mode: "save" }],
+      ["trusted save authorization boundary", { mode: "save", path: join(parent, "no-runtime") }],
+      ["cannot traverse a symlink", { mode: "save", path: join(parent, "linked", "reports"), runtime: approve }],
+      ["denied or mismatched", { mode: "save", path: join(parent, "denied"), runtime: { authorizeSave: async () => false } }],
+      ["already exists", { mode: "save", path: raced, runtime: { authorizeSave: async (request) => {
+        mkdirSync(join(raced, request.reportId), { recursive: true });
+        return { acceptedDigest: request.digest };
+      } } }],
+    ];
+    const request = authorizedReport();
+    for (const [message, overrides] of failures) {
+      await expect(runSniffReportTool({ ...request, ...overrides })).rejects.toThrow(message);
+    }
+    const saved = await runSniffReportTool({ ...request, mode: "save", path: join(parent, "corrected"), runtime: approve });
+    expect(saved.savedPaths).toHaveLength(7);
+    await expect(runSniffReportTool(request)).rejects.toThrow("already released");
+  });
+
+  test("rejects a concurrent report on the same lease while a save approval is pending", async () => {
+    const request = authorizedReport();
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-concurrent-"));
+    temporaryDirectories.push(parent);
+    const approval = Promise.withResolvers<void>();
+    const requested = Promise.withResolvers<void>();
+    const first = runSniffReportTool({ ...request, mode: "save", path: parent, runtime: { authorizeSave: async (save) => {
+      requested.resolve();
+      await approval.promise;
+      return { acceptedDigest: save.digest };
+    } } });
+    await requested.promise;
+    await expect(runSniffReportTool(request)).rejects.toThrow("already in progress");
+    await expect(runSniffReportTool({ ...request, mode: "save", path: parent, runtime: { authorizeSave: async (save) => ({ acceptedDigest: save.digest }) } })).rejects.toThrow("already in progress");
+    approval.resolve();
+    expect((await first).savedPaths).toHaveLength(7);
+    await expect(runSniffReportTool(request)).rejects.toThrow("already released");
+  });
+
+  test("a cancel while save approval is pending aborts the report without writing", async () => {
+    const request = authorizedReport();
+    const parent = mkdtempSync(join(tmpdir(), "sniff-report-cancelled-"));
+    temporaryDirectories.push(parent);
+    const destination = join(parent, "reports");
+    const approval = Promise.withResolvers<void>();
+    const requested = Promise.withResolvers<void>();
+    const pending = runSniffReportTool({ ...request, mode: "save", path: destination, runtime: { authorizeSave: async (save) => {
+      requested.resolve();
+      await approval.promise;
+      return { acceptedDigest: save.digest };
+    } } });
+    await requested.promise;
+    await cancelRunLease(request.capability, request.manifestId);
+    approval.resolve();
+    await expect(pending).rejects.toThrow("already cancelled");
+    expect(existsSync(destination)).toBe(false);
+  });
 	test("does not create a requested destination before save approval", async () => {
 		const parent = mkdtempSync(join(import.meta.dir, ".sniff-report-save-parent-"));
 		temporaryDirectories.push(parent);
@@ -581,6 +652,37 @@ describe("structured Sniff reports", () => {
     expect(pages).toBeGreaterThan(0);
     expect(content).toContain('"findings"');
     expect(createHash("sha256").update(content).digest("hex")).toBe(descriptor.sha256);
+  });
+
+  test("pages a report artifact without re-encoding it on every read", () => {
+    const findings = Array.from({ length: 2_000 }, (_, index) => finding({
+      stableKey: `test:encode-${index}`,
+      title: `界 Finding ${index}`,
+      location: { path: `src/file-${index}.ts`, line: index + 1, anchor: `anchor-${index}` },
+    }));
+    const artifacts = createReportArtifacts(buildSniffReport(reportInput(findings)));
+    const capability = registerReportArtifacts(artifacts);
+    const encode = spyOn(Buffer, "from");
+    let pages = 0;
+    let content = "";
+    try {
+      for (let offset = 0; ; ) {
+        const page = readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json", offset });
+        content += page.content;
+        pages += 1;
+        if (page.eof) {
+          const boundary = readReportArtifact({ capability, reportId: artifacts.report.reportId, relativePath: "report.json", offset: page.nextOffset });
+          expect(boundary).toMatchObject({ content: "", bytes: 0, eof: true, offset: page.nextOffset, nextOffset: page.nextOffset, totalBytes: page.totalBytes, sha256: page.sha256 });
+          break;
+        }
+        offset = page.nextOffset;
+      }
+      expect(pages).toBeGreaterThan(1);
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
+    expect(content).toBe(artifacts.json);
   });
 
   test("evicts the oldest reports once retained bytes exceed the registry budget", () => {

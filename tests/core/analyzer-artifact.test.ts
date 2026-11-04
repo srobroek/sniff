@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   ANALYZER_ARTIFACT_CHUNK_BYTES,
   ANALYZER_ARTIFACT_MAX_AGE_MS,
@@ -26,6 +26,29 @@ describe("analyzer artifact registry", () => {
     expect(Buffer.byteLength(JSON.stringify(preview.observations))).toBeLessThanOrEqual(96 * 1024);
     expect(publicAnalyzerDescriptors(artifacts).descriptorCount).toBe(3);
     expect(readAnalyzerArtifact({ capability, analyzerResultId: artifacts.analyzerResultId, relativePath: "index.json" }).content).toContain('"totalObservations": 11128');
+  });
+
+  test("pages an artifact without re-encoding it on every read", () => {
+    const observations = Array.from({ length: 4_000 }, (_, index) => ({ ...observation(index), message: `é finding ${index}` }));
+    const artifacts = createAnalyzerArtifacts("lizard:complexity", observations);
+    const capability = registerAnalyzerArtifacts(artifacts);
+    const encode = spyOn(Buffer, "from");
+    let pages = 0;
+    let content = "";
+    try {
+      for (let offset = 0; ; ) {
+        const page = readAnalyzerArtifact({ capability, analyzerResultId: artifacts.analyzerResultId, sourcePath: "src/example.ts", offset });
+        content += page.content;
+        pages += 1;
+        if (page.eof) break;
+        offset = page.nextOffset;
+      }
+      expect(pages).toBeGreaterThan(1);
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
+    expect(content).toBe(artifacts.sourceArtifacts[0]?.json ?? "");
   });
 
   test("supports source lookup and UTF-8-safe paging", () => {

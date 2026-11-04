@@ -189,8 +189,9 @@ function requireCondition(condition: boolean, message: string): asserts conditio
   if (!condition) throw new Error(`Invalid Sniff report: ${message}`);
 }
 
+/** Idempotent: every leading `./` is stripped, so a normalized path normalizes to itself. */
 function normalizePath(path: string): string {
-  return path.replaceAll("\\", "/").replace(/^\.\//, "");
+  return path.replaceAll("\\", "/").replace(/^(?:\.\/)+/, "");
 }
 
 function findingIdentity(finding: FindingInput): string {

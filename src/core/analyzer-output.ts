@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { ANALYZER_MAX_OBSERVATIONS } from "./analyzer-limits.ts";
 import { SNIFF_ANALYZER_RECIPES, type SniffAnalyzerRecipeId } from "./analyzer-recipes.ts";
 import { parseOpenGrepOutput } from "./opengrep.ts";
+import type { StreamIncompleteness } from "./process-control.ts";
 
-/** Maximum number of normalized observations retained from one analyzer run. */
-export const ANALYZER_MAX_OBSERVATIONS = 2_000;
+export { ANALYZER_MAX_OBSERVATIONS };
+
 /** Maximum UTF-8 bytes retained for one projected observation field. */
 const MAX_OBSERVATION_FIELD_BYTES = 8_192;
 
@@ -106,18 +108,37 @@ function field(value: unknown, state: ParseState, label: string): string | null 
 	return trimmed;
 }
 
-function normalizePath(targetRoot: string, value: string): string | null {
+type PathNormalizer = (value: string) => string | null;
+
+/**
+ * Builds the containment normaliser for one parse. The target root is canonicalized once and each
+ * distinct reported path is resolved once, so a large output never pays two blocking realpath
+ * calls per observation.
+ */
+function pathNormalizer(targetRoot: string): PathNormalizer {
+	let root: string | null | undefined;
+	const memo = new Map<string, string | null>();
+	return (value) => {
+		if (memo.has(value)) return memo.get(value) ?? null;
+		if (root === undefined) {
+			try {
+				root = realpathSync(resolve(targetRoot));
+			} catch {
+				root = null;
+			}
+		}
+		const normalized = root === null ? null : normalizePath(root, value);
+		memo.set(value, normalized);
+		return normalized;
+	};
+}
+
+function normalizePath(root: string, value: string): string | null {
 	if (!value || value.includes("\0")) return null;
 	const candidate = value.replaceAll("\\", "/");
 	// Windows drive and UNC paths are not native paths on the supported hosts.
 	// Treating one as a relative path would weaken the containment check.
 	if (/^[A-Za-z]:\//.test(candidate) || candidate.startsWith("//")) return null;
-	let root: string;
-	try {
-		root = realpathSync(resolve(targetRoot));
-	} catch {
-		return null;
-	}
 	const unresolved = isAbsolute(candidate) ? resolve(candidate) : resolve(root, candidate);
 	let absolute = unresolved;
 	try {
@@ -241,6 +262,7 @@ export function parseLizardOutput(stdout: string, targetRoot: string, truncated 
 	const expectedColumns = hasHeader ? header.length : 11;
 	const state: ParseState = { reasons: [] };
 	const observations: AnalyzerObservation[] = [];
+	const normalize = pathNormalizer(targetRoot);
 	for (const row of dataRows) {
 		if (row.length !== expectedColumns) {
 			addReason(state, "Lizard CSV contained a row with the wrong number of columns");
@@ -257,7 +279,7 @@ export function parseLizardOutput(stdout: string, targetRoot: string, truncated 
 		const pathValue = field(row[indexes.file], state, "file");
 		const functionName = field(row[indexes.function], state, "function");
 		if (ccn === null || nloc === null || params === null || length === null || line === null || !pathValue || functionName === null) continue;
-		const path = normalizePath(targetRoot, pathValue);
+		const path = normalize(pathValue);
 		if (!path) {
 			addReason(state, "Lizard finding path escaped the authorized target root");
 			continue;
@@ -296,6 +318,7 @@ export function parseGitleaksOutput(stdout: string, targetRoot: string, truncate
 	if (!findings) return incompleteResult(stdout, false, "Gitleaks JSON did not contain a findings array");
 	const state: ParseState = { reasons: findings.length > ANALYZER_MAX_OBSERVATIONS ? [`Gitleaks observations exceeded the bounded limit of ${ANALYZER_MAX_OBSERVATIONS.toLocaleString("en-US")}`] : [] };
 	const observations: AnalyzerObservation[] = [];
+	const normalize = pathNormalizer(targetRoot);
 	for (const candidate of findings) {
 		if (observations.length >= ANALYZER_MAX_OBSERVATIONS) break;
 		if (!isRecord(candidate)) {
@@ -312,7 +335,7 @@ export function parseGitleaksOutput(stdout: string, targetRoot: string, truncate
 		const message = field(description || sourceMessage || ruleId || "Gitleaks finding", state, "message");
 		const severity = field(finding.Severity ?? finding.severity ?? "HIGH", state, "severity");
 		if (!ruleId || !pathValue || line === null || column === null || !message || !severity) continue;
-		const path = normalizePath(targetRoot, pathValue);
+		const path = normalize(pathValue);
 		if (!path) {
 			addReason(state, "Gitleaks finding path escaped the authorized target root");
 			continue;
@@ -330,6 +353,7 @@ export function parseSarifOutput(stdout: string, targetRoot: string, truncated =
   if (!isRecord(payload) || !Array.isArray(payload.runs)) return incompleteResult(stdout, false, "SARIF JSON did not contain a runs array");
   const state: ParseState = { reasons: [] };
   const observations: AnalyzerObservation[] = [];
+  const normalize = pathNormalizer(targetRoot);
   for (const run of payload.runs) {
     if (!isRecord(run) || !Array.isArray(run.results)) { addReason(state, "SARIF run did not contain a results array"); continue; }
     for (const candidate of run.results) {
@@ -349,7 +373,7 @@ export function parseSarifOutput(stdout: string, targetRoot: string, truncated =
       const message = field(messageRecord?.text, state, "message");
       const severity = candidate.level === "error" ? "HIGH" : candidate.level === "warning" ? "MEDIUM" : candidate.level === "note" || candidate.level === "none" ? "LOW" : "MEDIUM";
       if (!ruleId || !uri || line === null || column === null || !message) continue;
-      const path = normalizePath(targetRoot, uri.replace(/^file:\/\//, ""));
+      const path = normalize(uri.replace(/^file:\/\//, ""));
       if (!path) { addReason(state, "SARIF finding path escaped the authorized target root"); continue; }
       observations.push({ ruleId, path, start: { line, column }, message, severity });
     }
@@ -362,7 +386,17 @@ function isSniffAnalyzerRecipeId(value: string): value is SniffAnalyzerRecipeId 
   return value in SNIFF_ANALYZER_RECIPES;
 }
 
-export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false): AnalyzerParseResult {
+const INCOMPLETENESS_REASONS: Record<StreamIncompleteness, string> = {
+  "descendant-held-pipe": "Analyzer output stream was still held open by a descendant process after the analyzer exited, so capture stopped before end of output",
+};
+
+/**
+ * Parses one analyzer run's stdout. `truncated` means the byte limit cut the capture; `incomplete`
+ * names any other reason the stream never reached EOF. Either makes the capture incomplete, each
+ * with its own reason, so a small valid output is never reported as a capture-limit overflow.
+ */
+export function parseAnalyzerOutput(tool: string, recipeId: string, stdout: string, targetRoot: string, truncated = false, incomplete?: StreamIncompleteness): AnalyzerParseResult {
+  if (incomplete !== undefined && !truncated) return incompleteResult(stdout, false, INCOMPLETENESS_REASONS[incomplete]);
   if (!isSniffAnalyzerRecipeId(recipeId)) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
   const recipe = SNIFF_ANALYZER_RECIPES[recipeId];
   if (recipe.tool !== tool) return incompleteResult(stdout, truncated, `No bounded parser is registered for analyzer recipe ${recipeId}`);
