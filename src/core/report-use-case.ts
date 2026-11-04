@@ -16,6 +16,7 @@ import {
 } from "./report.ts";
 import { registerReportArtifacts } from "./report-artifact-registry.ts";
 import { type OpenedReportDirectory, openReportDirectory } from "./report-native-persistence.ts";
+import type { SniffRunOwner } from "./run-owner.ts";
 import { assertRunReport, beginRunReport, endRunReport, finalizeRunLease, readRunManifest, validateReportCoverage, validateReportManifest } from "./run-registry.ts";
 
 export type SniffReportMode = "render" | "save";
@@ -39,6 +40,8 @@ export type SniffReportRuntime = {
 };
 export interface SniffReportToolOptions {
   capability: string;
+  /** The owner that issued the capability; omitted, the capability resolves in the unscoped host view. */
+  owner?: SniffRunOwner;
   manifestId: string;
   mode?: SniffReportMode;
   report: ReportInput;
@@ -103,18 +106,19 @@ function saveDigest(request: Omit<SaveAuthorizationRequest, "digest">): string {
  * directory, denied approval, failed write) keeps the lease for a corrected retry.
  */
 export async function runSniffReportTool(options: SniffReportToolOptions): Promise<SniffReportToolResult> {
-  const claim = beginRunReport(options.capability, options.manifestId);
+  const { owner } = options;
+  const claim = beginRunReport(options.capability, options.manifestId, owner);
   let finalizeLease = false;
   try {
-    const manifest = readRunManifest(options.capability, options.manifestId);
+    const manifest = readRunManifest(options.capability, options.manifestId, owner);
     const suppliedExtensions = options.report.extensions;
     if (suppliedExtensions !== undefined && (suppliedExtensions === null || typeof suppliedExtensions !== "object" || Array.isArray(suppliedExtensions))) {
       throw new Error("sniff report extensions must be an object");
     }
     const suppliedManifest = suppliedExtensions?.["sniff.intake"];
-    if (suppliedManifest !== undefined) validateReportManifest(options.capability, options.manifestId, suppliedManifest);
+    if (suppliedManifest !== undefined) validateReportManifest(options.capability, options.manifestId, suppliedManifest, owner);
     validateFindingPaths(manifest, options.report);
-    validateReportCoverage(options.capability, options.manifestId, options.report.coverage);
+    validateReportCoverage(options.capability, options.manifestId, options.report.coverage, owner);
     if (options.mode === "save" && !options.path?.trim()) throw new Error("sniff_report mode=save requires path");
     const report = buildSniffReport({
       ...options.report,
@@ -123,7 +127,7 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
     });
     const artifacts = createReportArtifacts(report);
     if (options.mode !== "save") {
-      const readCapability = registerReportArtifacts(artifacts);
+      const readCapability = registerReportArtifacts(artifacts, undefined, owner);
       finalizeLease = true;
       return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, [], readCapability), savedPaths: [] };
     }
@@ -145,17 +149,17 @@ export async function runSniffReportTool(options: SniffReportToolOptions): Promi
       const request = { ...unsigned, digest: saveDigest(unsigned) };
       const approval = await options.runtime.authorizeSave(request);
       // A cancel or expiry while approval was pending ended the run; nothing may be written for it.
-      assertRunReport(options.capability, options.manifestId, claim);
+      assertRunReport(options.capability, options.manifestId, claim, owner);
       if (!approval || approval.acceptedDigest !== request.digest) throw new Error("Sniff report save authorization was denied or mismatched");
       const savedPaths = saveReportArtifactsAt(artifacts, planned.opened);
       finalizeLease = true;
-      const readCapability = registerReportArtifacts(artifacts);
+      const readCapability = registerReportArtifacts(artifacts, undefined, owner);
       return { artifacts, publicArtifacts: projectReportArtifacts(artifacts, savedPaths, readCapability), savedPaths };
     } finally {
       planned.opened.close();
     }
   } finally {
-    if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId);
-    else endRunReport(options.capability, options.manifestId, claim);
+    if (finalizeLease) await finalizeRunLease(options.capability, options.manifestId, owner);
+    else endRunReport(options.capability, options.manifestId, claim, owner);
   }
 }

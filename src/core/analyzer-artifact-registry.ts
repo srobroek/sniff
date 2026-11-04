@@ -1,11 +1,13 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { AnalyzerObservation } from "./analyzer-output.ts";
 import { canonicalJson, compareCodeUnits as compareText } from "./canonical-json.ts";
+import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, type SniffRunOwner } from "./run-owner.ts";
 
 export const ANALYZER_ARTIFACT_SCHEMA_VERSION = "1.0.0" as const;
 export const ANALYZER_ARTIFACT_CHUNK_BYTES = 64 * 1024;
 export const ANALYZER_ARTIFACT_TTL_MS = 30 * 60 * 1_000;
 export const ANALYZER_ARTIFACT_MAX_AGE_MS = 4 * 60 * 60 * 1_000;
+/** Per-owner entry and byte budgets: one owner's registrations never evict another's. */
 export const MAX_ANALYZER_ARTIFACT_REGISTRY_ENTRIES = 32;
 export const MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES = 32 * 1024 * 1024;
 export const MAX_PUBLIC_ANALYZER_DESCRIPTORS = 128;
@@ -85,6 +87,9 @@ export interface AnalyzerArtifactReadResult {
 }
 
 interface RegisteredAnalyzer {
+  readonly owner: SniffRunOwner;
+  /** The owning bucket, which tracks this owner's budget and eviction order. */
+  readonly bucket: OwnerAnalyzers;
   readonly analyzerResultId: string;
   /** UTF-8 bytes encoded once at registration, so paging never re-encodes the artifact. */
   readonly contents: ReadonlyMap<string, Buffer>;
@@ -95,7 +100,32 @@ interface RegisteredAnalyzer {
   expiresAt: number;
 }
 
+type OwnerAnalyzers = OwnerResource & { readonly entries: Map<string, RegisteredAnalyzer>; bytes: number };
+
+/** Every registered analyzer result by capability; each entry names its owner and lives in that owner's bucket. */
 const analyzers = new Map<string, RegisteredAnalyzer>();
+const OWNER_ANALYZERS = Symbol("sniff.analyzer-artifacts");
+
+function ownerAnalyzers(owner: SniffRunOwner): OwnerAnalyzers {
+  return ownerResource(owner, OWNER_ANALYZERS, (): OwnerAnalyzers => {
+    const bucket: OwnerAnalyzers = {
+      entries: new Map(),
+      bytes: 0,
+      dispose: () => {
+        for (const capability of [...bucket.entries.keys()]) forget(capability);
+      },
+    };
+    return bucket;
+  });
+}
+
+function forget(capability: string): void {
+  const entry = analyzers.get(capability);
+  if (!entry) return;
+  analyzers.delete(capability);
+  entry.bucket.entries.delete(capability);
+  entry.bucket.bytes -= entry.bytes;
+}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -139,16 +169,12 @@ export function createAnalyzerArtifacts(recipeId: string, observations: readonly
 }
 
 function purgeExpired(now = Date.now()): void {
-  for (const [capability, entry] of analyzers) if (entry.expiresAt <= now || entry.createdAt + ANALYZER_ARTIFACT_MAX_AGE_MS <= now) analyzers.delete(capability);
+  for (const [capability, entry] of analyzers) if (entry.expiresAt <= now || entry.createdAt + ANALYZER_ARTIFACT_MAX_AGE_MS <= now) forget(capability);
 }
 
-function retainedBytes(): number {
-  let bytes = 0;
-  for (const entry of analyzers.values()) bytes += entry.bytes;
-  return bytes;
-}
-
-export function registerAnalyzerArtifacts(artifacts: AnalyzerArtifacts, now = Date.now()): string {
+/** Registers artifacts under `owner` (the process owner when omitted) and returns their read capability. */
+export function registerAnalyzerArtifacts(artifacts: AnalyzerArtifacts, now = Date.now(), owner?: SniffRunOwner): string {
+  const issuer = issuingOwner(owner);
   purgeExpired(now);
   const capability = randomBytes(32).toString("base64url");
   const sources = new Map<string, string>([["index.json", artifacts.indexJson]]);
@@ -169,11 +195,15 @@ export function registerAnalyzerArtifacts(artifacts: AnalyzerArtifacts, now = Da
     if (descriptor.sourcePath) sourcePaths.set(descriptor.sourcePath, descriptor.relativePath);
   }
   if (bytes > MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES) throw new Error("Analyzer artifacts exceed registry byte budget");
-  analyzers.set(capability, { analyzerResultId: artifacts.analyzerResultId, contents, descriptors, sourcePaths, bytes, createdAt: now, expiresAt: now + ANALYZER_ARTIFACT_TTL_MS });
-  while (analyzers.size > MAX_ANALYZER_ARTIFACT_REGISTRY_ENTRIES || retainedBytes() > MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES) {
-    const oldest = analyzers.keys().next().value;
+  const bucket = ownerAnalyzers(issuer);
+  const entry: RegisteredAnalyzer = { owner: issuer, bucket, analyzerResultId: artifacts.analyzerResultId, contents, descriptors, sourcePaths, bytes, createdAt: now, expiresAt: now + ANALYZER_ARTIFACT_TTL_MS };
+  analyzers.set(capability, entry);
+  bucket.entries.set(capability, entry);
+  bucket.bytes += bytes;
+  while (bucket.entries.size > MAX_ANALYZER_ARTIFACT_REGISTRY_ENTRIES || bucket.bytes > MAX_ANALYZER_ARTIFACT_REGISTRY_BYTES) {
+    const oldest = bucket.entries.keys().next().value;
     if (typeof oldest !== "string") break;
-    analyzers.delete(oldest);
+    forget(oldest);
   }
   return capability;
 }
@@ -181,10 +211,15 @@ export function registerAnalyzerArtifacts(artifacts: AnalyzerArtifacts, now = Da
 function isContinuationByte(value: number): boolean {
   return (value & 0xc0) === 0x80;
 }
-export function readAnalyzerArtifact(options: AnalyzerArtifactReadOptions, now = Date.now()): AnalyzerArtifactReadResult {
+/**
+ * Reads one page through `owner`. Another owner's capability fails exactly like an unknown one;
+ * omitting the owner is the trusted unscoped host view.
+ */
+export function readAnalyzerArtifact(options: AnalyzerArtifactReadOptions, now = Date.now(), owner?: SniffRunOwner): AnalyzerArtifactReadResult {
+  assertUsableOwner(owner);
   purgeExpired(now);
   const entry = analyzers.get(options.capability);
-  if (!entry) throw new Error("Unknown Sniff analyzer artifact capability");
+  if (!entry || (owner !== undefined && entry.owner !== owner)) throw new Error("Unknown Sniff analyzer artifact capability");
   if (entry.analyzerResultId !== options.analyzerResultId) throw new Error("Sniff analyzer artifact capability does not match analyzer result ID");
   const relativePath = options.relativePath ?? entry.sourcePaths.get(options.sourcePath ?? "");
   if (!relativePath) throw new Error(`Unknown Sniff analyzer source path: ${options.sourcePath}`);
@@ -221,5 +256,5 @@ export function publicAnalyzerDescriptors(artifacts: AnalyzerArtifacts): Analyze
 }
 
 export function clearAnalyzerArtifactRegistryForTests(): void {
-  analyzers.clear();
+  for (const capability of [...analyzers.keys()]) forget(capability);
 }

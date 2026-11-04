@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { canonicalJson } from "./canonical-json.ts";
 import type { ReportArtifactDescriptor, ReportArtifacts } from "./report.ts";
+import { assertUsableOwner, issuingOwner, type OwnerResource, ownerResource, type SniffRunOwner } from "./run-owner.ts";
 
 export const REPORT_ARTIFACT_CHUNK_BYTES = 64 * 1024;
+/** Per-owner entry and byte budgets: one owner's registrations never evict another's. */
 export const MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES = 32;
 export const MAX_REPORT_ARTIFACT_REGISTRY_BYTES = 32 * 1024 * 1024;
 export const REPORT_ARTIFACT_IDLE_TTL_MS = 30 * 60 * 1_000;
@@ -28,6 +30,9 @@ export interface ReportArtifactReadResult {
 }
 
 type RegisteredReport = {
+  readonly owner: SniffRunOwner;
+  /** The owning bucket, which tracks this owner's budget and eviction order. */
+  readonly bucket: OwnerReports;
   readonly reportId: string;
   /** UTF-8 bytes encoded once at registration, so paging never re-encodes the artifact. */
   readonly contents: ReadonlyMap<string, Buffer>;
@@ -37,16 +42,35 @@ type RegisteredReport = {
   expiresAt: number;
 };
 
-const reports = new Map<string, RegisteredReport>();
+type OwnerReports = OwnerResource & { readonly entries: Map<string, RegisteredReport>; bytes: number };
 
-function purgeExpired(now: number): void {
-  for (const [capability, entry] of reports) if (entry.expiresAt <= now || entry.createdAt + REPORT_ARTIFACT_MAX_AGE_MS <= now) reports.delete(capability);
+/** Every registered report by capability; each entry names its owner and lives in that owner's bucket. */
+const reports = new Map<string, RegisteredReport>();
+const OWNER_REPORTS = Symbol("sniff.report-artifacts");
+
+function ownerReports(owner: SniffRunOwner): OwnerReports {
+  return ownerResource(owner, OWNER_REPORTS, (): OwnerReports => {
+    const bucket: OwnerReports = {
+      entries: new Map(),
+      bytes: 0,
+      dispose: () => {
+        for (const capability of [...bucket.entries.keys()]) forget(capability);
+      },
+    };
+    return bucket;
+  });
 }
 
-function retainedBytes(): number {
-  let bytes = 0;
-  for (const entry of reports.values()) bytes += entry.bytes;
-  return bytes;
+function forget(capability: string): void {
+  const entry = reports.get(capability);
+  if (!entry) return;
+  reports.delete(capability);
+  entry.bucket.entries.delete(capability);
+  entry.bucket.bytes -= entry.bytes;
+}
+
+function purgeExpired(now: number): void {
+  for (const [capability, entry] of reports) if (entry.expiresAt <= now || entry.createdAt + REPORT_ARTIFACT_MAX_AGE_MS <= now) forget(capability);
 }
 
 function contentsFor(artifacts: ReportArtifacts): Map<string, string> {
@@ -61,7 +85,9 @@ function contentsFor(artifacts: ReportArtifacts): Map<string, string> {
   for (const file of artifacts.fileArtifacts) contents.set(file.relativePath, file.json);
   return contents;
 }
-export function registerReportArtifacts(artifacts: ReportArtifacts, now = Date.now()): string {
+/** Registers artifacts under `owner` (the process owner when omitted) and returns their read capability. */
+export function registerReportArtifacts(artifacts: ReportArtifacts, now = Date.now(), owner?: SniffRunOwner): string {
+  const issuer = issuingOwner(owner);
   purgeExpired(now);
   const capability = randomBytes(32).toString("base64url");
   const descriptors = new Map(artifacts.descriptors.map((descriptor) => [descriptor.relativePath, descriptor] as const));
@@ -78,11 +104,15 @@ export function registerReportArtifacts(artifacts: ReportArtifacts, now = Date.n
     bytes += descriptor.bytes;
   }
   if (bytes > MAX_REPORT_ARTIFACT_REGISTRY_BYTES) throw new Error("Report artifacts exceed registry byte budget");
-  reports.set(capability, { reportId: artifacts.report.reportId, contents, descriptors, bytes, createdAt: now, expiresAt: now + REPORT_ARTIFACT_IDLE_TTL_MS });
-  while (reports.size > MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES || retainedBytes() > MAX_REPORT_ARTIFACT_REGISTRY_BYTES) {
-    const oldest = reports.keys().next().value;
+  const bucket = ownerReports(issuer);
+  const entry: RegisteredReport = { owner: issuer, bucket, reportId: artifacts.report.reportId, contents, descriptors, bytes, createdAt: now, expiresAt: now + REPORT_ARTIFACT_IDLE_TTL_MS };
+  reports.set(capability, entry);
+  bucket.entries.set(capability, entry);
+  bucket.bytes += bytes;
+  while (bucket.entries.size > MAX_REPORT_ARTIFACT_REGISTRY_ENTRIES || bucket.bytes > MAX_REPORT_ARTIFACT_REGISTRY_BYTES) {
+    const oldest = bucket.entries.keys().next().value;
     if (typeof oldest !== "string") break;
-    reports.delete(oldest);
+    forget(oldest);
   }
   return capability;
 }
@@ -91,10 +121,15 @@ function isContinuationByte(value: number): boolean {
   return (value & 0xc0) === 0x80;
 }
 
-export function readReportArtifact(options: ReportArtifactReadOptions, now = Date.now()): ReportArtifactReadResult {
+/**
+ * Reads one page through `owner`. Another owner's capability fails exactly like an unknown one;
+ * omitting the owner is the trusted unscoped host view.
+ */
+export function readReportArtifact(options: ReportArtifactReadOptions, now = Date.now(), owner?: SniffRunOwner): ReportArtifactReadResult {
+  assertUsableOwner(owner);
   purgeExpired(now);
   const entry = reports.get(options.capability);
-  if (!entry) throw new Error("Unknown Sniff report artifact capability");
+  if (!entry || (owner !== undefined && entry.owner !== owner)) throw new Error("Unknown Sniff report artifact capability");
   if (entry.reportId !== options.reportId) throw new Error("Sniff report artifact capability does not match report ID");
   const descriptor = entry.descriptors.get(options.relativePath);
   const buffer = entry.contents.get(options.relativePath);
@@ -123,5 +158,5 @@ export function readReportArtifact(options: ReportArtifactReadOptions, now = Dat
 }
 
 export function clearReportArtifactRegistryForTests(): void {
-  reports.clear();
+  for (const capability of [...reports.keys()]) forget(capability);
 }

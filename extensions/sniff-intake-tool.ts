@@ -8,12 +8,14 @@ import {
 	runSniffIntakeTool,
 	type SniffIntakePublicResult,
 } from "../src/core/intake-use-case.ts";
+import type { SniffRunOwner } from "../src/core/run-owner.ts";
 import { cancelRunLease } from "../src/core/run-registry.ts";
 import { sniffIntakeApproval, sniffToolInputSchemas } from "../src/core/tool-schemas.ts";
 import { UNATTENDED_INTAKE_REASON, UNATTENDED_INTAKE_REQUIRED_MESSAGE, unattendedIntakeAllowed } from "../src/core/unattended.ts";
 
-function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): SniffIntakeRuntime {
+function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean, owner: SniffRunOwner | undefined): SniffIntakeRuntime {
 	return {
+		owner,
 		confirmInteractive: async (request) => {
 			if (!ctx.hasUI) return false;
 			const approved = await ctx.ui.confirm("Confirm Sniff intake", confirmationMessage(request));
@@ -32,7 +34,8 @@ function runtimeForContext(ctx: ExtensionContext, hostAuthorized: boolean): Snif
 	};
 }
 
-export default function sniffIntakeTool(pi: ExtensionAPI): void {
+/** Registers intake and cancel; `owner` scopes the runs. Omitted, leases go to the process owner and cancel uses the unscoped view. */
+export default function sniffIntakeTool(pi: ExtensionAPI, owner?: SniffRunOwner): void {
 	pi.registerTool<TSchema, { readonly ok: boolean; readonly result?: SniffIntakePublicResult; readonly error?: string }>({
 		name: "sniff_intake",
 		label: "Sniff adaptive intake",
@@ -41,7 +44,7 @@ export default function sniffIntakeTool(pi: ExtensionAPI): void {
 		parameters: sniffToolInputSchemas.sniff_intake as unknown as TSchema,
 		execute: async (_id, params: { input: unknown }, _signal, _onUpdate, ctx) => {
 			try {
-				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, unattendedIntakeAllowed()));
+				const result = await runSniffIntakeTool({ input: intakeInput(params.input) }, runtimeForContext(ctx, unattendedIntakeAllowed(), owner));
 				const publicResult = publicSniffIntakeResult(result);
 				return { content: [{ type: "text", text: JSON.stringify(publicResult) }], details: { ok: true, result: publicResult } };
 			} catch (error) {
@@ -59,7 +62,7 @@ export default function sniffIntakeTool(pi: ExtensionAPI): void {
 		parameters: sniffToolInputSchemas.sniff_cancel as unknown as TSchema,
 		execute: async (_id, params: { capability: string; manifestId: string }) => {
 			try {
-				await cancelRunLease(params.capability, params.manifestId);
+				await cancelRunLease(params.capability, params.manifestId, owner);
 				return { content: [{ type: "text", text: "Sniff run cancelled and materialization released." }], details: { ok: true } };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

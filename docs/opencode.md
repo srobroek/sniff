@@ -93,7 +93,7 @@ One OpenCode server serves many projects, so Sniff never uses the server's worki
 - A relative target `root` resolves against the session's directory. A relative `rootOrRepository` or `repository` does so only when it names an existing local path.
 - A relative report save `path` also resolves against the session's directory.
 - `sniff_install_tools` probes from the session's directory unless `path` is given. In `install` mode it rejects `path`.
-- Run leases are bearer capabilities. When the plugin unloads for a project, it releases only the leases it issued.
+- Each plugin instance owns its runs and artifacts. Another project's instance treats their capabilities as unknown, and unloading releases only this instance's runs and artifacts.
 
 ## Develop against a local checkout
 

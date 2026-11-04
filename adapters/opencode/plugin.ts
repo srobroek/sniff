@@ -15,7 +15,8 @@ import { analyzerArtifactPage, analyzerPageLimit, analyzerProjection, MAX_MODEL_
 import type { ReportInput } from "../../src/core/report.ts";
 import { readReportArtifact } from "../../src/core/report-artifact-registry.ts";
 import { runSniffReportTool, type SniffReportMode } from "../../src/core/report-use-case.ts";
-import { cancelRunLease, type RunLeaseReceipt, readRunManifest } from "../../src/core/run-registry.ts";
+import { createSniffRunOwner } from "../../src/core/run-owner.ts";
+import { cancelRunLease, type RunLeaseReceipt } from "../../src/core/run-registry.ts";
 import type { TargetRequest } from "../../src/core/target.ts";
 import { sniffToolInputSchemas } from "../../src/core/tool-schemas.ts";
 
@@ -192,15 +193,6 @@ type ReportParams = { readonly capability: string; readonly manifestId: string; 
 type ReportArtifactParams = { readonly readCapability: string; readonly reportId: string; readonly relativePath: string; readonly offset?: number };
 type AnalyzerArtifactParams = { readonly readCapability: string; readonly analyzerResultId: string; readonly relativePath?: string; readonly sourcePath?: string; readonly offset?: number; readonly maxBytes?: number };
 
-function leaseIsLive(capability: string, manifestId: string): boolean {
-  try {
-    readRunManifest(capability, manifestId);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /** The OpenCode V2 plugin: the seven Sniff tools, the Sniff skill, and its two read-only subagents. */
 export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugin {
   return {
@@ -208,9 +200,10 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
     async setup(ctx: Plugin.Context) {
       const base = ctx.location.directory;
       const confirm = ctx.options.confirm !== false;
-      // Leases this instance issued. The core registry is process-wide and shared with every other
-      // location's instance, so unloading releases only these, never every run in the server.
-      const owned = new Map<string, string>();
+      // The OpenCode server serves many projects from one process. This instance's runs and
+      // artifacts belong to its own owner: no other location can see or use them, and unloading
+      // releases only these, never every run in the server.
+      const owner = createSniffRunOwner({ label: `opencode:${base}` });
       // Aborted on unload so in-flight installs, analyzers, and approvals stop with the instance.
       const lifetime = new AbortController();
       let disposed = false;
@@ -246,10 +239,9 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
 
       const adopt = async (lease: RunLeaseReceipt, signal: AbortSignal): Promise<void> => {
         if (disposed || signal.aborted) {
-          await cancelRunLease(lease.capability, lease.manifestId).catch(() => undefined);
+          await cancelRunLease(lease.capability, lease.manifestId, owner).catch(() => undefined);
           throw new Error(disposed ? `${UNLOADED}; the run was released.` : "The Sniff intake was cancelled; the run was released.");
         }
-        owned.set(lease.capability, lease.manifestId);
       };
 
       const intake = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
@@ -262,7 +254,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
         };
         // `interactive: false` only skips the adaptive interview; its plan still needs the same
         // host approval, so a model argument can never stand in for the user.
-        const result = await runSniffIntakeTool({ input: request }, { confirmInteractive: confirmPlan, authority: { authorize: confirmPlan } });
+        const result = await runSniffIntakeTool({ input: request }, { confirmInteractive: confirmPlan, authority: { authorize: confirmPlan }, owner });
         if (result.lease) await adopt(result.lease, signal);
         const publicResult = publicSniffIntakeResult(result);
         return { content: JSON.stringify(publicResult), metadata: { ok: true, leased: publicResult.lease !== undefined } };
@@ -270,8 +262,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
 
       const cancel = async (input: unknown): Promise<ToolResult> => {
         const { capability, manifestId } = input as CancelParams;
-        await cancelRunLease(capability, manifestId);
-        owned.delete(capability);
+        await cancelRunLease(capability, manifestId, owner);
         return { content: "Sniff run cancelled and materialization released.", metadata: { ok: true } };
       };
 
@@ -305,7 +296,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       const analyzer = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
         const signal = begin(context);
         const { capability, manifestId, analyzer: recipe } = input as AnalyzerParams;
-        const result = await runSniffAnalyzer({ capability, manifestId, analyzer: recipe, signal });
+        const result = await runSniffAnalyzer({ capability, manifestId, analyzer: recipe, owner, signal });
         if (!result.ok) throw new Error(bounded(result.report));
         return {
           content: JSON.stringify(analyzerProjection(recipe, result)),
@@ -316,35 +307,30 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       const report = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
         const signal = begin(context);
         const params = input as ReportParams;
-        try {
-          const result = await runSniffReportTool({
-            capability: params.capability,
-            manifestId: params.manifestId,
-            ...(params.mode ? { mode: params.mode } : {}),
-            report: params.report as ReportInput,
-            ...(params.path !== undefined ? { path: anchorPath(params.path, base) } : {}),
-            runtime: {
-              authorizeSave: async (request) => {
-                await approve(context, signal, CONFIRM_ACTIONS.save, [request.directory], saveConfirmationText(request), request.digest);
-                return { acceptedDigest: request.digest, actor: APPROVAL_ACTOR, reason: APPROVAL_REASON };
-              },
+        // Any failure before an artifact is written (validation, output directory, denied approval)
+        // keeps the lease for a corrected retry; only rendered or saved artifacts end it.
+        const result = await runSniffReportTool({
+          capability: params.capability,
+          manifestId: params.manifestId,
+          owner,
+          ...(params.mode ? { mode: params.mode } : {}),
+          report: params.report as ReportInput,
+          ...(params.path !== undefined ? { path: anchorPath(params.path, base) } : {}),
+          runtime: {
+            authorizeSave: async (request) => {
+              await approve(context, signal, CONFIRM_ACTIONS.save, [request.directory], saveConfirmationText(request), request.digest);
+              return { acceptedDigest: request.digest, actor: APPROVAL_ACTOR, reason: APPROVAL_REASON };
             },
-          });
-          const savedPaths = result.publicArtifacts.descriptors.flatMap((descriptor) => (descriptor.savedPath ? [descriptor.savedPath] : []));
-          return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths } };
-        } finally {
-          // Any failure before an artifact is written (validation, output directory, denied approval)
-          // keeps the lease for a corrected retry; only rendered or saved artifacts end it.
-          // Liveness uses the recorded manifest ID: a call with a wrong ID must not drop ownership.
-          const manifestId = owned.get(params.capability);
-          if (manifestId !== undefined && !leaseIsLive(params.capability, manifestId)) owned.delete(params.capability);
-        }
+          },
+        });
+        const savedPaths = result.publicArtifacts.descriptors.flatMap((descriptor) => (descriptor.savedPath ? [descriptor.savedPath] : []));
+        return { content: reportRenderContent(result.publicArtifacts), metadata: { ok: true, reportId: result.publicArtifacts.reportId, savedPaths } };
       };
 
       const reportArtifact = async (input: unknown, context: ToolContext): Promise<ToolResult> => {
         begin(context);
         const { readCapability, ...options } = input as ReportArtifactParams;
-        const { text, page } = reportArtifactPage(readReportArtifact({ ...options, capability: readCapability }));
+        const { text, page } = reportArtifactPage(readReportArtifact({ ...options, capability: readCapability }, undefined, owner));
         return { content: text, metadata: { ok: true, nextOffset: page.nextOffset, eof: page.eof } };
       };
 
@@ -352,7 +338,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
         begin(context);
         const { readCapability, maxBytes, ...options } = input as AnalyzerArtifactParams;
         if ((options.relativePath === undefined) === (options.sourcePath === undefined)) throw new Error("Provide exactly one of relativePath or sourcePath");
-        const { text, page } = analyzerArtifactPage(readAnalyzerArtifact({ ...options, capability: readCapability }), analyzerPageLimit(maxBytes));
+        const { text, page } = analyzerArtifactPage(readAnalyzerArtifact({ ...options, capability: readCapability }, undefined, owner), analyzerPageLimit(maxBytes));
         return { content: text, metadata: { ok: true, nextOffset: page.nextOffset, eof: page.eof } };
       };
 
@@ -360,9 +346,7 @@ export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugi
       const cleanup = async (): Promise<void> => {
         disposed = true;
         lifetime.abort(new Error(UNLOADED));
-        const leases = [...owned];
-        owned.clear();
-        await Promise.allSettled(leases.map(([capability, manifestId]) => cancelRunLease(capability, manifestId)));
+        await owner.dispose(UNLOADED);
         for (const registration of registrations.splice(0).reverse()) await registration.dispose();
       };
 

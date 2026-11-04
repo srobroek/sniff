@@ -29,6 +29,7 @@ import {
 } from "./catalog.ts";
 import { OPENGREP_MAX_OUTPUT_BYTES, type OpenGrepProvisionResult, provisionOpenGrep, resolveOpenGrepExecutable } from "./opengrep.ts";
 import { processAlive, type SpawnedProcess, type StreamIncompleteness, TERMINATION_GRACE_MS, terminateProcess } from "./process-control.ts";
+import type { SniffRunOwner } from "./run-owner.ts";
 import {
   type AnalyzerRunAuthorization,
   abandonAnalyzerReservation,
@@ -1026,6 +1027,8 @@ export type SniffAnalyzerRunOptions = {
 	capability: string;
 	manifestId: string;
 	analyzer: string;
+	/** The owner that issued the capability; omitted, the capability resolves in the unscoped host view. */
+	owner?: SniffRunOwner;
 	runtime?: SniffInstallRuntime;
 	signal?: AbortSignal;
 	/** Test seam for the shared analyzer wall clock. */
@@ -1153,7 +1156,7 @@ function boundedStderrTail(stderr: string): string {
 export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<SniffAnalyzerRunResult> {
 	let authorization: AnalyzerRunAuthorization;
 	try {
-		authorization = authorizeAnalyzerRun(opts.capability, opts.manifestId, opts.analyzer);
+		authorization = authorizeAnalyzerRun(opts.capability, opts.manifestId, opts.analyzer, opts.owner);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		return { ok: false, report: `sniff analyzer authorization blocked: ${message}`, preflight: null, outcome: "not-run" };
@@ -1161,7 +1164,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 	const runtime = opts.runtime ?? DEFAULT_RUNTIME;
 	const abandon = () => {
 		try {
-			abandonAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+			abandonAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId, opts.owner);
 		} catch {
 			// Expiry or cancellation already released the reservation and its resources.
 		}
@@ -1202,7 +1205,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
 		return { ok: false, report: `sniff analyzer preflight blocked ${authorization.recipe.tool}: ${preflight.status}; ${preflight.remediation}`, preflight, acceptedExitCodes, outcome: "not-run" };
 	}
   try {
-    authorization = prepareAnalyzerSpawn(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+    authorization = prepareAnalyzerSpawn(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId, opts.owner);
   } catch (error) {
     abandon();
     const message = error instanceof Error ? error.message : String(error);
@@ -1236,7 +1239,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
     try {
       const result = await runtime.run(argv, authorization.target.root, env, remainingMs, opts.signal, outputLimitBytes, (spawned) => {
         activePid = spawned.pid;
-        registerActiveProcess(opts.capability, opts.manifestId, spawned);
+        registerActiveProcess(opts.capability, opts.manifestId, spawned, opts.owner);
       });
       // Each shard is evaluated and parsed alone so no shard can mask another's exit or truncation.
       batches.push({
@@ -1248,11 +1251,11 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
       launchError = error instanceof Error ? error.message : String(error);
       break;
     } finally {
-      if (activePid !== undefined) unregisterActiveProcess(opts.capability, opts.manifestId, activePid);
+      if (activePid !== undefined) unregisterActiveProcess(opts.capability, opts.manifestId, activePid, opts.owner);
     }
   }
   try {
-    completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId);
+    completeAnalyzerReservation(opts.capability, opts.manifestId, opts.analyzer, authorization.reservationId, opts.owner);
   } catch (error) {
     completionError = error instanceof Error ? error.message : String(error);
   }
@@ -1277,7 +1280,7 @@ export async function runSniffAnalyzer(opts: SniffAnalyzerRunOptions): Promise<S
         ? "incomplete-output"
         : exitCode === 0 && (parsed?.observations.length ?? 0) === 0 ? "completed" : "completed-with-findings";
   const artifacts = accepted && parsed ? createAnalyzerArtifacts(authorization.recipe.id, parsed.observations) : undefined;
-  const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts) : undefined;
+  const readCapability = artifacts ? registerAnalyzerArtifacts(artifacts, undefined, opts.owner) : undefined;
   const descriptorProjection = artifacts ? publicAnalyzerDescriptors(artifacts) : undefined;
   const projection = artifacts ? projectAnalyzerObservations(artifacts.observations) : undefined;
   const historyNote = history && !history.bounded ? " (unbounded history scan)" : history?.approximate ? " (approximate history range: confirmed commit set too large to list)" : "";
