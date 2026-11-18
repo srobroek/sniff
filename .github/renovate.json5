@@ -116,6 +116,27 @@
         "dependencies",
         "major"
       ]
+    },
+    {
+      "description": "@oh-my-pi/* patch updates arrive as one group",
+      "groupName": "omp-patch",
+      "matchPackageNames": [
+        "@oh-my-pi/**"
+      ],
+      "matchUpdateTypes": [
+        "patch"
+      ]
+    },
+    {
+      "description": "OMP minor and major bumps stay manual (compatibility workflows open issues)",
+      "matchPackageNames": [
+        "@oh-my-pi/**"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "major"
+      ],
+      "enabled": false
     }
   ]
 }
