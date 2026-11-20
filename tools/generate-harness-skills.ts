@@ -51,7 +51,23 @@ function rewriteSkillUris(contents: string): string {
 		);
 }
 
+const CHALLENGE_CHAIN =
+	"Send the brief to the first of these that exists: the `refactor-challenger` agent (it ships with the code-challenge plugin), the `adversarial-challenger` agent, or a fresh-context read-only subagent that receives the brief verbatim. For the subagent, record reduced independence in report coverage. Never skip the challenge silently.";
+const BRIEF_INTRO =
+	"Use this to build the step-6 prompt for the challenger. Step 6 of the skill picks the agent.";
+
 function rewritePortableSkillText(contents: string): string {
+	const rewritten = rewritePortableSkillTextUnchecked(contents);
+	// A phrase that drifts from its source would leave agent names in tools that lack them.
+	if (/refactor-challenger|adversarial-challenger/.test(rewritten)) {
+		throw new Error(
+			"Portable skill text still names a challenger agent; update the rewrite phrases in tools/generate-harness-skills.ts.",
+		);
+	}
+	return rewritten;
+}
+
+function rewritePortableSkillTextUnchecked(contents: string): string {
 	return rewriteSkillUris(contents)
 		.replaceAll(/bloodhound/gi, "independent scout")
 		.replaceAll(/a `independent scout`/g, "an independent scout")
@@ -60,12 +76,12 @@ function rewritePortableSkillText(contents: string): string {
 			"For large targets, propose an independent read-only scout plan by language and subtree.",
 		)
 		.replaceAll(
-			"Build the challenge brief from `./references/adversarial-brief.md`. Send it to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`.",
-			"Run an independent read-only challenge pass using `./references/adversarial-brief.md`.",
+			`Build the challenge brief from \`./references/adversarial-brief.md\`. ${CHALLENGE_CHAIN}`,
+			"Run an independent read-only challenge pass using `./references/adversarial-brief.md`. Never skip it silently.",
 		)
 		.replaceAll(
-			"the prompt for the challenger agent: `refactor-challenger` when it is installed (it ships with the code-challenge plugin), otherwise `adversarial-challenger`.",
-			"the prompt for an independent read-only challenge reviewer.",
+			BRIEF_INTRO,
+			"Use this to build the step-6 prompt for an independent read-only challenge reviewer.",
 		);
 }
 
@@ -78,8 +94,8 @@ function rewriteOpenCodeSkillText(contents: string): string {
 			"and include the absolute path of the matching `references/languages/<lang>.md` under this skill's base directory. Launch each `bloodhound` with the `subagent` tool.",
 		)
 		.replaceAll(
-			"Send it to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`. Drop or downgrade refuted findings.",
-			"Send it to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`. Launch it with the `subagent` tool. Drop or downgrade refuted findings.",
+			`${CHALLENGE_CHAIN} Drop or downgrade refuted findings.`,
+			`${CHALLENGE_CHAIN} Launch it with the \`subagent\` tool. Drop or downgrade refuted findings.`,
 		)
 		.replaceAll(
 			"   - Ask only the highest-impact unresolved question.",

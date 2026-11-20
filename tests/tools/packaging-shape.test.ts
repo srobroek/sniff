@@ -463,7 +463,7 @@ test("OMP metadata mounts no MCP server and loads only the OMP skill tree", () =
 	const ompSkill = readFileSync(join(repoRoot, "skills", "sniff", "SKILL.md"), "utf8");
 	expect(ompSkill).toContain("skill://sniff/references/");
 	expect(ompSkill).toContain("`bloodhound`");
-	expect(ompSkill).toContain("`refactor-challenger` agent when it is installed");
+	expect(ompSkill).toContain("the `refactor-challenger` agent (it ships with the code-challenge plugin), the `adversarial-challenger` agent, or a fresh-context read-only subagent");
 	expect(ompSkill).toContain("`adversarial-challenger`");
 });
 

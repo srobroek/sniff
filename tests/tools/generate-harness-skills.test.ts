@@ -115,6 +115,37 @@ test("generated skills preserve the seven-tool workflow and security gates", () 
 	expect(skill).toContain("Pass the capability and manifest ID to `sniff_report`");
 });
 
+test("portable trees describe the challenge pass without naming agents, in the skill and the brief", () => {
+	for (const root of generatedRoots) {
+		for (const file of ["SKILL.md", join("references", "adversarial-brief.md")]) {
+			const text = readFileSync(join(root, file), "utf8");
+			expect(text).not.toMatch(/refactor-challenger|adversarial-challenger/);
+		}
+		const brief = readFileSync(join(root, "references", "adversarial-brief.md"), "utf8");
+		expect(brief).toContain("step-6 prompt for an independent read-only challenge reviewer");
+		expect(readFileSync(join(root, "SKILL.md"), "utf8")).toContain("Never skip it silently.");
+	}
+});
+
+test("generated OpenCode skill names the three-step challenger chain", () => {
+	const skill = readFileSync(join(repoRoot, "dist", "opencode", "skills", "sniff", "SKILL.md"), "utf8");
+	expect(skill).toContain("the `refactor-challenger` agent (it ships with the code-challenge plugin), the `adversarial-challenger` agent, or a fresh-context read-only subagent");
+	expect(skill).toContain("record reduced independence in report coverage");
+	expect(skill).toContain("Never skip the challenge silently.");
+});
+
+test("portable rewrite fails loudly when a challenger phrase drifts from its source", () => {
+	const fixture = createFixture();
+	try {
+		const skillPath = join(fixture, ".skill-source", "sniff", "SKILL.md");
+		const drifted = readFileSync(skillPath, "utf8").replace("Never skip the challenge silently.", "Do not skip it.");
+		writeFileSync(skillPath, drifted);
+		expect(() => generateHarnessSkills({ repoRoot: fixture })).toThrow(/names a challenger agent/);
+	} finally {
+		removeFixture(fixture);
+	}
+});
+
 test("generated Codex trees are OMP-free and byte-identical", () => {
 	const markdown = generatedMarkdown();
 	expect(markdown).not.toMatch(/skill:\/\//);

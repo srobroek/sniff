@@ -42,7 +42,7 @@ To test an unreleased change, pin a branch or commit instead of `main`, for exam
 - The `/sniff` command. It sends its arguments as a prompt with the `sniff` skill attached, for example `/sniff src/auth for maintainability`. With no arguments, it starts the intake for the current project.
 - The read-only `bloodhound` subagent. It scans one language per run and requests the `strong` model-roles tier.
 
-  Sniff no longer ships a challenger agent. The skill sends its challenge brief to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`.
+  Sniff no longer ships a challenger agent. The skill sends its challenge brief to the `refactor-challenger` agent (it ships with the code-challenge plugin) when installed, else to the `adversarial-challenger` agent when installed, else to a fresh-context read-only subagent. That subagent's reduced independence is recorded in the report coverage. The challenge pass is never skipped silently.
 
   The subagent denies every action first. It then allows reads, search, shell diagnostics, the web, and this plugin's skill files. Without the model-roles plugin they inherit the session model. To pin a model, set `agents.bloodhound.model`.
 
