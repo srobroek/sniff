@@ -1,6 +1,6 @@
 # Challenge Brief Template
 
-Use this to build the step-6 prompt for `refactor-challenger`.
+Use this to build the step-6 prompt for the challenger. Step 6 of the skill picks the agent.
 The challenger's whole value comes from **isolation**: give it the findings and
 the observable evidence, but NOT your reasoning, your preferred plan, or your
 confidence. Let it reach its own verdict so it does not inherit your blind spots.

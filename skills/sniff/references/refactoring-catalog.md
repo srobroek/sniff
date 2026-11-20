@@ -216,7 +216,7 @@ Example:
 Cross-check every mapping against the language doc's idioms -- the language-correct
 fix sometimes differs from the generic OO catalog (e.g. Go favors a small
 function and early returns over polymorphism; Rust favors enums + `match` over a
-State pattern). The `refactor-challenger` will attack mismatches.
+State pattern). The challenger will attack mismatches.
 
 Note: this catalog is the *refactoring* taxonomy (smells + techniques). The
 *design-pattern* catalog (`/design-patterns/...`) is a separate refactoring.guru

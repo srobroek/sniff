@@ -5,7 +5,6 @@ import type { PermissionEvaluation } from "@opencode/plugin/promise/permission";
 import type { Registration } from "@opencode/plugin/promise/registration";
 import type { ToolContext } from "@opencode/plugin/promise/tool";
 import bloodhoundSource from "../../agents/bloodhound.md" with { type: "text" };
-import refactorChallengerSource from "../../agents/refactor-challenger.md" with { type: "text" };
 import { readAnalyzerArtifact } from "../../src/core/analyzer-artifact-registry.ts";
 import { installConfirmationText, intakeConfirmationText, saveConfirmationText } from "../../src/core/confirmation-text.ts";
 import { runSniffAnalyzer, runSniffInstall, type SniffInstallMode, type SniffInstallResult, sniffInstallAuthorizationRequest } from "../../src/core/install.ts";
@@ -144,7 +143,6 @@ export function parseAgentSource(id: string, tier: string, source: string): Agen
 
 export const SNIFF_AGENTS: readonly AgentDefinition[] = [
   parseAgentSource("bloodhound", "strong", bloodhoundSource),
-  parseAgentSource("refactor-challenger", "reviewer", refactorChallengerSource),
 ];
 
 type PermissionRule = { readonly action: string; readonly resource: string; readonly effect: "allow" | "ask" | "deny" };
@@ -224,7 +222,7 @@ type ReportParams = { readonly capability: string; readonly manifestId: string; 
 type ReportArtifactParams = { readonly readCapability: string; readonly reportId: string; readonly relativePath: string; readonly offset?: number };
 type AnalyzerArtifactParams = { readonly readCapability: string; readonly analyzerResultId: string; readonly relativePath?: string; readonly sourcePath?: string; readonly offset?: number; readonly maxBytes?: number };
 
-/** The OpenCode V2 plugin: the seven Sniff tools, the Sniff skill, and its two read-only subagents. */
+/** The OpenCode V2 plugin: the seven Sniff tools, the Sniff skill, and its read-only bloodhound subagent. */
 export function sniffOpenCodePlugin(options: SniffOpenCodeOptions): Plugin.Plugin {
   return {
     id: SNIFF_PLUGIN_ID,

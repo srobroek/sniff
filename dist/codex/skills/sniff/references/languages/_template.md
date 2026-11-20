@@ -66,7 +66,7 @@ the generic catalog.
 ## Pragmatism notes (for the adversarial pass)
 
 Where "fixes" commonly over-reach in this language -- the false positives and
-non-idiomatic-but-fine patterns the `independent challenge reviewer` should protect.
+non-idiomatic-but-fine patterns the challenger should protect.
 
 - ...
 

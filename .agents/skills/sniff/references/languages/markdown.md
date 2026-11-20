@@ -81,7 +81,7 @@ explaining things.
 
 ## Pragmatism notes (for the adversarial pass)
 
-Where "fixes" over-reach in Markdown -- false positives the `independent challenge reviewer`
+Where "fixes" over-reach in Markdown -- false positives the challenger
 should protect.
 
 - Line-length limits are **project-dependent**. Do not flag long lines unless the
