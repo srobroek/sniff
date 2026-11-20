@@ -40,11 +40,11 @@ To test an unreleased change, pin a branch or commit instead of `main`, for exam
 - The seven Sniff tools: `sniff_intake`, `sniff_install_tools`, `sniff_run_analyzer`, `sniff_report`, `sniff_read_report_artifact`, `sniff_read_analyzer_artifact`, and `sniff_cancel`. They use OpenCode's default Code Mode, so the model calls them as `tools.sniff_intake(...)` inside `execute`.
 - The `sniff` skill. A skill with the same ID that you define yourself takes precedence.
 - The `/sniff` command. It sends its arguments as a prompt with the `sniff` skill attached, for example `/sniff src/auth for maintainability`. With no arguments, it starts the intake for the current project.
-- Two read-only subagents:
-  - `bloodhound` scans one language per run. It requests the `strong` model-roles tier.
-  - `refactor-challenger` attacks the findings before the report. It requests the `reviewer` tier.
+- The read-only `bloodhound` subagent. It scans one language per run and requests the `strong` model-roles tier.
 
-  Both subagents deny every action first. They then allow reads, search, shell diagnostics, the web, and this plugin's skill files. Without the model-roles plugin they inherit the session model. To pin a model, set `agents.bloodhound.model` or `agents.refactor-challenger.model`.
+  Sniff no longer ships a challenger agent. The skill sends its challenge brief to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`.
+
+  The subagent denies every action first. It then allows reads, search, shell diagnostics, the web, and this plugin's skill files. Without the model-roles plugin they inherit the session model. To pin a model, set `agents.bloodhound.model`.
 
 Run `/sniff` with a target and goal, for example `/sniff src/auth for maintainability`, or ask in plain language, for example `Use sniff to find code smells in src/auth.` The skill drives the interview, analyzers, challenge pass, and report.
 

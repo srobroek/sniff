@@ -38,7 +38,7 @@ The intake response issues a capability and manifest ID for one lease-backed mat
 5. Map findings.
    - Use `./references/refactoring-catalog.md` and attach the complete catalog entry.
 6. Challenge findings.
-   - Build the `independent challenge reviewer` brief from `./references/adversarial-brief.md` and drop or downgrade refuted findings.
+   - Run an independent read-only challenge pass using `./references/adversarial-brief.md`. Drop or downgrade refuted findings.
 7. Report or apply.
    - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
    - Pass the capability and manifest ID to `sniff_report`; omit `extensions["sniff.intake"]` so the host injects the authenticated manifest.

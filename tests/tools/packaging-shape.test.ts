@@ -463,7 +463,8 @@ test("OMP metadata mounts no MCP server and loads only the OMP skill tree", () =
 	const ompSkill = readFileSync(join(repoRoot, "skills", "sniff", "SKILL.md"), "utf8");
 	expect(ompSkill).toContain("skill://sniff/references/");
 	expect(ompSkill).toContain("`bloodhound`");
-	expect(ompSkill).toContain("`refactor-challenger`");
+	expect(ompSkill).toContain("`refactor-challenger` agent when it is installed");
+	expect(ompSkill).toContain("`adversarial-challenger`");
 });
 
 test("Codex package uses the Agent Plugins 1.0 manifest and fixed paths", () => {
@@ -566,7 +567,7 @@ test("Copied OpenCode package loads its bundle, skill, and subagents from the ca
 		const skill = host.skills.get("sniff");
 		expect(skill?.path).toBe(join(pluginRoot, "skills", "sniff", "SKILL.md"));
 		assertContained(pluginRoot, String(skill?.path));
-		expect([...host.agents.keys()].sort()).toEqual(["bloodhound", "refactor-challenger"]);
+		expect([...host.agents.keys()].sort()).toEqual(["bloodhound"]);
 
 		const listed = await host.tools.get("sniff_install_tools")?.execute({ mode: "list" }, toolContext());
 		expect(String(listed?.content)).toContain("[core]");

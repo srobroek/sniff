@@ -118,7 +118,7 @@ test("generated skills preserve the seven-tool workflow and security gates", () 
 test("generated Codex trees are OMP-free and byte-identical", () => {
 	const markdown = generatedMarkdown();
 	expect(markdown).not.toMatch(/skill:\/\//);
-	expect(markdown).not.toMatch(/\b(?:bloodhound|refactor-challenger|TTSR)\b/i);
+	expect(markdown).not.toMatch(/\b(?:bloodhound|refactor-challenger|adversarial-challenger|TTSR)\b/i);
 
 	const paths = filesUnder(generatedRoots[1]);
 	expect(paths).toEqual(filesUnder(generatedRoots[2]));
@@ -140,7 +140,7 @@ test("generated OpenCode tree keeps its subagents and names the OpenCode mechani
 	const skill = readFileSync(join(openCodeRoot, "SKILL.md"), "utf8");
 	expect(skill).not.toMatch(/skill:\/\//);
 	expect(skill).toContain("Launch each `bloodhound` with the `subagent` tool.");
-	expect(skill).toContain("launch it with the `subagent` tool");
+	expect(skill).toContain("Launch it with the `subagent` tool.");
 	expect(skill).toContain("absolute path of the matching `references/languages/<lang>.md`");
 	expect(skill).toContain("with the `question` tool");
 	expect(skill).toContain("OpenCode shows as a permission prompt");

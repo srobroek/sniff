@@ -149,22 +149,25 @@ describe("registration", () => {
     await seeded.cleanup();
   });
 
-  test("registers read-only subagents on model-roles tiers and keeps a user's own fields", async () => {
-    const { host, cleanup } = await load(project(), {}, { agents: { "refactor-challenger": { id: "refactor-challenger", model: "pinned/model", description: "Mine", mode: "all", request: { headers: {} }, permissions: [] } } });
+  test("registers a read-only bloodhound subagent by default", async () => {
+    const { host, cleanup } = await load(project(), {});
     const bloodhound = host.agents.get("bloodhound") as AgentRecord;
     expect(bloodhound.mode).toBe("subagent");
-    expect(bloodhound.request.headers["x-opencode-model-role"]).toBe("strong");
     expect(String(bloodhound.description)).toContain("code-smell detector");
+    await cleanup();
+  });
+
+  test("applies the model-roles tier, denies edits, and keeps a user's own fields", async () => {
+    const { host, cleanup } = await load(project(), {}, { agents: { bloodhound: { id: "bloodhound", model: "pinned/model", description: "Mine", mode: "all", request: { headers: {} }, permissions: [] } } });
+    const bloodhound = host.agents.get("bloodhound") as AgentRecord;
+    expect(bloodhound.model).toBe("pinned/model");
+    expect(bloodhound.description).toBe("Mine");
+    expect(bloodhound.mode).toBe("all");
+    expect(bloodhound.request.headers["x-opencode-model-role"]).toBe("strong");
     expect(String(bloodhound.system)).toStartWith("You are **bloodhound**");
     expect(bloodhound.permissions[0]).toEqual({ action: "*", resource: "*", effect: "deny" });
     expect(bloodhound.permissions).toContainEqual({ action: "external_directory", resource: `${dirname(skillPath)}/*`, effect: "allow" });
     expect(bloodhound.permissions.some((rule) => rule.action === "edit" && rule.effect !== "deny")).toBe(false);
-
-    const challenger = host.agents.get("refactor-challenger") as AgentRecord;
-    expect(challenger.model).toBe("pinned/model");
-    expect(challenger.description).toBe("Mine");
-    expect(challenger.mode).toBe("all");
-    expect(challenger.request.headers["x-opencode-model-role"]).toBe("reviewer");
     await cleanup();
   });
 });

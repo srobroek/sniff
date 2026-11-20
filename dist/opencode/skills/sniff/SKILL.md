@@ -38,7 +38,7 @@ The intake response issues a capability and manifest ID for one lease-backed mat
 5. Map findings.
    - Use `./references/refactoring-catalog.md` and attach the complete catalog entry.
 6. Challenge findings.
-   - Build the `refactor-challenger` brief from `./references/adversarial-brief.md`, launch it with the `subagent` tool, and drop or downgrade refuted findings.
+   - Build the challenge brief from `./references/adversarial-brief.md`. Send it to the `refactor-challenger` agent when it is installed (it ships with the code-challenge plugin), otherwise to `adversarial-challenger`. Launch it with the `subagent` tool. Drop or downgrade refuted findings.
 7. Report or apply.
    - Copy `reportTarget` from `sniff_intake` into `report.target`, then add `languages`.
    - Pass the capability and manifest ID to `sniff_report`; omit `extensions["sniff.intake"]` so the host injects the authenticated manifest.

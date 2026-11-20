@@ -105,7 +105,7 @@ in the third column. Cite the smell URL, then the Rust-correct refactoring.
 
 ## Pragmatism notes (for the adversarial pass)
 
-Where "fixes" over-reach in Rust -- the `refactor-challenger` should protect:
+Where "fixes" over-reach in Rust -- the challenger should protect:
 
 - A trait with a single impl is fine; don't demand a second impl just to justify abstraction. Premature trait extraction is the more common real smell.
 - `.clone()` in a non-hot path (setup, config load, error path, tests) is fine -- readability beats a borrow-checker puzzle. Only flag clones in measured hot loops.

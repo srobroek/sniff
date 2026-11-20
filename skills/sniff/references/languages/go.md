@@ -85,7 +85,7 @@ the idiomatic fix is in the third column. Cite the smell URL, then the Go fix.
 
 ## Pragmatism notes (for the adversarial pass)
 
-Where "fixes" over-reach in Go -- the `refactor-challenger` should protect:
+Where "fixes" over-reach in Go -- the challenger should protect:
 
 - Go intentionally avoids deep abstraction. Do **not** recommend Java-style patterns (abstract base classes, deep interface hierarchies, factories-of-factories). "Clear is better than clever."
 - Small interfaces beat big ones -- flagging a project for "not enough abstraction" or "should extract an interface" when there's a single concrete type is usually wrong; premature interfaces are the real smell.
