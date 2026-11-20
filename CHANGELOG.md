@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/srobroek/sniff/compare/sniff-v0.4.0...sniff-v0.5.0) (2026-11-20)
+
+
+### ⚠ BREAKING CHANGES
+
+* **opencode:** the OpenCode plugin no longer registers `refactor-challenger`. Install the code-challenge plugin to get it back.
+
+### Features
+
+* **opencode:** stop shipping the refactor-challenger agent ([#59](https://github.com/srobroek/sniff/issues/59)) ([13964ea](https://github.com/srobroek/sniff/commit/13964ea3dc6f5508ed2a5d142d20c1849f691822))
+
 ## [0.4.0](https://github.com/srobroek/sniff/compare/sniff-v0.3.2...sniff-v0.4.0) (2026-11-04)
 
 
