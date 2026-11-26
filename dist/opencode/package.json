@@ -1,6 +1,6 @@
 {
   "name": "@srobroek/opencode-sniff",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Sniff code-smell audits for OpenCode: seven tools, the sniff skill, and the bloodhound subagent.",
   "private": true,
   "type": "module",
